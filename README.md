@@ -371,15 +371,36 @@ sequenceDiagram
 
 </div>
 
-### 방법 1 — 마켓플레이스 (간단)
+### 방법 1 — Claude에게 자연어로 부탁 (가장 자연스러움)
+
+Claude Code 터미널에서 평소처럼 말 걸면 됩니다. 메인 에이전트가 슬래시 명령 절차를 안내해 줍니다.
 
 ```text
-/plugin install Technoetic/harness107
+harness107 플러그인을 깔아줘. Technoetic/harness107 레포에 있어.
 ```
 
-### 방법 2 — 로컬 경로 (개발 / 커스터마이즈)
+Claude가 다음 2단계를 차례로 안내합니다 (사용자가 직접 입력):
 
-`~/.claude/settings.json` 또는 프로젝트 `.claude/settings.local.json`:
+```text
+/plugin marketplace add Technoetic/harness107
+/plugin install harness107@harness107
+```
+
+> [!IMPORTANT]
+> `/plugin` 슬래시 명령은 **사용자가 직접 입력**해야 적용됩니다. Claude가 Bash 도구로 대신 실행할 수 없습니다 (보안 제약). Claude는 명령 텍스트를 안내만 합니다.
+
+### 방법 2 — 슬래시 명령 직접 입력 (이미 익숙한 사용자)
+
+마켓플레이스 등록 → 설치 2단계:
+
+```text
+/plugin marketplace add Technoetic/harness107
+/plugin install harness107@harness107
+```
+
+### 방법 3 — 로컬 경로 (개발 / 커스터마이즈)
+
+레포를 clone한 뒤 `~/.claude/settings.json` 또는 프로젝트 `.claude/settings.local.json`에 경로 등록:
 
 ```jsonc
 {
@@ -389,6 +410,12 @@ sequenceDiagram
     }
   }
 }
+```
+
+또는 CLI 진입 시 플래그로 1회 로드:
+
+```bash
+claude --plugin-dir ./path/to/harness107
 ```
 
 ### 프로젝트 의존성 (1회)
