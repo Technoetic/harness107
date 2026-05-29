@@ -4,7 +4,7 @@
 
 ### 한 줄 요청 → 107 step 자율주행 → 인터랙티브 웹 튜토리얼 1편
 
-**"순시부호 튜토리얼 만들어"** 한 줄을 던지면 컨텍스트 한계 직전까지 멈추지 않는 결정론적 절차가 가동된다.<br/>
+**"논문 트렌드 분석 대시보드 만들어"** 한 줄을 던지면 컨텍스트 한계 직전까지 멈추지 않는 결정론적 절차가 가동된다.<br/>
 모델을 똑똑하게 만드는 대신 **모델이 놓을 트랙을 좁힌다**.
 
 <br/>
@@ -32,7 +32,7 @@
 </div>
 
 ```text
-사용자 →  /webapp 다익스트라 알고리즘
+사용자 →  /webapp 논문 트렌드 분석 대시보드
                         ↓
    webapp-trigger.hook  TOPIC.md 자동 작성 + step001~107 부트스트랩
                         ↓
@@ -66,11 +66,11 @@
 
 | 입력 | 산출 |
 |:---|:---|
-| `/webapp 순시부호` | prefix code · Kraft 부등식 · Huffman 트리 인터랙티브 위젯 4종 |
-| `/webapp 다익스트라 알고리즘` | 그리드 위 노드 드래그 + 우선순위 큐 시각화 + step trace |
-| `/webapp OAuth 2.0 인증 흐름` | Authorization Code Flow 시퀀스 다이어그램 + 토큰 라이프사이클 게임 |
-| `/webapp B-tree 인덱스` | 차수 조절 슬라이더 + insert/delete 애니메이션 + 분할 시각화 |
-| 자연어 `"... 튜토리얼 만들어줘"` | 위 셋과 동일. 패턴 매칭 7종 모두 지원 |
+| `/webapp 논문 트렌드 분석 대시보드` | 분야별 발표량 stacked area + 키워드 폭증 막대 + 연도 슬라이더 + 핫토픽 카드 |
+| `/webapp 논문 인용 네트워크` | force-directed 인용 관계망 + 시간축 애니메이션 + 검색·필터 + 영향력 노드 강조 |
+| `/webapp 저자 연구 활동 대시보드` | h-index·인용 추이 KPI + 공저자 네트워크 + 키워드 워드클라우드 + 연도별 라인 |
+| `/webapp Literature Review 대시보드` | 논문 분류 매트릭스 + 갭 분석 다이어그램 + 읽기 큐 카드 + 태그 클라우드 |
+| 자연어 `"... 대시보드 만들어줘"` | 위 넷과 동일. 트리거 패턴 7종 모두 지원 |
 
 산출물 = **단일 HTML 파일** (Helvetica Neue / 8 배수 grid / accent 1색 / radius {0,4,8,12,16} / 터치 44pt / ARIA 필수).
 
@@ -85,7 +85,7 @@
 ```mermaid
 flowchart TB
     subgraph user["👤 사용자"]
-        P["/webapp 다익스트라"]
+        P["/webapp 논문 트렌드 분석 대시보드"]
     end
 
     subgraph hooks["🪝 hooks (6 이벤트)"]
@@ -323,7 +323,7 @@ sequenceDiagram
     participant Stop as 🪝 step-auto-continue
     participant Progress as 💾 progress.json
 
-    User->>LLM: /webapp 다익스트라
+    User->>LLM: /webapp 논문 트렌드 분석 대시보드
     LLM->>LLM: step001 실행
     LLM->>Progress: completed += 1
     LLM->>LLM: step002 실행
@@ -398,29 +398,27 @@ npx playwright install chromium
 ### 자율주행 시작
 
 ```text
-/webapp 다익스트라 최단경로 알고리즘
+/webapp 논문 트렌드 분석 대시보드
 ```
 
 또는 자연어:
 
 ```text
-다익스트라 알고리즘 튜토리얼을 만들어줘
+논문 분야별 트렌드를 보여주는 대시보드를 만들어줘
 ```
 
-또는 7줄 템플릿 (가장 정밀 매칭):
+또는 요구사항을 한 번에 못박고 싶을 때 — 트리거 매칭 신뢰도가 가장 높습니다:
 
 ```text
-다익스트라
+주제: 논문 트렌드 분석 대시보드
 
-"다익스트라 최단경로" 튜토리얼을 생성한다.
-인터랙티브는 필수다.
-웹으로,
-초보자 학습용으로,
-대중 앱 사례를 참고,
-직관적으로 이해할 수 있게
-생성한다.
+연구자가 한눈에 분야별 흐름을 짚을 수 있는
+인터랙티브 대시보드를 한 편 만들어줘.
 
-@step_archive/archived/step001.md 절대 복종한다.
+- 연도별 분야 발표량을 stacked area 차트로 시각화
+- 키워드 폭증 추이와 핫토픽을 카드로 강조
+- 연도 슬라이더 · 카테고리 토글 · 키워드 클릭으로 즉시 필터
+- 한 페이지 단일 HTML로 완결
 ```
 
 ### 진행 상태 확인
