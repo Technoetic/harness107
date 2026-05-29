@@ -21,6 +21,10 @@
 [![Dual Shell](https://img.shields.io/badge/Dual_Shell-PS1_+_SH-7C3AED?style=for-the-badge&logo=powershell&logoColor=white)](hooks/)
 [![Style](https://img.shields.io/badge/style-no_questions-FF1493?style=for-the-badge)](skills/harness-rules/SKILL.md)
 
+<br/>
+
+<img src="docs/screenshots/hero-cast.svg" width="90%" alt="harness107 자율주행 데모 — /webapp 한 줄 입력으로 step001~107이 자동 진행되는 터미널 시뮬레이션"/>
+
 </div>
 
 ---
@@ -180,6 +184,12 @@ flowchart LR
     style Block3 fill:#1a1a2e,color:#FF6B6B
 ```
 
+<br/>
+
+<div align="center">
+<img src="docs/screenshots/safety-grid.svg" width="90%" alt="9회차 감사로 누적된 153셀 회귀 매트릭스 잔디 시각화 — 회차별 안전 패턴이 점진적으로 채워지는 애니메이션"/>
+</div>
+
 <details>
 <summary><b>📊 9회차 감사 누적 보강 — 클릭하여 펼치기</b></summary>
 
@@ -314,6 +324,12 @@ harness107/
 </div>
 
 이 한 줄이 **컨텍스트 한계 직전까지 멈추지 않는 자율 실행**의 핵심이다.
+
+<div align="center">
+<img src="docs/screenshots/stop-hook-magic.svg" width="90%" alt="Stop hook이 progress.json을 읽고 block JSON을 반환해 다음 step을 자동 재개하는 메커니즘 시각화"/>
+</div>
+
+<br/>
 
 ```mermaid
 sequenceDiagram

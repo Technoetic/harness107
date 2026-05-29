@@ -1,0 +1,125 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 420" font-family="ui-monospace, 'JetBrains Mono', 'Consolas', monospace" font-size="13">
+  <defs>
+    <linearGradient id="bg2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a1b26"/>
+      <stop offset="1" stop-color="#16161e"/>
+    </linearGradient>
+    <filter id="redglow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="3" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="900" height="420" rx="12" fill="url(#bg2)"/>
+  <rect width="900" height="32" rx="12" fill="#24283b"/>
+  <rect y="22" width="900" height="10" fill="#24283b"/>
+  <text x="450" y="20" text-anchor="middle" fill="#565f89" font-size="11">Stop hook → block JSON → auto-resume</text>
+
+  <line x1="450" y1="50" x2="450" y2="410" stroke="#414868" stroke-dasharray="4 4"/>
+  <text x="225" y="62" text-anchor="middle" fill="#7aa2f7" font-size="11" font-weight="bold">TERMINAL (main session)</text>
+  <text x="675" y="62" text-anchor="middle" fill="#bb9af7" font-size="11" font-weight="bold">progress.json (live)</text>
+
+  <text x="20" y="92" fill="#c0caf5">→ Step 037/107 실행</text>
+  <text x="20" y="112" fill="#9ece6a">✓ Step 037/107 완료</text>
+  <text x="20" y="132" fill="#565f89" font-style="italic">… 모델이 자연 종료 시도 …</text>
+
+  <text x="470" y="92" fill="#565f89">{</text>
+  <text x="485" y="112" fill="#7dcfff">"current_step"</text>
+  <text x="595" y="112" fill="#c0caf5">: </text>
+  <text x="608" y="112" fill="#e0af68">37</text>
+  <text x="485" y="132" fill="#7dcfff">"completed_steps"</text>
+  <text x="618" y="132" fill="#c0caf5">: [1, 2, …, 37]</text>
+  <text x="485" y="152" fill="#7dcfff">"total_steps"</text>
+  <text x="586" y="152" fill="#c0caf5">: </text>
+  <text x="599" y="152" fill="#e0af68">107</text>
+  <text x="470" y="172" fill="#565f89">}</text>
+
+  <rect x="14" y="162" width="420" height="60" rx="6" fill="#3d1b2a" stroke="#f7768e" stroke-width="1.5" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.20;0.24;0.48;0.50" dur="10s" repeatCount="indefinite"/>
+  </rect>
+  <text x="20" y="182" fill="#f7768e" font-weight="bold" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.20;0.24;0.48;0.50" dur="10s" repeatCount="indefinite"/>
+    ⚡ Stop hook fires
+  </text>
+  <text x="20" y="202" fill="#c0caf5" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1;0" keyTimes="0;0.20;0.24;0.48;0.50" dur="10s" repeatCount="indefinite"/>
+    step-auto-continue.ps1 reads progress.json
+  </text>
+
+  <text x="20" y="246" fill="#bb9af7" font-weight="bold" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.34;0.38;1" dur="10s" repeatCount="indefinite"/>
+    stdout:
+  </text>
+  <text x="20" y="266" fill="#e0af68" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.34;0.38;1" dur="10s" repeatCount="indefinite"/>
+    {"decision":"block",
+  </text>
+  <text x="20" y="284" fill="#e0af68" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.34;0.38;1" dur="10s" repeatCount="indefinite"/>
+     "reason":"step038부터 즉시 실행"}
+  </text>
+
+  <rect x="14" y="226" width="420" height="80" rx="6" fill="none" stroke="#bb9af7" stroke-width="1.5" filter="url(#redglow)" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;0.5;1;0.5;1" keyTimes="0;0.34;0.40;0.45;0.50;0.55;0.60" dur="10s" repeatCount="indefinite"/>
+  </rect>
+
+  <text x="20" y="338" fill="#7aa2f7" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.62;0.66;1" dur="10s" repeatCount="indefinite"/>
+    ↻ Auto-resumed by Stop hook
+  </text>
+  <text x="20" y="358" fill="#c0caf5" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.68;0.72;1" dur="10s" repeatCount="indefinite"/>
+    → Step 038/107 실행
+  </text>
+  <text x="20" y="378" fill="#9ece6a" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.78;0.82;1" dur="10s" repeatCount="indefinite"/>
+    ✓ Step 038/107 완료
+  </text>
+  <text x="20" y="398" fill="#565f89" font-style="italic" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.84;0.88;1" dur="10s" repeatCount="indefinite"/>
+    사용자 개입 없이 다음 step 자동 진입
+  </text>
+
+  <text x="470" y="216" fill="#565f89" font-style="italic" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.40;0.44;0.62;0.66;1" dur="10s" repeatCount="indefinite"/>
+    completed_steps == 37 &lt; 107
+  </text>
+  <text x="470" y="236" fill="#f7768e" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.40;0.44;0.62;0.66;1" dur="10s" repeatCount="indefinite"/>
+    ↳ block (must continue)
+  </text>
+
+  <text x="470" y="282" fill="#565f89" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.78;0.82;1" dur="10s" repeatCount="indefinite"/>
+    {
+  </text>
+  <text x="485" y="302" fill="#7dcfff" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.78;0.82;1" dur="10s" repeatCount="indefinite"/>
+    "current_step"
+  </text>
+  <text x="595" y="302" fill="#c0caf5" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.78;0.82;1" dur="10s" repeatCount="indefinite"/>
+    :
+  </text>
+  <text x="608" y="302" fill="#9ece6a" font-weight="bold" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.78;0.82;1" dur="10s" repeatCount="indefinite"/>
+    38
+  </text>
+  <text x="485" y="322" fill="#7dcfff" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.78;0.82;1" dur="10s" repeatCount="indefinite"/>
+    "completed_steps"
+  </text>
+  <text x="618" y="322" fill="#c0caf5" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.78;0.82;1" dur="10s" repeatCount="indefinite"/>
+    : [1, …, 38]
+  </text>
+  <text x="470" y="342" fill="#565f89" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.78;0.82;1" dur="10s" repeatCount="indefinite"/>
+    }
+  </text>
+
+  <text x="675" y="395" text-anchor="middle" fill="#565f89" font-size="11" font-style="italic" opacity="0">
+    <animate attributeName="opacity" values="0;0;1;1" keyTimes="0;0.86;0.90;1" dur="10s" repeatCount="indefinite"/>
+    completed == 107 도달까지 반복
+  </text>
+</svg>
