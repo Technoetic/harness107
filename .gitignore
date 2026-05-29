@@ -1,0 +1,17 @@
+# hook 런타임 산출물 (사용자 환경 데이터)
+hooks/*.log
+hooks/*.state
+hooks/*.beacon
+hooks/*.tmp.*
+
+# 사용자 작업 디렉토리
+step_archive/
+node_modules/
+coverage/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp

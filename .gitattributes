@@ -1,0 +1,9 @@
+# Shell scripts: LF only (CRLF breaks bash execution on macOS/Linux)
+*.sh text eol=lf
+
+# PowerShell: native EOL (CRLF on Windows is fine)
+*.ps1 text
+
+# JSON / markdown: LF for cross-platform stability
+*.json text eol=lf
+*.md text eol=lf
