@@ -26,7 +26,7 @@ persistence: session
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .claude/hooks/html-bundler.ps1
-```text
+```
 
 **번들러 역할:**
 - `src/js/*.js` → `<script>` 인라인 (export/import 자동 제거)
@@ -38,8 +38,8 @@ powershell -ExecutionPolicy Bypass -File .claude/hooks/html-bundler.ps1
 **빌드 검증 단계에서 절대로 superpowers:brainstorming을 사용하지 않는다.**
 
 **검증:**
-- `.claude/hooks/build-validator.ps1`에서 자동 검증
-- HTML 프로젝트는 `dist/index.html` 존재 여부로 검증
+- `dist/index.html` 존재 + 비어있지 않음 직접 확인 (구 build-validator.ps1은 retired — 2026-06-10 M07 정정)
+- 재생성 필요 시 `.claude/hooks/html-bundler.ps1` 재실행
 
 **검증 실패 시:**
 - 빌드 에러 분석

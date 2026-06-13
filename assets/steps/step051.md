@@ -27,7 +27,7 @@ Step 50에서 테스트를 작성한 에이전트가 스스로 "충분하다"고
 
 ```bash
 npx c8 --check-coverage --lines 80 --branches 70 --functions 80 vitest run
-```text
+```
 
 ### 2단계: 검증 에이전트 (에이전트 B) 실행
 
@@ -35,7 +35,7 @@ npx c8 --check-coverage --lines 80 --branches 70 --functions 80 vitest run
 
 에이전트 B에게 전달할 프롬프트 (N = 현재 라운드 번호):
 
-```text
+```
 너는 테스트 품질 검증자다. 테스트 코드를 수정하지 않는다. 품질 판정만 한다.
 
 1. 테스트 실행 결과(커버리지 리포트)를 확인한다.
@@ -56,7 +56,7 @@ npx c8 --check-coverage --lines 80 --branches 70 --functions 80 vitest run
 5. 결과를 `step_archive/outputs/step051_검증_rN.md`에 저장한다.
    - 테스트 품질 충분하면: "PASS"로 시작
    - 부족하면: "FAIL"로 시작하고 누락된 테스트 케이스 구체적 나열
-```text
+```
 
 에이전트 B는 haiku를 사용한다.
 
@@ -69,14 +69,14 @@ npx c8 --check-coverage --lines 80 --branches 70 --functions 80 vitest run
 
 **에이전트 A의 역할: 검증 피드백 기반으로 누락 테스트 추가만 수행. 통과 판정 금지.**
 
-```text
+```
 너는 테스트 보완자다. 통과 여부를 판정하지 않는다. 누락된 테스트를 추가만 한다.
 
 1. 최신 검증 피드백을 Read한다:
    - `step_archive/outputs/step051_검증_rN.md`
 2. 피드백에 나열된 누락 테스트를 추가한다.
 3. 보완 내역을 `step_archive/outputs/step051_보완_rN.md`에 기록한다.
-```text
+```
 
 에이전트 A는 haiku를 사용한다.
 
@@ -105,9 +105,9 @@ npx c8 --check-coverage --lines 80 --branches 70 --functions 80 vitest run
 
 **테스트 결과는 청크 단위로 저장한다:**
 
-```text
+```
 step051_테스트결과_chunk1.md (500줄 이하)
-```text
+```
 
 서브에이전트는 항상 haiku를 사용한다.
 

@@ -27,7 +27,7 @@ E2E 테스트 최적화 후 Lighthouse CI를 실행하여 테스트 최적화가
 
 ```bash
 npx lhci autorun --collect.url=http://localhost:PORT
-```text
+```
 
 Step 82 베이스라인 대비 성능 점수가 하락하지 않았는지 확인한다.
 

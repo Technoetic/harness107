@@ -198,7 +198,7 @@ CSS transition 도중의 색상은 시작/종료 상태만 검증한다:
 합리적인 선에서 최대한 많은 서브에이전트를 병렬로 사용한다 (동시 실행 최대 10개).
 
 **검증:**
-- `.claude/hooks/accessibility-validator.ps1`에서 자동 검증
+- `.claude/hooks/axe-core-validator.ps1` 수동 실행으로 검증 (구 accessibility-validator.ps1은 retired — 2026-06-10 M07 정정)
 
 **검증 실패 시:**
 - 위반 사항 분석

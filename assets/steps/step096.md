@@ -32,7 +32,7 @@ persistence: session
 
 ```bash
 npx lhci autorun --collect.url=http://localhost:PORT --collect.numberOfRuns=3
-```text
+```
 
 **임계치 기준 (lighthouserc.js assertions):**
 - Performance 점수 ≥ 90

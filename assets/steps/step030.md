@@ -24,7 +24,9 @@ Skill(skill="superpowers:brainstorming")
 ```
 
 이 호출 전에는 Write/Edit/Bash/Task 등 어떤 도구도 사용 금지.
-`.claude/hooks/brainstorming-gate.ps1`이 자동으로 차단하며, 호출 확인 시 `step_archive/.brainstorming-fired-030` 플래그를 생성해 이후 통과시킨다.
+(이 규칙은 CLAUDE.md "step030 brainstorming 처리" 절대 규칙으로 강제된다 —
+구버전이 주장하던 brainstorming-gate.ps1 자동 차단은 해당 훅이 retired/미바인딩이라
+실재하지 않았음. 2026-06-10 하네스 감사 M07 정정.)
 
 ## Step-Back
 
@@ -108,20 +110,20 @@ step025 기획 결과를 기반으로 레이아웃 설계와 전체 설계를 su
 
 **설계 결과는 청크 단위로 저장한다:**
 
-```text
+```
 step030_레이아웃설계_chunk1.md (500줄 이하)
 step030_전체설계_chunk1.md (500줄 이하)
 step030_전체설계_chunk2.md (500줄 이하)
 ...
-```text
+```
 
 **작성 규칙**:
 
 - 각 청크는 500줄 이하로 작성 (성능 최적화)
-- `.claude/hooks/research-validator.ps1`에서 각 청크 검증 (BOM/CRLF/줄수/파일크기)
+- 저장 시 PostToolUse 훅(research-chunk-validator.ps1)이 각 청크 자동 검증 (BOM/CRLF/줄수/파일크기) — 일괄 재검증: `.claude/hooks/research-validator.ps1` 수동 실행
 - 청크 그대로 유지 (병합 안 함)
 
-서브에이전트는 항상 sonnet을 사용한다.
+서브에이전트는 항상 haiku를 사용한다. (2026-06-10 정정: 헤더·CLAUDE.md 모델 매트릭스와 통일 — sonnet은 EVAL 게이트 평가자 전용)
 
 
 ## CoVe (Chain-of-Verification)

@@ -21,7 +21,7 @@ persistence: session
 
 ```bash
 npm install -D madge
-```text
+```
 
 **Hook**: `.claude/hooks/madge-validator.ps1`
 

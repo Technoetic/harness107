@@ -31,14 +31,14 @@ persistence: session
    ```powershell
    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
    $OutputEncoding = [System.Text.Encoding]::UTF8
-```text
+```
 
 4. **파일 Python write_text() 사용 시 한글 포함 내용은 UTF-8로 직접 작성**
    - Bash의 `echo` 리다이렉션 금지 (인코딩 불일치 위험)
    - 반드시 Python pathlib.Path.write_text() 사용
 
 5. **검증**
-   - `.claude/hooks/research-validator.ps1`에서 BOM/CRLF 자동 검사
+   - 저장 시 PostToolUse 훅(research-chunk-validator.ps1)이 BOM/CRLF 자동 검사
 
 ## Self-Calibration
 

@@ -76,7 +76,7 @@ npx vitest run --coverage
 
 ## Jest 예시
 npx jest --coverage
-```text
+```
 
 ### 4단계: 커버리지 미달 시 반복
 

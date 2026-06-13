@@ -61,7 +61,7 @@ Step 89 디자인 시각 검증 완료 후, 격자(Grid) 오버레이를 적용�
      pointer-events: none;
      z-index: 99999;
    }
-```text
+```
 2. **Playwright로 스크린샷 촬영** — 격자가 적용된 상태에서 스크린샷을 `step_archive/screenshots/grid/` 에 저장
 3. **소스 코드 오염 없음** — `page.addStyleTag()`로 주입하므로 별도 제거 작업 불필요
 

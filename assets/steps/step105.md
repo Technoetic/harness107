@@ -33,7 +33,7 @@ k6 또는 Artillery를 사용하여 부하 테스트 및 성능 측정을 수행
 
 **검증:**
 
-- `.claude/hooks/load-test-validator.ps1`에서 자동 검증
+- `.claude/hooks/lhci-validator.ps1` 수동 실행 + 부하 시나리오 결과 직접 판정 (구 load-test-validator.ps1은 retired — 2026-06-10 M07 정정)
 
 **검증 실패 시:**
 

@@ -35,7 +35,7 @@ UI 회귀 테스트를 구현한다.
 
 ### 1단계: 에이전트 B의 역할 (검증)
 
-`.claude/hooks/ui-regression-validator.ps1`에서 자동 검증:
+에이전트 B가 Playwright 스크린샷 스냅샷 비교로 직접 검증 (구 ui-regression-validator.ps1은 retired — 2026-06-10 M07 정정):
 - 스냅샷 비교 수행
 - **PASS/FAIL 판정만 수행** — **코드 수정 금지**
 - 판정 결과:

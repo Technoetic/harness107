@@ -52,7 +52,7 @@ const viewports = [
   { width: 768, height: 1024, name: 'tablet' },
   { width: 1280, height: 800, name: 'desktop' },
 ];
-```text
+```
 
 ### 2단계: 코드 변경 후 비교 스크린샷 촬영
 

@@ -17,7 +17,7 @@ persistence: session
 ```bash
 npm install -D --save-exact @biomejs/biome
 npx @biomejs/biome init
-```text
+```
 
 ## 검증
 

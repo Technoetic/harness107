@@ -52,7 +52,7 @@ step016 전체 조사결과를 기반으로, Awwwards 수상작 중 방문할 �
 - 조사할 뷰포트: desktop, tablet, mobile
 
 ## URL 2: ...
-```text
+```
 
 서브에이전트는 haiku를 사용한다.
 

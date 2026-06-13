@@ -33,7 +33,7 @@ Playwright로 현재 구현의 스크린샷을 촬영하여 `step_archive/screen
 
 에이전트 B에게 전달할 프롬프트 (N = 현재 라운드 번호 1, 2, 3):
 
-```text
+```
 너는 디자인 검증자다. CSS를 수정하지 않는다. 비교 판정만 한다.
 
 1. 아래 Awwwards 원본 스크린샷을 모두 Read한다:
@@ -54,7 +54,7 @@ Playwright로 현재 구현의 스크린샷을 촬영하여 `step_archive/screen
 5. 결과를 `step_archive/outputs/step043_검증_rN.md`에 저장한다.
    - 부족한 부분이 없으면: "PASS"로 시작
    - 부족한 부분이 있으면: "FAIL"로 시작하고 구체적 피드백 나열
-```text
+```
 
 에이전트 B는 sonnet을 사용한다 (스크린샷 분석 필요).
 
@@ -71,7 +71,7 @@ Playwright로 현재 구현의 스크린샷을 촬영하여 `step_archive/screen
 
 에이전트 A에게 전달할 프롬프트 (N = 현재 라운드 번호):
 
-```text
+```
 너는 CSS 수정자다. 통과 여부를 판정하지 않는다. 피드백을 반영만 한다.
 
 1. 최신 검증 피드백을 Read한다:
@@ -87,7 +87,7 @@ Playwright로 현재 구현의 스크린샷을 촬영하여 `step_archive/screen
 4. 피드백에 나열된 부족한 부분을 `src/css/*.css`, `src/js/Visualizer.js`에 반영한다.
 
 5. 수정 내역을 `step_archive/outputs/step043_수정_rN.md`에 기록한다.
-```text
+```
 
 에이전트 A는 sonnet을 사용한다 (스크린샷 분석 필요).
 

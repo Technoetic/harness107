@@ -30,7 +30,7 @@ persistence: session
 - **tokei 코드 라인 비교**: `tokei src/ --output json` 실행하여 dead code 제거 전후 코드 라인 수를 비교한다. 제거 효과를 정량적으로 기록한다.
 
 **검증:**
-- `.claude/hooks/deadcode-validator.ps1`에서 자동 검증
+- 위 jscpd/semgrep/tokei 명령의 출력을 직접 종합해 PASS/FAIL 판정 (구 deadcode-validator.ps1은 retired — 2026-06-10 M07 정정)
 
 **검증 실패 시:**
 - Dead code 탐지 결과 분석
@@ -39,16 +39,16 @@ persistence: session
 
 **점검 결과는 청크 단위로 저장한다:**
 
-```text
+```
 step083_deadcode_chunk1.md (500줄 이하)
 step083_deadcode_chunk2.md (500줄 이하)
 step083_deadcode_chunk3.md (500줄 이하)
 ...
-```text
+```
 
 **작성 규칙**:
 - 각 청크는 500줄 이하로 작성 (성능 최적화)
-- `.claude/hooks/research-validator.ps1`에서 각 청크 검증 (BOM/CRLF/줄수/파일크기)
+- 저장 시 PostToolUse 훅(research-chunk-validator.ps1)이 각 청크 자동 검증 (BOM/CRLF/줄수/파일크기) — 일괄 재검증: `.claude/hooks/research-validator.ps1` 수동 실행
 - 청크 그대로 유지 (병합 안 함)
 
 서브에이전트는 항상 haiku를 사용한다.

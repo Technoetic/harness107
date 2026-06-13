@@ -16,7 +16,7 @@ persistence: session
 
 ```bash
 npm install -D stylelint stylelint-config-standard
-```text
+```
 
 ## 검증
 

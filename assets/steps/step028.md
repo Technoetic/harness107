@@ -38,16 +38,16 @@ Class 지향으로 기획한다.
 
 **보강된 기획 결과는 기존 청크를 덮어쓴다:**
 
-```text
+```
 step025_planning_chunk1.md (500줄 이하)
 step025_planning_chunk2.md (500줄 이하)
 step025_planning_chunk3.md (500줄 이하)
 ...
-```text
+```
 
 **작성 규칙**:
 - 각 청크는 500줄 이하로 작성 (성능 최적화)
-- `.claude/hooks/research-validator.ps1`에서 각 청크 검증 (BOM/CRLF/줄수/파일크기)
+- 저장 시 PostToolUse 훅(research-chunk-validator.ps1)이 각 청크 자동 검증 (BOM/CRLF/줄수/파일크기) — 일괄 재검증: `.claude/hooks/research-validator.ps1` 수동 실행
 - 청크 그대로 유지 (병합 안 함)
 
 서브에이전트는 항상 haiku를 사용한다.

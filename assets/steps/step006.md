@@ -25,13 +25,13 @@ persistence: session
 
 ```bash
 npm install -D vitest @vitest/coverage-v8
-```text
+```
 
 ## Jest 설치 시
 
 ```bash
 npm install -D jest ts-jest @types/jest
-```text
+```
 
 ## 설치 확인
 
@@ -41,7 +41,7 @@ npx vitest --version
 
 ## Jest
 npx jest --version
-```text
+```
 
 설치 확인 후 버전 번호가 출력되면 성공이다.
 

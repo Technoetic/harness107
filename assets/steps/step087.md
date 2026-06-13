@@ -89,7 +89,7 @@ const { chromium } = require('playwright');
 
   await browser.close();
 })();
-```text
+```
 
 ## 검증 절차 (항목마다 반복)
 

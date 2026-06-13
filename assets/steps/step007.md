@@ -25,19 +25,19 @@ persistence: session
 
 ```bash
 npm install -D rollup-plugin-visualizer
-```text
+```
 
 ## Webpack 프로젝트 설치 시
 
 ```bash
 npm install -D webpack-bundle-analyzer
-```text
+```
 
 ## 범용 설치 시
 
 ```bash
 npm install -D source-map-explorer
-```text
+```
 
 ## 설치 확인
 
@@ -45,7 +45,7 @@ npm install -D source-map-explorer
 
 ```bash
 ls node_modules/rollup-plugin-visualizer 2>/dev/null || ls node_modules/webpack-bundle-analyzer 2>/dev/null || ls node_modules/source-map-explorer 2>/dev/null
-```text
+```
 
 서브에이전트는 항상 haiku를 사용한다.
 

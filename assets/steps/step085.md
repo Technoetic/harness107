@@ -32,7 +32,7 @@ Playwright를 사용하여 E2E 테스트를 수행한다.
 **E2E 테스트 단계에서 절대로 superpowers:brainstorming을 사용하지 않는다.**
 
 **검증:**
-- `.claude/hooks/e2e-validator.ps1`에서 자동 검증
+- `npx playwright test` 실행 결과 전체 PASS로 직접 검증 (구 e2e-validator.ps1은 retired — 2026-06-10 M07 정정)
 
 **검증 실패 시:**
 - 실패한 테스트 케이스 분석

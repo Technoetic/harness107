@@ -47,16 +47,16 @@ Step 17 조사결과에서 발견한 참고 레포지토리를 클론하고, 핵
 
 **분석 결과는 청크 단위로 저장한다:**
 
-```text
+```
 step019_조사결과_chunk1.md (500줄 이하)
 step019_조사결과_chunk2.md (500줄 이하)
 step019_조사결과_chunk3.md (500줄 이하)
 ...
-```text
+```
 
 **작성 규칙**:
 - 각 청크는 500줄 이하로 작성 (성능 최적화)
-- `.claude/hooks/research-validator.ps1`에서 각 청크 검증 (BOM/CRLF/줄수/파일크기)
+- 저장 시 PostToolUse 훅(research-chunk-validator.ps1)이 각 청크 자동 검증 (BOM/CRLF/줄수/파일크기) — 일괄 재검증: `.claude/hooks/research-validator.ps1` 수동 실행
 - 청크 그대로 유지 (병합 안 함)
 
 ## 분석 결과 파일 형식
@@ -76,7 +76,7 @@ step019_조사결과_chunk3.md (500줄 이하)
 - **기술 스택**: ...
 - **핵심 패턴**: ...
 - **우리 프로젝트에 적용할 점**: ...
-```text
+```
 
 서브에이전트는 항상 haiku를 사용한다.
 

@@ -24,7 +24,8 @@ Step 37 구현이 완료된 후, 다음 단계로 진행하기 전 빌드 안전
 다음을 순서대로 실행한다. 하나라도 실패하면 다음 Step으로 진행하지 않는다.
 
 1. HTML 번들링: `.claude/hooks/html-bundler.ps1` 실행
-2. dist/index.html 유효성: `.claude/hooks/build-validator.ps1` 실행
+2. dist/index.html 유효성: 직접 검사 — 파일 존재 + 크기 > 0 + `<html`/`</html>` 포함 확인
+   (구 build-validator.ps1은 retired — 2026-06-10 하네스 감사 M07 정정)
 3. 순환 의존성: `npx madge --circular src/` 실행
 
 ### 2. 린트/포매팅 검증 (경고 — 실패해도 진행)
@@ -38,7 +39,7 @@ Step 37 구현이 완료된 후, 다음 단계로 진행하기 전 빌드 안전
 | 검증 | 실패 시 |
 |:---|:---|
 | html-bundler.ps1 | Step 37 재실행 (src/ 구조 문제) |
-| build-validator.ps1 | dist/index.html 수정 후 재검증 (최대 3회) |
+| dist/index.html 직접 검사 | dist/index.html 수정 후 재검증 (최대 3회) |
 | madge 순환 의존성 | 순환 고리를 구체적으로 보고, Step 37 서브에이전트로 수정 |
 | biome/stylelint | 경고만 기록, 진행 허용 |
 | tsc | 경고만 기록, 진행 허용 |

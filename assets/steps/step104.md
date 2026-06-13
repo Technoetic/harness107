@@ -53,7 +53,7 @@ persistence: session
 ```bash
 ## package.json의 build 스크립트 실행
 npm run build
-```text
+```
 
 ### 2단계: 번들 크기 측정
 
