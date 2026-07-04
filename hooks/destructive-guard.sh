@@ -24,8 +24,17 @@ CMD="$(printf '%s' "$CMD" | awk '!/^[[:space:]]*#/ && !/^[[:space:]]*$/')"
 [ -z "$CMD" ] && exit 0
 
 PATTERNS=(
-  'rm[[:space:]]+(-[a-zA-Z]*[rfRF]+[a-zA-Z]*[[:space:]]+)+(/|\.|\*|~|--no-preserve-root)'
-  'rm[[:space:]]+(-[rR][[:space:]]+-[fF]|-[fF][[:space:]]+-[rR])[[:space:]]+'
+  # [보안 수정 H-5] .ps1 GATE-03 파리티 — 위험 타깃 전체 토큰 anchoring.
+  # 구버전 '(/|\.|\*|~)' prefix 매칭은 rm -rf ./dist · /tmp/x · *.log · .cache 같은
+  # 합법 정리 명령까지 exit 2 오차단했다. RMREC(재귀 rm 플래그) + 위험타깃별 분해로 정밀화.
+  'rm[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-[a-zA-Z]*[rR][a-zA-Z]*([[:space:]]+-[a-zA-Z]+)*[[:space:]]+/[[:space:]]*([;&|]|$)'
+  'rm[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-[a-zA-Z]*[rR][a-zA-Z]*([[:space:]]+-[a-zA-Z]+)*[[:space:]]+/\*'
+  'rm[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-[a-zA-Z]*[rR][a-zA-Z]*([[:space:]]+-[a-zA-Z]+)*[[:space:]]+/(home|etc|var|usr|bin|sbin|boot|root|opt|srv|lib|lib64|sys|proc|dev)\b'
+  'rm[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-[a-zA-Z]*[rR][a-zA-Z]*([[:space:]]+-[a-zA-Z]+)*[[:space:]]+~'
+  'rm[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-[a-zA-Z]*[rR][a-zA-Z]*([[:space:]]+-[a-zA-Z]+)*[[:space:]]+\$\{?(HOME|USERPROFILE)'
+  'rm[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-[a-zA-Z]*[rR][a-zA-Z]*([[:space:]]+-[a-zA-Z]+)*[[:space:]]+\.{1,2}/?[[:space:]]*([;&|]|$)'
+  'rm[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-[a-zA-Z]*[rR][a-zA-Z]*([[:space:]]+-[a-zA-Z]+)*[[:space:]]+\*[[:space:]]*([;&|]|$)'
+  'rm[[:space:]]+.*--no-preserve-root'
   'rm[[:space:]]+--recursive[[:space:]]+'
   'rm[[:space:]]+--force[[:space:]]+--recursive'
   'find[[:space:]]+/[[:space:]]+.*-delete'
@@ -100,18 +109,28 @@ PATTERNS=(
   '\bnode[[:space:]]+(-e|--eval)\b.*(rmSync|unlinkSync|rmdirSync|fs\.rm|fs\.unlink|fs\.rmdir)'
   '\bperl[[:space:]]+-e\b.*(unlink|rmtree|File::Path)'
   '\bruby[[:space:]]+-r?e\b.*(FileUtils\.rm|File\.delete|Dir\.(rmdir|delete))'
-  # [보안 수정 C2] 변수 인다이렉션 재귀 삭제 ($X -rf ...). 재귀 플래그(r) 필수.
-  '\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[[:space:]]+-[a-zA-Z]*[rR][a-zA-Z]*[[:space:]]'
+  # [보안 수정 C2/M-2] 변수 인다이렉션 재귀 삭제 ($X -rf <위험타깃>). 재귀 플래그 + 위험타깃 필수
+  '(^|[;&|][[:space:]]*)\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[[:space:]]+-[a-zA-Z]*[rR][a-zA-Z]*[[:space:]]+["'\'']?(/|~|\*|\$)'
   'eval[[:space:]]+["'\''][^"'\'']*\brm\b'
   # [보안 수정 C3] git 훅/앨리어스 하이재킹 (지속 코드실행 백도어)
   'git[[:space:]]+config[[:space:]]+.*core\.hooksPath'
   'git[[:space:]]+config[[:space:]]+.*alias\.'
   '\.git/hooks/'
+  # [보안 수정 C-2] git -c / --config-env / --upload-pack 훅 하이재킹 정규형
+  'git[[:space:]]+(-c|--config-env)[[:space:]]+[^[:space:]]*(core\.hooksPath|alias\.|core\.sshCommand|core\.fsmonitor|uploadpack\.|receive\.)'
+  'git[[:space:]]+clone\b.*(--upload-pack|--exec)'
+  'git[[:space:]]+[^[:space:]]+.*--(upload|receive)-pack'
+  # [보안 수정 C-1] 리다이렉트/tee/sed -i/dd of= 로 훅·settings·.git/hooks 에 write (자기무력화 차단)
+  '(>|>>|\btee\b|\bdd[[:space:]]+of=|\bsed[[:space:]]+-i[^[:space:]]*[[:space:]])[^|;&]*(harness107/hooks/(destructive-guard|auto-approve|permission-request-guard|step-auto-continue|hooks\.json)|\.claude/settings(\.local)?\.json|(^|[[:space:]/])\.git/hooks/)'
   # [보안 수정 C3] 2단계 다운로드 후 실행
   '(curl|wget)[[:space:]]+[^|]*-[oO][[:space:]]+[^[:space:]]+.*(&&|;|\|\|).*(\b(sh|bash|zsh|source)\b|\./|python|node|perl)'
   'chmod[[:space:]]+\+x[[:space:]]+[^[:space:]]+.*(&&|;).*(\./|\bbash\b|\bsh\b)'
-  # [보안 수정 H7] 자격증명/비밀키 읽기·유출
-  '\b(cat|less|more|head|tail|cp|mv|tar|zip|base64|xxd|od|strings)\b[^|;&]*(\.ssh/|\.aws/|\.gnupg/|\.kube/config|id_rsa|id_ed25519|id_ecdsa|credentials\b|\.env\b|\.npmrc\b|\.pypirc\b)'
+  # [보안 수정 M-3] 환경변수 프리로드 임의코드 주입
+  '(^|[;&|(]|[[:space:]])(LD_PRELOAD|LD_LIBRARY_PATH|LD_AUDIT|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|NODE_OPTIONS|BASH_ENV|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_SSH_COMMAND|GIT_EXTERNAL_DIFF)[[:space:]]*='
+  # [보안 수정 H7/H-1] 하드 시크릿(ssh/aws/gnupg/kube/id_rsa): 읽기·복사·이동 전부 차단
+  '\b(cat|less|more|head|tail|cp|mv|tar|zip|base64|xxd|od|strings)\b[^|;&]*(\.ssh/|\.aws/|\.gnupg/|\.kube/config|id_rsa|id_ed25519|id_ecdsa|credentials([^.[:alnum:]_-]|$))'
+  # [보안 수정 H-1] .env/.npmrc/.pypirc: 순수 읽기만 차단 (cp/mv 제외 — 표준 cp .env.example .env 허용)
+  '\b(cat|less|more|head|tail|base64|xxd|od|strings)\b[^|;&]*(\.env([^.[:alnum:]_-]|$)|\.npmrc([^.[:alnum:]_-]|$)|\.pypirc([^.[:alnum:]_-]|$))'
   'curl[[:space:]]+[^|]*(-T[[:space:]]|--upload-file|--data-binary[[:space:]]+@|-d[[:space:]]+@|-F[[:space:]]+[^[:space:]]*=@)'
   '(id_rsa|id_ed25519|credentials|\.env)\b[^|]*\|[[:space:]]*(curl|wget|nc|ncat)\b'
 )

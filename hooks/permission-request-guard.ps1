@@ -59,6 +59,13 @@ function Test-DangerousCommand([string]$cmd) {
     'rmdir\s+/s', 'del\s+/f\s+/s',
     'git\s+push\s+--force', 'git\s+push\s+-f\s', 'git\s+reset\s+--hard',
     'git\s+clean\s+-[fdx]', 'git\s+branch\s+-D\s',
+    # [보안 수정 C-2] git -c / --config-env / --upload-pack 훅 하이재킹
+    '(?i)git\s+config\s+.*core\.hooksPath', '(?i)git\s+config\s+.*alias\.',
+    '(?i)git\s+(-c|--config-env)\s+\S*(core\.hooksPath|alias\.|core\.sshCommand|core\.fsmonitor|uploadpack\.|receive\.)',
+    '(?i)git\s+clone\b[^\n]*(--upload-pack|--exec)',
+    '(?i)git\s+\S+[^\n]*--(upload|receive)-pack',
+    # [보안 수정 M-3] 환경변수 프리로드 임의코드 주입
+    '(?i)(^|[;&|(]|\s)(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_INSERT_LIBRARIES|NODE_OPTIONS|BASH_ENV|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_SSH_COMMAND)\s*=',
     'DROP\s+TABLE', 'DROP\s+DATABASE', 'TRUNCATE\s+TABLE',
     'sudo\s+', 'su\s+-', 'chmod\s+(-[a-zA-Z]+\s+)?0?777',
     'mkfs\.', 'dd\s+.*of=/dev/(sd|nvme|hd)',
@@ -134,7 +141,12 @@ function Test-SensitivePath([string]$path) {
     '^/etc/', '^/var/', '^/boot/',
     '/system32/', '/windows/', '/program files/',
     'harness107/hooks/(destructive-guard|auto-approve|permission-request-guard|step-auto-continue|hooks\.json)',
-    'harness107/\.claude-plugin/plugin\.json$'
+    'harness107/\.claude-plugin/plugin\.json$',
+    # [보안 수정 C-3] 지속성/자동실행 write 벡터
+    '(^|/)\.git/hooks/', '/\.config/systemd/user/', '/\.config/autostart/',
+    '/(\.npmrc|\.pypirc)$', '/\.pip/pip\.conf$',
+    '/\.(local/bin|bin)/(rm|git|sudo|curl|wget|npm|node|python[0-9]*|sh|bash|env)$',
+    '/\.envrc$', '/\.vscode/(tasks|launch)\.json$', '/etc/cron', '/cron\.(d|daily|hourly|weekly|monthly)/'
   )
   foreach ($sp in $sensitivePathPatterns) {
     if ($normLower -match $sp) { return $true }

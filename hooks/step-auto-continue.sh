@@ -19,29 +19,64 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 0
 fi
 
-# parse
+# [수정 H-6] RAW_STDIN을 python 파싱 *앞*에서 export한다 (구버전은 파싱 뒤에 export되어
+# stop_active·last·transcript가 영구 빈값 → STALL 가드와 완료검출이 사장됐다).
+export RAW_STDIN="$RAW"
+# parse (+ transcript 보정: stale current_step 교정 — .ps1 M08 파리티)
 read -r TOTAL CURRENT DONE STOP_ACTIVE LAST_MSG_FILE < <(python3 - <<PY "$PROGRESS_FILE"
-import json,sys,os,tempfile
+import json,sys,os,tempfile,re
 p=json.load(open(sys.argv[1],encoding='utf-8'))
 total=int(p.get('total_steps',107))
 cur=int(p.get('current_step',1))
-done=len(p.get('completed_steps') or [])
+done_set=set(int(x) for x in (p.get('completed_steps') or []))
+done=len(done_set)
 raw=os.environ.get('RAW_STDIN','')
-stop_active='false'
-last=''
+stop_active='false'; last=''; tpath=''
 if raw:
     try:
         j=json.loads(raw)
         if j.get('stop_hook_active') is True: stop_active='true'
         last=j.get('last_assistant_message') or ''
+        tpath=j.get('transcript_path') or ''
     except Exception: pass
-# write last_msg to temp file path
+def scan(text):
+    found=set(); in_fence=False
+    for line in text.split('\n'):
+        if re.match(r'^\s*(\`\`\`|~~~)', line): in_fence=not in_fence; continue
+        if in_fence: continue
+        if '\`' in line or re.match(r'^\s*>', line) or re.search(r'예\s*[:)]', line) or '예시' in line: continue
+        m=re.match(r'^\s*[✅→\-\*\s]*Step\s+(\d{1,3})\s*/\s*(\d{1,3})\s*완료', line, re.I)
+        if m:
+            n=int(m.group(1)); tot=int(m.group(2))
+            if 1<=n<=total and tot==total: found.add(n)
+    return found
+scanned=set()
+if last: scanned|=scan(last)
+if tpath and os.path.exists(tpath):
+    try:
+        with open(tpath,encoding='utf-8') as f:
+            for ln in f:
+                ln=ln.strip()
+                if not ln: continue
+                try:
+                    e=json.loads(ln)
+                    if e.get('type')=='assistant':
+                        for b in ((e.get('message') or {}).get('content') or []):
+                            if b.get('type')=='text' and b.get('text'): scanned|=scan(b['text'])
+                except Exception: pass
+    except Exception: pass
+alldone=done_set|scanned
+if alldone:
+    done=len(alldone)
+    nxt=total+1
+    for i in range(1,total+1):
+        if i not in alldone: nxt=i; break
+    cur=max(cur,nxt)
 tf=tempfile.NamedTemporaryFile(mode='w',delete=False,encoding='utf-8',suffix='.tmp')
 tf.write(last); tf.close()
 print(total, cur, done, stop_active, tf.name)
 PY
 )
-export RAW_STDIN="$RAW"
 
 if [ "$DONE" -ge "$TOTAL" ] || [ "$CURRENT" -gt "$TOTAL" ]; then
   log "ALL DONE ($DONE/$TOTAL) -> release"

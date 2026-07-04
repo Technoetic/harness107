@@ -108,21 +108,47 @@ $destructivePatterns = @(
     '(?i)node\s+(-e|--eval)\b.*(rmSync|unlinkSync|rmdirSync|fs\.rm\b|fs\.unlink|fs\.rmdir)',
     '(?i)perl\s+-e\b.*(unlink|rmtree|File::Path)',
     '(?i)ruby\s+-r?e\b.*(FileUtils\.rm|File\.delete|Dir\.(rmdir|delete))',
-    # [보안 수정 C2] 변수 인다이렉션 재귀 삭제 ($X -rf ...). 재귀 플래그(r) 필수로
-    # 좁혀 비재귀 -f (예: tar $ARGS -f) 오탐을 배제한다.
-    '\$\{?[A-Za-z_]\w*\}?\s+-[a-zA-Z]*[rR][a-zA-Z]*\s',
+    # [보안 수정 C2/M-2] 변수 인다이렉션 재귀 삭제 ($X -rf <위험타깃>). 재귀 플래그 + 위험타깃
+    # 필수로 좁혀 정상 $CC -shared / $GREP -rn <패턴> 오차단을 배제한다.
+    '(^|[;&|]\s*)\$\{?[A-Za-z_]\w*\}?\s+-[a-zA-Z]*[rR][a-zA-Z]*\s+["'']?(/|~|\*|\$)',
     '(?i)eval\s+["''][^"'']*\brm\b',
     # [보안 수정 C3] git 훅/앨리어스 하이재킹 (지속 코드실행 백도어)
     '(?i)git\s+config\s+.*core\.hooksPath',
     '(?i)git\s+config\s+.*alias\.',
     '(?i)\.git[\\/]hooks[\\/]',
+    # [보안 수정 C-2] git -c / --config-env / --upload-pack 훅 하이재킹 정규형
+    '(?i)git\s+(-c|--config-env)\s+\S*(core\.hooksPath|alias\.|core\.sshCommand|core\.fsmonitor|uploadpack\.|receive\.)',
+    '(?i)git\s+clone\b[^\n]*(--upload-pack|--exec)',
+    '(?i)git\s+\S+[^\n]*--(upload|receive)-pack',
+    # [보안 수정 C-1] 리다이렉트/tee/sed -i/dd of= 로 훅·settings·.git/hooks 에 write (자기무력화 차단)
+    '(?i)(>|>>|\btee\b|\bdd\s+of=|\bsed\s+-i\S*\s)[^|;&]*(harness107[\\/]hooks[\\/](destructive-guard|auto-approve|permission-request-guard|step-auto-continue|hooks\.json)|\.claude[\\/]settings(\.local)?\.json|(^|[\s\\/])\.git[\\/]hooks[\\/])',
     # [보안 수정 C3] 2단계 다운로드 후 실행
     '(?i)(curl|wget)\s+[^|]*-[oO]\s+\S+.*(&&|;|\|\|).*(\b(sh|bash|zsh|source)\b|\.\/|python|node|perl)',
     '(?i)chmod\s+\+x\s+\S+.*(&&|;).*(\.\/|\bbash\b|\bsh\b)',
-    # [보안 수정 H7] 자격증명/비밀키 읽기·유출
-    '(?i)\b(cat|less|more|head|tail|cp|mv|tar|zip|base64|xxd|od|strings)\b[^|;&]*(\.ssh[\\/]|\.aws[\\/]|\.gnupg[\\/]|\.kube[\\/]config|id_rsa|id_ed25519|id_ecdsa|credentials\b|\.env\b|\.npmrc\b|\.pypirc\b)',
+    # [보안 수정 H7/H-1] 하드 시크릿(ssh/aws/gnupg/kube/id_rsa): 읽기·복사·이동 전부 차단
+    '(?i)\b(cat|less|more|head|tail|cp|mv|tar|zip|base64|xxd|od|strings)\b[^|;&]*(\.ssh[\\/]|\.aws[\\/]|\.gnupg[\\/]|\.kube[\\/]config|id_rsa|id_ed25519|id_ecdsa|credentials(?![.\w-]))',
+    # [보안 수정 H-1] .env/.npmrc/.pypirc: 순수 읽기만 차단 (cp/mv 제외 — 표준 `cp .env.example .env` 허용, .env.example/.env.local 미매칭)
+    '(?i)\b(cat|less|more|head|tail|base64|xxd|od|strings)\b[^|;&]*(\.env(?![.\w-])|\.npmrc(?![.\w-])|\.pypirc(?![.\w-]))',
     '(?i)curl\s+[^|]*(-T\s|--upload-file|--data-binary\s+@|-d\s+@|-F\s+\S*=@)',
-    '(?i)(id_rsa|id_ed25519|credentials|\.env)\b[^|]*\|\s*(curl|wget|nc|ncat)\b'
+    '(?i)(id_rsa|id_ed25519|credentials|\.env)\b[^|]*\|\s*(curl|wget|nc|ncat)\b',
+    # [보안 수정 M-3] 환경변수 프리로드 임의코드 주입
+    '(?i)(^|[;&|(]|\s)(LD_PRELOAD|LD_LIBRARY_PATH|LD_AUDIT|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|NODE_OPTIONS|BASH_ENV|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_SSH_COMMAND|GIT_EXTERNAL_DIFF)\s*=',
+    # [보안 수정 M-1] 8회차 카테고리를 exit-2 계층(.ps1)에도 이식 — auto-approve와 파리티,
+    # README "regardless of allow / 23 PoC 전수 차단" 주장을 Windows exit-2 계층에서 실제로 성립시킴.
+    '(?i)\bsudo\s+', '(?i)\bsu\s+-', '(?i)\bcrontab\s+-[er]',
+    '(?i)\bsystemctl\s+(stop|disable)\s+', '(?i)\blaunchctl\s+(unload|remove)\s+',
+    '(?i)\b(apt|apt-get|yum|dnf|brew|pacman|pip|pip3|gem|cargo|conda|zypper|emerge|opkg|apk|snap|flatpak)\b\s+(install|-S\b|-i\b|add\b)',
+    '(?i)\bnpm\s+install\s+(-g|--global)\b',
+    '(?i)\b(useradd|adduser|userdel|deluser|groupadd|groupdel|usermod|groupmod|chsh|passwd|gpasswd)\b',
+    '(?i)\bchown\s+(root|0)\b', '(?i)\bsetcap\b', '(?i)\bvisudo\b', '/etc/sudoers',
+    '(?i)\bnc(at)?\s+(-l[vnpuk]*|--listen)\b',
+    '(?i)\bbash\s+-i\s*>&?\s*/dev/tcp/', '(?i)/dev/tcp/[0-9a-fA-F\.:]+/[0-9]+',
+    '(?i)\bpython\d*\s+-c\s+["''][^"'']*\b(socket|subprocess|pty)\b',
+    '(?i)\bperl\s+-e\s+["''][^"'']*\bsocket\b',
+    '(?i)\bruby\s+-r?e\s+["''][^"'']*\bTCPSocket\b',
+    '(?i)\bphp\s+-r\s+["''][^"'']*\bfsockopen\b',
+    '(?i)\bsocat\s+(tcp|exec):',
+    '(?i)\bexport\s+PATH\s*=', '(?i)\$env:PATH\s*='
 )
 
 foreach ($pattern in $destructivePatterns) {

@@ -45,8 +45,7 @@ PATTERNS=(
   'webapp[[:space:]]+생성'
   '웹앱.*튜토리얼'
   '인터렉티브.*필수'
-  '대시보드.*(만들어|만들|생성|제작|구현)'
-  '(웹앱|웹[[:space:]]*앱|웹[[:space:]]*페이지|web[[:space:]]*app).*(만들어|만들|생성|제작|구현)'
+  '(대시보드|웹앱|웹[[:space:]]*앱|웹[[:space:]]*페이지|web[[:space:]]*app).*(튜토리얼|초보자|인터랙티브|인터렉티브)'
 )
 MATCHED=0
 for p in "${PATTERNS[@]}"; do
@@ -54,6 +53,20 @@ for p in "${PATTERNS[@]}"; do
 done
 [ "$MATCHED" = "0" ] && exit 0
 log "TRIGGER matched"
+
+# [수정 H-2] 이미 진행 중이면 재부트스트랩하지 않는다 (progress.json 파괴 방지)
+if [ -f "$PROGRESS_FILE" ]; then
+  log "progress.json already exists — skip bootstrap"
+  cat <<'RM'
+<harness107-trigger>
+이미 harness107 자율주행이 진행 중입니다 (step_archive/progress.json 존재).
+기존 진행 상태 보존을 위해 재부트스트랩하지 않습니다.
+처음부터 다시 시작하려면 /harness-reset 을 먼저 실행하세요.
+그 외에는 progress.json의 current_step 부터 이어서 실행하세요.
+</harness107-trigger>
+RM
+  exit 0
+fi
 
 mkdir -p "$STEP_ARCHIVE" "$ARCHIVED_DIR" "$TOPIC_DIR"
 

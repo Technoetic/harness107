@@ -36,8 +36,9 @@ try { $j = $raw | ConvertFrom-Json } catch { exit 0 }
 $prompt = [string]$j.prompt
 if (-not $prompt) { exit 0 }
 
-# 트리거 패턴 — /webapp 명시 트리거 + 자연어(대시보드/웹앱/튜토리얼 생성 요청).
-# (H1 수정: README가 광고하는 "...대시보드를 만들어줘" 자연어 진입을 실제로 지원)
+# 트리거 패턴 — /webapp 명시 + 하네스 고유 신호가 동반된 자연어만.
+# (H-2 수정: 라운드1의 '대시보드.*만들어' 단독 패턴은 "웹앱 배포 파이프라인 구현" 같은
+#  무관 대화까지 오부팅시켰다. 튜토리얼/초보자/인터랙티브 신호 동반을 요구해 오트리거를 차단.)
 $triggers = @(
   '튜토리얼.*(생성|만들어|제작)',
   '인터랙티브.*필수.*초보자',
@@ -46,8 +47,7 @@ $triggers = @(
   'webapp\s+생성',
   '웹앱.*튜토리얼',
   '인터렉티브.*필수',
-  '대시보드.*(만들어|만들|생성|제작|구현)',
-  '(웹앱|웹\s*앱|웹\s*페이지|web\s*app).*(만들어|만들|생성|제작|구현)'
+  '(대시보드|웹앱|웹\s*앱|웹\s*페이지|web\s*app).*(튜토리얼|초보자|인터랙티브|인터렉티브)'
 )
 $matched = $false
 foreach ($p in $triggers) {
@@ -56,6 +56,19 @@ foreach ($p in $triggers) {
 if (-not $matched) { exit 0 }
 
 Write-Log "TRIGGER matched. prompt head: $($prompt.Substring(0,[Math]::Min(80,$prompt.Length)))"
+
+# [수정 H-2] 이미 하네스 진행 중이면(progress.json 존재) 절대 재부트스트랩하지 않는다.
+# (오트리거·재입력이 current_step→1, completed→0 으로 진행 상태를 파괴하던 결함 차단)
+if (Test-Path $progressFile) {
+  Write-Log "progress.json already exists — skip bootstrap (preserve in-progress state)"
+  Write-Output "<harness107-trigger>"
+  Write-Output "이미 harness107 자율주행이 진행 중입니다 (step_archive/progress.json 존재)."
+  Write-Output "기존 진행 상태 보존을 위해 재부트스트랩하지 않습니다."
+  Write-Output "처음부터 다시 시작하려면 /harness-reset 을 먼저 실행하세요."
+  Write-Output "그 외에는 progress.json의 current_step 부터 이어서 실행하세요."
+  Write-Output "</harness107-trigger>"
+  exit 0
+}
 
 # 1) step_archive 부트스트랩
 if (-not (Test-Path $stepArchive)) { New-Item -ItemType Directory -Path $stepArchive -Force | Out-Null }

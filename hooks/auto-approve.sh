@@ -86,6 +86,61 @@ sensitive_short_token() {
   printf '%s' "$p" | grep -Eiq '(^|/)(PROGRA~[0-9]+|WINDOW~[0-9]+|SYSTEM~[0-9]+|ADMINI~[0-9]+|DOCUME~[0-9]+|MYDOCU~[0-9]+|USERS~[0-9]+|APPDAT~[0-9]+|LOCALS~[0-9]+|ALLUSE~[0-9]+)(/|$)'
 }
 
+# [보안 수정 C-1/C-3] 민감경로 판정을 함수로 승격 — Write 분기와 Bash write 탐지가 공유.
+# 지속성/자동실행 write 벡터(.git/hooks·systemd·autostart·.npmrc·PATH-shadow bin) 포함.
+SENSITIVE_PATH_PATTERNS=(
+  '\.ssh/(authorized_keys|id_[a-z0-9_]+|known_hosts|config)$'
+  '\.ssh/?$'
+  '\.gnupg/'
+  '\.aws/(credentials|config)$'
+  '\.azure/'
+  '\.config/gcloud/'
+  '\.kube/config$'
+  '\.docker/config\.json$'
+  '/(\.bashrc|\.bash_profile|\.zshrc|\.zprofile|\.profile|\.zshenv)$'
+  '\.claude/settings\.json$'
+  '\.claude/settings\.local\.json$'
+  '^/etc/'
+  '^/var/'
+  '^/boot/'
+  '/system32/|/windows/|/program files/'
+  'harness107/hooks/(destructive-guard|auto-approve|permission-request-guard|step-auto-continue|hooks\.json)'
+  'harness107/\.claude-plugin/plugin\.json$'
+  '(^|/)\.git/hooks/'
+  '/\.config/systemd/user/'
+  '/\.config/autostart/'
+  '/(\.npmrc|\.pypirc)$'
+  '/\.pip/pip\.conf$'
+  '/\.(local/bin|bin)/(rm|git|sudo|curl|wget|npm|node|python[0-9]*|sh|bash|env)$'
+  '/\.envrc$'
+  '/\.vscode/(tasks|launch)\.json$'
+  '/etc/cron'
+  '/cron\.(d|daily|hourly|weekly|monthly)/'
+)
+is_sensitive_path() {
+  local norm; norm="$(normalize_path "$1")"; [ -z "$norm" ] && norm="$1"
+  sensitive_short_token "$norm" && return 0
+  local sp
+  for sp in "${SENSITIVE_PATH_PATTERNS[@]}"; do
+    printf '%s' "$norm" | grep -Eq "$sp" && return 0
+  done
+  return 1
+}
+
+# [보안 수정 C-1] Bash 명령이 민감경로에 write하면 자동승인 미발급 (훅 자기무력화 차단).
+# write 지시어가 있을 때만 명령의 모든 토큰을 민감경로로 전수 검사 (sed -i EXPR FILE 형태 포함).
+bash_sensitive_write() {
+  local cmd="$1" tok
+  printf '%s' "$cmd" | grep -Eq '(>>?|\btee\b|\bcp\b|\bmv\b|\binstall\b|\bln\b|\brsync\b|\bdd[[:space:]]+[^|;&]*of=|\bsed[[:space:]]+-i|writeFileSync|appendFileSync|writeSync|open\([^)]*["'\''][aw])' || return 1
+  for tok in $(printf '%s' "$cmd" | grep -oE '[^[:space:]"'\''|;&<>()]+'); do
+    is_sensitive_path "$tok" && return 0
+  done
+  return 1
+}
+if [ "$TOOL" = "Bash" ] && [ -n "${CMD:-}" ]; then
+  if bash_sensitive_write "$CMD"; then exit 0; fi
+fi
+
 # 3회차 + 4회차 보강: Write/Edit 의 민감 경로 + 자기 hook 파일 보호. 정규화 매칭.
 if [ "$TOOL" = "Write" ] || [ "$TOOL" = "Edit" ] || [ "$TOOL" = "MultiEdit" ] || [ "$TOOL" = "NotebookEdit" ]; then
   FPATH=""
@@ -98,34 +153,10 @@ except: pass' 2>/dev/null)"
   if [ -n "${FPATH:-}" ]; then
     FPATH_NORM="$(normalize_path "$FPATH")"
     [ -z "$FPATH_NORM" ] && FPATH_NORM="$FPATH"
-    # 6회차 B: 8.3 short name이 normalize에서 expand되지 않으면 sensitive로 분류
-    if sensitive_short_token "$FPATH_NORM"; then
+    # 민감경로면 자동승인 미발급 (승격된 공유 함수 사용)
+    if is_sensitive_path "$FPATH_NORM"; then
       exit 0
     fi
-    SENSITIVE_PATH_PATTERNS=(
-      '\.ssh/(authorized_keys|id_[a-z0-9_]+|known_hosts|config)$'
-      '\.ssh/?$'
-      '\.gnupg/'
-      '\.aws/(credentials|config)$'
-      '\.azure/'
-      '\.config/gcloud/'
-      '\.kube/config$'
-      '\.docker/config\.json$'
-      '/(\.bashrc|\.bash_profile|\.zshrc|\.zprofile|\.profile|\.zshenv)$'
-      '\.claude/settings\.json$'
-      '\.claude/settings\.local\.json$'
-      '^/etc/'
-      '^/var/'
-      '^/boot/'
-      '/system32/|/windows/|/program files/'
-      'harness107/hooks/(destructive-guard|auto-approve|permission-request-guard|step-auto-continue|hooks\.json)'
-      'harness107/\.claude-plugin/plugin\.json$'
-    )
-    for sp in "${SENSITIVE_PATH_PATTERNS[@]}"; do
-      if printf '%s' "$FPATH_NORM" | grep -Eq "$sp"; then
-        exit 0
-      fi
-    done
   fi
 
   # 4회차 D-2/D-3: Edit / MultiEdit 의 new_string 내 destructive 패턴 검사.
@@ -315,18 +346,26 @@ if [ "$TOOL" = "Bash" ] && [ -n "${CMD:-}" ]; then
     '\bnode[[:space:]]+(-e|--eval)\b.*(rmSync|unlinkSync|rmdirSync|fs\.rm|fs\.unlink|fs\.rmdir)'
     '\bperl[[:space:]]+-e\b.*(unlink|rmtree|File::Path)'
     '\bruby[[:space:]]+-r?e\b.*(FileUtils\.rm|File\.delete|Dir\.(rmdir|delete))'
-    # [보안 수정 C2] 변수 인다이렉션 재귀 삭제 ($X -rf ...). 재귀 플래그(r) 필수.
-    '\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[[:space:]]+-[a-zA-Z]*[rR][a-zA-Z]*[[:space:]]'
+    # [보안 수정 C2/M-2] 변수 인다이렉션 재귀 삭제 ($X -rf <위험타깃>). 재귀 플래그 + 위험타깃 필수
+    '(^|[;&|][[:space:]]*)\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[[:space:]]+-[a-zA-Z]*[rR][a-zA-Z]*[[:space:]]+["'\'']?(/|~|\*|\$)'
     'eval[[:space:]]+["'\''][^"'\'']*\brm\b'
     # [보안 수정 C3] git 훅/앨리어스 하이재킹
     'git[[:space:]]+config[[:space:]]+.*core\.hooksPath'
     'git[[:space:]]+config[[:space:]]+.*alias\.'
     '\.git/hooks/'
+    # [보안 수정 C-2] git -c / --config-env / --upload-pack 훅 하이재킹 정규형
+    'git[[:space:]]+(-c|--config-env)[[:space:]]+[^[:space:]]*(core\.hooksPath|alias\.|core\.sshCommand|core\.fsmonitor|uploadpack\.|receive\.)'
+    'git[[:space:]]+clone\b.*(--upload-pack|--exec)'
+    'git[[:space:]]+[^[:space:]]+.*--(upload|receive)-pack'
     # [보안 수정 C3] 2단계 다운로드 후 실행
     '(curl|wget)[[:space:]]+[^|]*-[oO][[:space:]]+[^[:space:]]+.*(&&|;|\|\|).*(\b(sh|bash|zsh|source)\b|\./|python|node|perl)'
     'chmod[[:space:]]+\+x[[:space:]]+[^[:space:]]+.*(&&|;).*(\./|\bbash\b|\bsh\b)'
-    # [보안 수정 H7] 자격증명/비밀키 읽기·유출
-    '\b(cat|less|more|head|tail|cp|mv|tar|zip|base64|xxd|od|strings)\b[^|;&]*(\.ssh/|\.aws/|\.gnupg/|\.kube/config|id_rsa|id_ed25519|id_ecdsa|credentials\b|\.env\b|\.npmrc\b|\.pypirc\b)'
+    # [보안 수정 M-3] 환경변수 프리로드 임의코드 주입
+    '(^|[;&|(]|[[:space:]])(LD_PRELOAD|LD_LIBRARY_PATH|LD_AUDIT|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|NODE_OPTIONS|BASH_ENV|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_SSH_COMMAND|GIT_EXTERNAL_DIFF)[[:space:]]*='
+    # [보안 수정 H7/H-1] 하드 시크릿(ssh/aws/gnupg/kube/id_rsa): 읽기·복사·이동 전부 차단
+    '\b(cat|less|more|head|tail|cp|mv|tar|zip|base64|xxd|od|strings)\b[^|;&]*(\.ssh/|\.aws/|\.gnupg/|\.kube/config|id_rsa|id_ed25519|id_ecdsa|credentials([^.[:alnum:]_-]|$))'
+    # [보안 수정 H-1] .env/.npmrc/.pypirc: 순수 읽기만 차단 (cp/mv 제외)
+    '\b(cat|less|more|head|tail|base64|xxd|od|strings)\b[^|;&]*(\.env([^.[:alnum:]_-]|$)|\.npmrc([^.[:alnum:]_-]|$)|\.pypirc([^.[:alnum:]_-]|$))'
     'curl[[:space:]]+[^|]*(-T[[:space:]]|--upload-file|--data-binary[[:space:]]+@|-d[[:space:]]+@|-F[[:space:]]+[^[:space:]]*=@)'
     '(id_rsa|id_ed25519|credentials|\.env)\b[^|]*\|[[:space:]]*(curl|wget|nc|ncat)\b'
   )
