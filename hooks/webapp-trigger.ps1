@@ -36,7 +36,8 @@ try { $j = $raw | ConvertFrom-Json } catch { exit 0 }
 $prompt = [string]$j.prompt
 if (-not $prompt) { exit 0 }
 
-# 트리거 패턴 — 3종
+# 트리거 패턴 — /webapp 명시 트리거 + 자연어(대시보드/웹앱/튜토리얼 생성 요청).
+# (H1 수정: README가 광고하는 "...대시보드를 만들어줘" 자연어 진입을 실제로 지원)
 $triggers = @(
   '튜토리얼.*(생성|만들어|제작)',
   '인터랙티브.*필수.*초보자',
@@ -44,7 +45,9 @@ $triggers = @(
   '^/webapp\s+',
   'webapp\s+생성',
   '웹앱.*튜토리얼',
-  '인터렉티브.*필수'
+  '인터렉티브.*필수',
+  '대시보드.*(만들어|만들|생성|제작|구현)',
+  '(웹앱|웹\s*앱|웹\s*페이지|web\s*app).*(만들어|만들|생성|제작|구현)'
 )
 $matched = $false
 foreach ($p in $triggers) {
@@ -65,6 +68,15 @@ if (Test-Path $assetSteps) {
     $dst = Join-Path $archivedDir $_.Name
     if (-not (Test-Path $dst)) { Copy-Item $_.FullName $dst -Force }
   }
+}
+
+# H4 수정: html-bundler를 프로젝트로 복사해 step081/038에서 실행 가능하게 한다.
+# (플러그인 hooks/는 ${CLAUDE_PLUGIN_ROOT} 밖이라 step 본문의 상대경로로 도달 불가)
+$toolsDir = Join-Path $stepArchive "tools"
+if (-not (Test-Path $toolsDir)) { New-Item -ItemType Directory -Path $toolsDir -Force | Out-Null }
+foreach ($b in @("html-bundler.ps1", "html-bundler.sh")) {
+  $bSrc = Join-Path $PSScriptRoot $b
+  if (Test-Path $bSrc) { Copy-Item $bSrc (Join-Path $toolsDir $b) -Force }
 }
 
 # 2) TOPIC.md 작성 (덮어쓰기 — 신규 요청은 신규 주제)

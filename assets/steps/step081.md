@@ -21,11 +21,16 @@ persistence: session
 
 `src/index.html` + `src/js/*.js` + `src/css/*.css` 구조인 경우:
 
-1. `.claude/hooks/html-bundler.ps1` 실행 → `dist/index.html` 자동 생성
+1. `step_archive/tools/html-bundler.ps1` 실행 → `dist/index.html` 자동 생성
+   (webapp-trigger가 부트스트랩 시 플러그인 hooks/의 번들러를 이 경로로 복사해 둔다.
+   macOS/Linux는 `bash step_archive/tools/html-bundler.sh`)
 2. `dist/index.html`이 file:// 프로토콜에서 정상 동작하는지 Playwright로 확인
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .claude/hooks/html-bundler.ps1
+powershell -ExecutionPolicy Bypass -File step_archive/tools/html-bundler.ps1
+```
+```bash
+bash step_archive/tools/html-bundler.sh
 ```
 
 **번들러 역할:**
@@ -39,7 +44,7 @@ powershell -ExecutionPolicy Bypass -File .claude/hooks/html-bundler.ps1
 
 **검증:**
 - `dist/index.html` 존재 + 비어있지 않음 직접 확인 (구 build-validator.ps1은 retired — 2026-06-10 M07 정정)
-- 재생성 필요 시 `.claude/hooks/html-bundler.ps1` 재실행
+- 재생성 필요 시 `step_archive/tools/html-bundler.ps1` 재실행
 
 **검증 실패 시:**
 - 빌드 에러 분석

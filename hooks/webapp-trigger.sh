@@ -45,6 +45,8 @@ PATTERNS=(
   'webapp[[:space:]]+생성'
   '웹앱.*튜토리얼'
   '인터렉티브.*필수'
+  '대시보드.*(만들어|만들|생성|제작|구현)'
+  '(웹앱|웹[[:space:]]*앱|웹[[:space:]]*페이지|web[[:space:]]*app).*(만들어|만들|생성|제작|구현)'
 )
 MATCHED=0
 for p in "${PATTERNS[@]}"; do
@@ -64,6 +66,14 @@ if [ -d "$ASSET_STEPS" ]; then
     [ ! -e "$dst" ] && cp "$src" "$dst"
   done
 fi
+
+# H4 수정: html-bundler를 프로젝트로 복사 (step081/038에서 실행 가능하게)
+TOOLS_DIR="$STEP_ARCHIVE/tools"
+mkdir -p "$TOOLS_DIR"
+HOOK_DIR="$(dirname "${BASH_SOURCE[0]}")"
+for b in html-bundler.ps1 html-bundler.sh; do
+  [ -f "$HOOK_DIR/$b" ] && cp "$HOOK_DIR/$b" "$TOOLS_DIR/$b"
+done
 
 # TOPIC.md
 TODAY="$(date '+%Y-%m-%d')"

@@ -37,6 +37,12 @@ case "$TOOL" in
   *) exit 0 ;;
 esac
 
+# [보안 수정 — 하네스 활성 게이트] auto-approve는 harness107 자율주행이 실제
+# 가동 중일 때만 발화한다. progress.json이 없으면(무관한 일반 세션) 자동승인을
+# 발급하지 않고 정상 권한 흐름으로 떨어뜨린다 (전역 자동승인 결함 차단).
+PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
+[ -f "$PROJECT_ROOT/step_archive/progress.json" ] || exit 0
+
 # 8회차 B-7: 코멘트 라인 스킵 헬퍼 (단일 라인 # 코멘트 false-positive 방지).
 # 단일/다중 라인 모두 코멘트가 아닌 비공백 라인만 남긴다.
 strip_comment_lines() {
@@ -304,6 +310,25 @@ if [ "$TOOL" = "Bash" ] && [ -n "${CMD:-}" ]; then
     '\bruby[[:space:]]+-r?e[[:space:]]+["'\''][^"'\'']*\bTCPSocket\b'
     '\bphp[[:space:]]+-r[[:space:]]+["'\''][^"'\'']*\bfsockopen\b'
     '\bsocat[[:space:]]+(tcp|exec):'
+    # [보안 수정 C2] 인터프리터 경유 파일 삭제 (내부 따옴표에 끊기지 않게 자유 매칭)
+    '\bpython[0-9]*[[:space:]]+-c\b.*(shutil\.rmtree|os\.(remove|unlink|rmdir))'
+    '\bnode[[:space:]]+(-e|--eval)\b.*(rmSync|unlinkSync|rmdirSync|fs\.rm|fs\.unlink|fs\.rmdir)'
+    '\bperl[[:space:]]+-e\b.*(unlink|rmtree|File::Path)'
+    '\bruby[[:space:]]+-r?e\b.*(FileUtils\.rm|File\.delete|Dir\.(rmdir|delete))'
+    # [보안 수정 C2] 변수 인다이렉션 재귀 삭제 ($X -rf ...). 재귀 플래그(r) 필수.
+    '\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[[:space:]]+-[a-zA-Z]*[rR][a-zA-Z]*[[:space:]]'
+    'eval[[:space:]]+["'\''][^"'\'']*\brm\b'
+    # [보안 수정 C3] git 훅/앨리어스 하이재킹
+    'git[[:space:]]+config[[:space:]]+.*core\.hooksPath'
+    'git[[:space:]]+config[[:space:]]+.*alias\.'
+    '\.git/hooks/'
+    # [보안 수정 C3] 2단계 다운로드 후 실행
+    '(curl|wget)[[:space:]]+[^|]*-[oO][[:space:]]+[^[:space:]]+.*(&&|;|\|\|).*(\b(sh|bash|zsh|source)\b|\./|python|node|perl)'
+    'chmod[[:space:]]+\+x[[:space:]]+[^[:space:]]+.*(&&|;).*(\./|\bbash\b|\bsh\b)'
+    # [보안 수정 H7] 자격증명/비밀키 읽기·유출
+    '\b(cat|less|more|head|tail|cp|mv|tar|zip|base64|xxd|od|strings)\b[^|;&]*(\.ssh/|\.aws/|\.gnupg/|\.kube/config|id_rsa|id_ed25519|id_ecdsa|credentials\b|\.env\b|\.npmrc\b|\.pypirc\b)'
+    'curl[[:space:]]+[^|]*(-T[[:space:]]|--upload-file|--data-binary[[:space:]]+@|-d[[:space:]]+@|-F[[:space:]]+[^[:space:]]*=@)'
+    '(id_rsa|id_ed25519|credentials|\.env)\b[^|]*\|[[:space:]]*(curl|wget|nc|ncat)\b'
   )
   for p in "${DESTRUCTIVE_PATTERNS[@]}"; do
     if printf '%s' "$CMD" | grep -Eq "$p"; then

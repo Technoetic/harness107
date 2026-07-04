@@ -23,7 +23,7 @@ Step 37 구현이 완료된 후, 다음 단계로 진행하기 전 빌드 안전
 
 다음을 순서대로 실행한다. 하나라도 실패하면 다음 Step으로 진행하지 않는다.
 
-1. HTML 번들링: `.claude/hooks/html-bundler.ps1` 실행
+1. HTML 번들링: `step_archive/tools/html-bundler.ps1` 실행 (macOS/Linux는 `bash step_archive/tools/html-bundler.sh`)
 2. dist/index.html 유효성: 직접 검사 — 파일 존재 + 크기 > 0 + `<html`/`</html>` 포함 확인
    (구 build-validator.ps1은 retired — 2026-06-10 하네스 감사 M07 정정)
 3. 순환 의존성: `npx madge --circular src/` 실행

@@ -97,10 +97,16 @@ $patternA = '^\s*[✅→\-\*\s]*Step\s+(\d{1,3})\s*/\s*(\d{1,3})\s*완료'
 # 패턴 B: "Step NNN 완료" (총수 없는 약식 보고)
 $patternB = '^\s*[✅→\-\*\s]*Step\s+(\d{1,3})\s+완료'
 
+$inFence = $false
 foreach ($respLine in ($response -split "`n")) {
+    if ($null -eq $respLine) { continue }
+    # H3 수정: 코드펜스(```/~~~) 블록 추적 — 펜스 안의 "Step NNN/107 완료" 예시는
+    # 완료 신호로 인정하지 않는다 (백틱이 같은 줄에 없어도 차단).
+    if ($respLine -match '^\s*(```|~~~)') { $inFence = -not $inFence; continue }
+    if ($inFence) { continue }
     if (-not $respLine) { continue }
     # 인용/예시 컨텍스트 가드: 코드 인용(백틱), 마크다운 인용(>), 예시 표기 줄은 스킵
-    if ($respLine -match '`' -or $respLine -match '^\s*>' -or $respLine -match '예\s*[:)]') { continue }
+    if ($respLine -match '`' -or $respLine -match '^\s*>' -or $respLine -match '예\s*[:)]' -or $respLine -match '예시') { continue }
     $mA = [regex]::Match($respLine, $patternA, 'IgnoreCase')
     if ($mA.Success) {
         $stepNum = [int]$mA.Groups[1].Value

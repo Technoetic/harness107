@@ -61,12 +61,30 @@ if j:
 
 total=int(progress.get("total_steps",107))
 found=set()
-for m in re.finditer(r'Step\s+(\d{1,3})\s*/\s*(\d{1,3})\s*완료', response, re.I):
-    n=int(m.group(1)); tot=int(m.group(2))
-    if 1<=n<=total and tot==total: found.add(n)
-for m in re.finditer(r'(?m)(?:^|[\s✅→])Step\s+(\d{1,3})\s+완료', response, re.I):
-    n=int(m.group(1))
-    if 1<=n<=total: found.add(n)
+# .ps1 파리티 (H3 수정): 줄 단위 스캔 + 코드펜스/인용/예시 가드.
+# 모델이 문서 예시 문자열("Step 042/107 완료")을 코드블록·인용·예시로 본문에
+# 인용했을 때의 위양성 완료 처리를 차단한다. ``` 펜스 안, 인용(>), 백틱 포함,
+# "예:"/"예시" 표기 줄은 완료 신호로 인정하지 않는다.
+in_fence=False
+patA=re.compile(r'^\s*[✅→\-\*\s]*Step\s+(\d{1,3})\s*/\s*(\d{1,3})\s*완료', re.I)
+patB=re.compile(r'^\s*[✅→\-\*\s]*Step\s+(\d{1,3})\s+완료', re.I)
+for line in response.split("\n"):
+    if re.match(r'^\s*(```|~~~)', line):
+        in_fence=not in_fence
+        continue
+    if in_fence:
+        continue
+    if '`' in line or re.match(r'^\s*>', line) or re.search(r'예\s*[:)]', line) or '예시' in line:
+        continue
+    mA=patA.match(line)
+    if mA:
+        n=int(mA.group(1)); tot=int(mA.group(2))
+        if 1<=n<=total and tot==total: found.add(n)
+        continue
+    mB=patB.match(line)
+    if mB:
+        n=int(mB.group(1))
+        if 1<=n<=total: found.add(n)
 
 valid={n for n in found if os.path.exists(os.path.join(a_dir,f"step{n:03d}.md"))}
 existing=set(int(x) for x in (progress.get("completed_steps") or []))

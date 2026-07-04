@@ -69,7 +69,7 @@ bootstrap().catch((err) => {
 
 - 소스 파일은 `src/` 디렉토리에 분리 유지 (개발 소스)
 - 엔트리 HTML은 `src/index.html`에 작성하고 `<script src="js/...">`, `<link href="css/...">` 로 참조
-- `dist/index.html`은 Step 81 빌드 단계에서 `.claude/hooks/html-bundler.ps1`이 자동 생성
+- `dist/index.html`은 Step 81 빌드 단계에서 `step_archive/tools/html-bundler.ps1`이 자동 생성
 - **직접 index.html에 인라인으로 합치는 것 금지** (번들러가 담당)
 
 ## 이유

@@ -36,7 +36,7 @@ PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
 cd "$PROJECT_ROOT" || exit 0
 
 if [ "$KIND" = "js" ]; then
-  if npx biome check --apply "$FP" >/dev/null 2>&1; then
+  if npx biome check --write "$FP" >/dev/null 2>&1; then
     log "biome OK: $FP"
   else
     log "biome diag: $FP"

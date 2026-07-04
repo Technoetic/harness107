@@ -12,11 +12,10 @@
 [![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Plugin-191919?style=for-the-badge&logo=anthropic&logoColor=white)](https://github.com/Technoetic/harness107)
 [![License MIT](https://img.shields.io/badge/License-MIT-A855F7?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows_·_macOS_·_Linux-0EA5E9?style=for-the-badge&logo=windows&logoColor=white)](#-설치)
-[![Hooks](https://img.shields.io/badge/Hooks-26_files-F59E0B?style=for-the-badge)](hooks/)
+[![Hooks](https://img.shields.io/badge/Hooks-28_files-F59E0B?style=for-the-badge)](hooks/)
 [![Steps](https://img.shields.io/badge/Steps-107_files-10B981?style=for-the-badge)](assets/steps/)
 
-[![Audit Rounds](https://img.shields.io/badge/Audit_Rounds-9-EC4E20?style=for-the-badge)](#%EF%B8%8F-9회차-감사로-검증된-안전-모델)
-[![Regression Matrix](https://img.shields.io/badge/Regression-153_cells_·_100%25-22C55E?style=for-the-badge)](#%EF%B8%8F-9회차-감사로-검증된-안전-모델)
+[![Security Tests](https://img.shields.io/badge/Security_Tests-45_cases_·_reproducible-22C55E?style=for-the-badge)](tests/security-regression.sh)
 [![Patterns](https://img.shields.io/badge/Safety_Patterns-200+-EF4444?style=for-the-badge)](hooks/destructive-guard.ps1)
 [![Dual Shell](https://img.shields.io/badge/Dual_Shell-PS1_+_SH-7C3AED?style=for-the-badge&logo=powershell&logoColor=white)](hooks/)
 [![Style](https://img.shields.io/badge/style-no_questions-FF1493?style=for-the-badge)](skills/harness-rules/SKILL.md)
@@ -151,16 +150,21 @@ flowchart TB
 `--dangerously-skip-permissions`의 효과를 **권한 팝업 없이도** 누리되, 위험 명령은 즉시 차단.<br/>
 공식 hooks 스펙 `permissionDecision:"allow"` 메커니즘 위에 **9회차에 걸쳐 누적된 200+ 안전 패턴**을 얹었다.
 
+> [!IMPORTANT]
+> **auto-approve는 하네스 자율주행이 실제 가동 중일 때만 발화한다.** 프로젝트에 `step_archive/progress.json`이 없으면(= `/webapp` 미트리거, 무관한 일반 세션) 자동승인을 발급하지 않고 정상 권한 흐름으로 떨어뜨린다. 플러그인 설치만으로 모든 세션이 상시 자동승인되는 전역 결함을 차단한다.
+>
+> 아래 표는 **개발 과정의 감사 회차 서사**다. 실제로 **재현 가능한 검증**은 저장소에 커밋된 [`tests/security-regression.sh`](tests/security-regression.sh)로, 위험 명령 18종 차단 + 정상 명령 8종 승인 유지 + 하네스 비활성 게이트를 45개 케이스로 검사한다 (`bash tests/security-regression.sh`, POSIX 대상). 블랙리스트 방식의 본질적 불완전성(셸 동치표현의 무한성)은 여전하며, 이 스위트는 알려진 우회의 회귀만 보장한다.
+
 ```mermaid
 flowchart LR
     Tool["🔧 Bash / Write / Edit / WebFetch"]
 
     subgraph layer1["1️⃣ destructive-guard"]
-        DG["125+ 위험 패턴<br/>exit 2<br/><i>regardless of allow</i>"]
+        DG["위험 패턴 블랙리스트<br/>exit 2<br/><i>regardless of allow</i>"]
     end
 
     subgraph layer2["2️⃣ auto-approve"]
-        AA["200+ 사전 검증<br/>경로 정규화 + 8.3 expand<br/>WSL2 fallback<br/>화이트리스트 7종"]
+        AA["하네스 활성 게이트<br/>+ 사전 검증 패턴<br/>경로 정규화 + WSL2 fallback<br/>progress.json 없으면 미발화"]
     end
 
     subgraph layer3["3️⃣ permission-request-guard"]
@@ -203,9 +207,10 @@ flowchart LR
 | 6 | -10 | WSL2 9p auto-expand로 short name 우회 → realpath + fallback 추가 |
 | 7 | -30 | 3중 hook 동기화 갭 3건. MultiEdit `edits[].new_string`에서 sudo 자동승인 발견 |
 | 8 | -210 | 권한 상승·설치·리버스쉘 패턴 20건 잔존 → 23 PoC 카테고리 전수 차단 |
-| 9 | 0 | **회귀 153셀 100% 일치. chmod 6/6 변형 통과. 사이클 종료** |
+| 9 | 0 | **개발 감사 사이클 종료** |
+| 재현 | — | **커밋된 `tests/security-regression.sh` — 45 케이스 (차단 18 + 승인 8 + 게이트) 통과. 신규 커버: 변수 인다이렉션·인터프리터 삭제·git hooksPath·2단계 다운로드·자격증명 유출** |
 
-153셀 회귀 매트릭스 = (7회차 15셀 × 3 hook) + (8회차 A 23 × 2 시나리오 × 2 hook) + (8회차 B 8 × 2 환경)
+위 회차별 셀 수는 개발 과정의 감사 기록이며, 저장소에서 재현 가능한 검증은 `tests/security-regression.sh`(45 케이스)다. 감사 로그 원본은 커밋되어 있지 않다 — 재현 가능한 증거는 이 테스트 스위트로 대체한다.
 
 </details>
 
@@ -274,7 +279,11 @@ graph TB
 
 ```
 harness107/
-├── .claude-plugin/plugin.json         ← v1.0.0 · MIT
+├── .claude-plugin/
+│   ├── plugin.json                    ← v1.0.0 · MIT
+│   └── marketplace.json               ← /plugin marketplace add 진입점
+├── tests/
+│   └── security-regression.sh         ← 45 케이스 안전 회귀 (재현 가능)
 ├── commands/                          ← 3개 슬래시 커맨드
 │   ├── webapp.md                      ← /webapp <주제>  자율주행 진입
 │   ├── harness-status.md              ← /harness-status 1줄 진행 보고
@@ -289,9 +298,10 @@ harness107/
 ├── agents/
 │   └── step-executor.md               ← 단일 step 실행 워커 (haiku 고정)
 │
-├── hooks/                             ← 13쌍 = 26 파일 (.ps1 + .sh)
+├── hooks/                             ← 14쌍 = 28 파일 (.ps1 + .sh)
 │   ├── hooks.json                     ← 6개 이벤트 바인딩
-│   ├── webapp-trigger.{ps1,sh}        ← 트리거 감지 + 부트스트랩
+│   ├── html-bundler.{ps1,sh}          ← src/ → 단일 dist/index.html 번들러
+│   ├── webapp-trigger.{ps1,sh}        ← 트리거 감지 + 부트스트랩 (번들러 프로젝트 복사 포함)
 │   ├── step-obedience-guard.{ps1,sh}  ← 매 prompt마다 다음 step 강제
 │   ├── step-progress-loader.{ps1,sh}  ← SessionStart 로드
 │   ├── step-progress-writer.{ps1,sh}  ← transcript 스캔 + 원자적 write

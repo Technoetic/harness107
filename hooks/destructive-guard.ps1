@@ -101,7 +101,28 @@ $destructivePatterns = @(
     'kubectl\s+delete\s+(ns|namespace|node|pv|pvc|--all)',            # K8s 광범위 삭제
     'terraform\s+destroy\s+(-auto-approve|-force)',                   # Terraform 자동 파괴
     '(ngrok|cloudflared)\s+http\s+(0\.0\.0\.0|\*)',                   # 외부 노출 터널
-    'echo\s+["''](AKIA|ghp_|sk-|xoxb-)'                              # 시크릿 패턴 echo
+    'echo\s+["''](AKIA|ghp_|sk-|xoxb-)',                             # 시크릿 패턴 echo
+    # [보안 수정 C2] 인터프리터 경유 파일 삭제 (리터럴 rm 우회 차단).
+    # 페이로드 내부 따옴표에 끊기지 않도록 -c/-e 이후를 자유 매칭한다.
+    '(?i)python\d*\s+-c\b.*(shutil\.rmtree|os\.(remove|unlink|rmdir))',
+    '(?i)node\s+(-e|--eval)\b.*(rmSync|unlinkSync|rmdirSync|fs\.rm\b|fs\.unlink|fs\.rmdir)',
+    '(?i)perl\s+-e\b.*(unlink|rmtree|File::Path)',
+    '(?i)ruby\s+-r?e\b.*(FileUtils\.rm|File\.delete|Dir\.(rmdir|delete))',
+    # [보안 수정 C2] 변수 인다이렉션 재귀 삭제 ($X -rf ...). 재귀 플래그(r) 필수로
+    # 좁혀 비재귀 -f (예: tar $ARGS -f) 오탐을 배제한다.
+    '\$\{?[A-Za-z_]\w*\}?\s+-[a-zA-Z]*[rR][a-zA-Z]*\s',
+    '(?i)eval\s+["''][^"'']*\brm\b',
+    # [보안 수정 C3] git 훅/앨리어스 하이재킹 (지속 코드실행 백도어)
+    '(?i)git\s+config\s+.*core\.hooksPath',
+    '(?i)git\s+config\s+.*alias\.',
+    '(?i)\.git[\\/]hooks[\\/]',
+    # [보안 수정 C3] 2단계 다운로드 후 실행
+    '(?i)(curl|wget)\s+[^|]*-[oO]\s+\S+.*(&&|;|\|\|).*(\b(sh|bash|zsh|source)\b|\.\/|python|node|perl)',
+    '(?i)chmod\s+\+x\s+\S+.*(&&|;).*(\.\/|\bbash\b|\bsh\b)',
+    # [보안 수정 H7] 자격증명/비밀키 읽기·유출
+    '(?i)\b(cat|less|more|head|tail|cp|mv|tar|zip|base64|xxd|od|strings)\b[^|;&]*(\.ssh[\\/]|\.aws[\\/]|\.gnupg[\\/]|\.kube[\\/]config|id_rsa|id_ed25519|id_ecdsa|credentials\b|\.env\b|\.npmrc\b|\.pypirc\b)',
+    '(?i)curl\s+[^|]*(-T\s|--upload-file|--data-binary\s+@|-d\s+@|-F\s+\S*=@)',
+    '(?i)(id_rsa|id_ed25519|credentials|\.env)\b[^|]*\|\s*(curl|wget|nc|ncat)\b'
 )
 
 foreach ($pattern in $destructivePatterns) {

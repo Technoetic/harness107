@@ -95,6 +95,25 @@ PATTERNS=(
   '\bruby[[:space:]]+-r?e[[:space:]]+["'\''][^"'\'']*\bTCPSocket\b'
   '\bphp[[:space:]]+-r[[:space:]]+["'\''][^"'\'']*\bfsockopen\b'
   '\bsocat[[:space:]]+(tcp|exec):'
+  # [보안 수정 C2] 인터프리터 경유 파일 삭제 (내부 따옴표에 끊기지 않게 자유 매칭)
+  '\bpython[0-9]*[[:space:]]+-c\b.*(shutil\.rmtree|os\.(remove|unlink|rmdir))'
+  '\bnode[[:space:]]+(-e|--eval)\b.*(rmSync|unlinkSync|rmdirSync|fs\.rm|fs\.unlink|fs\.rmdir)'
+  '\bperl[[:space:]]+-e\b.*(unlink|rmtree|File::Path)'
+  '\bruby[[:space:]]+-r?e\b.*(FileUtils\.rm|File\.delete|Dir\.(rmdir|delete))'
+  # [보안 수정 C2] 변수 인다이렉션 재귀 삭제 ($X -rf ...). 재귀 플래그(r) 필수.
+  '\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[[:space:]]+-[a-zA-Z]*[rR][a-zA-Z]*[[:space:]]'
+  'eval[[:space:]]+["'\''][^"'\'']*\brm\b'
+  # [보안 수정 C3] git 훅/앨리어스 하이재킹 (지속 코드실행 백도어)
+  'git[[:space:]]+config[[:space:]]+.*core\.hooksPath'
+  'git[[:space:]]+config[[:space:]]+.*alias\.'
+  '\.git/hooks/'
+  # [보안 수정 C3] 2단계 다운로드 후 실행
+  '(curl|wget)[[:space:]]+[^|]*-[oO][[:space:]]+[^[:space:]]+.*(&&|;|\|\|).*(\b(sh|bash|zsh|source)\b|\./|python|node|perl)'
+  'chmod[[:space:]]+\+x[[:space:]]+[^[:space:]]+.*(&&|;).*(\./|\bbash\b|\bsh\b)'
+  # [보안 수정 H7] 자격증명/비밀키 읽기·유출
+  '\b(cat|less|more|head|tail|cp|mv|tar|zip|base64|xxd|od|strings)\b[^|;&]*(\.ssh/|\.aws/|\.gnupg/|\.kube/config|id_rsa|id_ed25519|id_ecdsa|credentials\b|\.env\b|\.npmrc\b|\.pypirc\b)'
+  'curl[[:space:]]+[^|]*(-T[[:space:]]|--upload-file|--data-binary[[:space:]]+@|-d[[:space:]]+@|-F[[:space:]]+[^[:space:]]*=@)'
+  '(id_rsa|id_ed25519|credentials|\.env)\b[^|]*\|[[:space:]]*(curl|wget|nc|ncat)\b'
 )
 for p in "${PATTERNS[@]}"; do
   if printf '%s' "$CMD" | grep -Eq "$p"; then

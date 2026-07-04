@@ -42,6 +42,15 @@ try { if ($j -and $j.tool_name) { $toolName = $j.tool_name } } catch {}
 $autoApproveTools = @("Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch")
 if ($autoApproveTools -notcontains $toolName) { exit 0 }
 
+# [보안 수정 — 하네스 활성 게이트] auto-approve는 오직 harness107 자율주행이
+# 실제 가동 중일 때만 발화한다. progress.json이 없으면(= /webapp 미트리거,
+# 무관한 일반 세션) 자동승인을 절대 발급하지 않고 정상 권한 흐름으로 떨어뜨린다.
+# 이 게이트가 없으면 플러그인 설치만으로 모든 세션이 상시 --dangerously-skip-permissions
+# 상태가 되는 전역 자동승인 결함이 발생한다 (README:215 "그 외엔 silent skip" 계약 준수).
+$projectRoot = if ($env:CLAUDE_PROJECT_DIR) { $env:CLAUDE_PROJECT_DIR } else { (Get-Location).Path }
+$progressFile = Join-Path $projectRoot "step_archive/progress.json"
+if (-not (Test-Path $progressFile)) { exit 0 }
+
 # 4회차 정규화 헬퍼 + 5회차 8.3 short name expand:
 #   URL-decode -> 8.3 expand (System.IO.Path.GetFullPath; well-known short names만 expand,
 #   비용 0.04ms 측정) -> backslash->slash -> // 축약 -> trailing dot/space 제거
@@ -320,7 +329,26 @@ if ($toolName -eq "Bash") {
       '(?i)\bperl\s+-e\s+["''][^"'']*\bsocket\b',
       '(?i)\bruby\s+-r?e\s+["''][^"'']*\bTCPSocket\b',
       '(?i)\bphp\s+-r\s+["''][^"'']*\bfsockopen\b',
-      '(?i)\bsocat\s+(tcp|exec):'
+      '(?i)\bsocat\s+(tcp|exec):',
+      # [보안 수정 C2] 인터프리터 경유 파일 삭제 (내부 따옴표에 끊기지 않게 자유 매칭)
+      '(?i)\bpython\d*\s+-c\b.*(shutil\.rmtree|os\.(remove|unlink|rmdir))',
+      '(?i)\bnode\s+(-e|--eval)\b.*(rmSync|unlinkSync|rmdirSync|fs\.rm\b|fs\.unlink|fs\.rmdir)',
+      '(?i)\bperl\s+-e\b.*(unlink|rmtree|File::Path)',
+      '(?i)\bruby\s+-r?e\b.*(FileUtils\.rm|File\.delete|Dir\.(rmdir|delete))',
+      # [보안 수정 C2] 변수 인다이렉션 재귀 삭제 ($X -rf ...). 재귀 플래그(r) 필수.
+      '\$\{?[A-Za-z_]\w*\}?\s+-[a-zA-Z]*[rR][a-zA-Z]*\s',
+      '(?i)\beval\s+["''][^"'']*\brm\b',
+      # [보안 수정 C3] git 훅/앨리어스 하이재킹 (지속 코드실행 백도어)
+      '(?i)\bgit\s+config\s+.*\bcore\.hooksPath\b',
+      '(?i)\bgit\s+config\s+.*\balias\.',
+      '(?i)\.git[\\/]hooks[\\/]',
+      # [보안 수정 C3] 2단계 다운로드 후 실행 (curl -o x && sh x)
+      '(?i)(curl|wget)\s+[^|]*-[oO]\s+\S+.*(&&|;|\|\|).*(\b(sh|bash|zsh|source)\b|\.\/|python|node|perl)',
+      '(?i)\bchmod\s+\+x\s+\S+.*(&&|;).*(\.\/|\bbash\b|\bsh\b)',
+      # [보안 수정 H7] 자격증명/비밀키 읽기·유출
+      '(?i)\b(cat|less|more|head|tail|cp|mv|tar|zip|base64|xxd|od|strings)\b[^|;&]*(\.ssh[\\/]|\.aws[\\/]|\.gnupg[\\/]|\.kube[\\/]config|id_rsa|id_ed25519|id_ecdsa|credentials\b|\.env\b|\.npmrc\b|\.pypirc\b)',
+      '(?i)\bcurl\s+[^|]*(-T\s|--upload-file|--data-binary\s+@|-d\s+@|-F\s+\S*=@)',
+      '(?i)(id_rsa|id_ed25519|credentials|\.env)\b[^|]*\|\s*(curl|wget|nc|ncat)\b'
     )
     foreach ($p in $destructivePatterns) {
       if ($command -match $p) {
