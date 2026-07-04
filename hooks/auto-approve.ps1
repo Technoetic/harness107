@@ -93,7 +93,18 @@ $sensitivePathPatternsNorm = @(
   '/windows/',
   '/program files/',
   'harness107/hooks/(destructive-guard|auto-approve|permission-request-guard|step-auto-continue|hooks\.json)',
-  'harness107/\.claude-plugin/plugin\.json$'
+  'harness107/\.claude-plugin/plugin\.json$',
+  # [보안 수정 C-3] 지속성/자동실행 write 벡터 (코드 지속실행 백도어 경로)
+  '(^|/)\.git/hooks/',
+  '/\.config/systemd/user/',
+  '/\.config/autostart/',
+  '/(\.npmrc|\.pypirc)$',
+  '/\.pip/pip\.conf$',
+  '/\.(local/bin|bin)/(rm|git|sudo|curl|wget|npm|node|python[0-9]*|sh|bash|env)$',
+  '/\.envrc$',
+  '/\.vscode/(tasks|launch)\.json$',
+  '/etc/cron',
+  '/cron\.(d|daily|hourly|weekly|monthly)/'
 )
 
 function Test-SensitivePath([string]$p) {
@@ -234,6 +245,27 @@ if ($toolName -eq "Bash") {
   }
 }
 
+# [보안 수정 C-1] Bash 명령이 민감경로에 write하면 자동승인 미발급.
+# (기존 sensitivePath 검사가 Write/Edit 분기에만 배선돼, echo>hook / cp / sed -i 등
+#  Bash 경로 훅 자기무력화가 auto-allow되던 갭을 닫는다.)
+function Test-BashSensitiveWrite([string]$cmd) {
+  if (-not $cmd) { return $false }
+  # write 지시어(리다이렉트/tee/cp/mv/install/ln/rsync/dd of=/sed -i/인터프리터 write)가
+  # 존재할 때만, 명령의 모든 토큰을 민감경로로 검사한다. (sed -i EXPR FILE 처럼 파일이
+  # 두 번째 인자로 오는 형태까지 놓치지 않도록 토큰 전수 검사)
+  $hasWriteVerb = $cmd -match '(?i)(>>?|\btee\b|\bcp\b|\bmv\b|\binstall\b|\bln\b|\brsync\b|\bdd\s+[^|;&]*of=|\bsed\s+-i|writeFileSync|appendFileSync|writeSync|open\([^)]*["''][aw])'
+  if (-not $hasWriteVerb) { return $false }
+  foreach ($m in [regex]::Matches($cmd, '[^\s"''|;&<>()]+')) {
+    if (Test-SensitivePath $m.Value) { return $true }
+  }
+  return $false
+}
+if ($toolName -eq "Bash") {
+  $c0 = $null
+  try { $c0 = $j.tool_input.command } catch {}
+  if (Test-BashSensitiveWrite $c0) { exit 0 }
+}
+
 # Bash 도구일 때만 명령 안전성 재검증 (race-safe).
 if ($toolName -eq "Bash") {
   $command = $null
@@ -335,18 +367,27 @@ if ($toolName -eq "Bash") {
       '(?i)\bnode\s+(-e|--eval)\b.*(rmSync|unlinkSync|rmdirSync|fs\.rm\b|fs\.unlink|fs\.rmdir)',
       '(?i)\bperl\s+-e\b.*(unlink|rmtree|File::Path)',
       '(?i)\bruby\s+-r?e\b.*(FileUtils\.rm|File\.delete|Dir\.(rmdir|delete))',
-      # [보안 수정 C2] 변수 인다이렉션 재귀 삭제 ($X -rf ...). 재귀 플래그(r) 필수.
-      '\$\{?[A-Za-z_]\w*\}?\s+-[a-zA-Z]*[rR][a-zA-Z]*\s',
+      # [보안 수정 C2/M-2] 변수 인다이렉션 재귀 삭제 ($X -rf <위험타깃>). 재귀 플래그 + 위험타깃 필수
+      # (정상 $CC -shared / $GREP -rn <패턴> 오차단 방지: 뒤에 /|~|*|$ 위험타깃이 와야 매칭)
+      '(^|[;&|]\s*)\$\{?[A-Za-z_]\w*\}?\s+-[a-zA-Z]*[rR][a-zA-Z]*\s+["'']?(/|~|\*|\$)',
       '(?i)\beval\s+["''][^"'']*\brm\b',
       # [보안 수정 C3] git 훅/앨리어스 하이재킹 (지속 코드실행 백도어)
       '(?i)\bgit\s+config\s+.*\bcore\.hooksPath\b',
       '(?i)\bgit\s+config\s+.*\balias\.',
       '(?i)\.git[\\/]hooks[\\/]',
+      # [보안 수정 C-2] git -c / --config-env / --upload-pack 훅 하이재킹 정규형
+      '(?i)\bgit\s+(-c|--config-env)\s+\S*(core\.hooksPath|alias\.|core\.sshCommand|core\.fsmonitor|uploadpack\.|receive\.)',
+      '(?i)\bgit\s+clone\b[^\n]*(--upload-pack|--exec)',
+      '(?i)\bgit\s+\S+[^\n]*--(upload|receive)-pack',
       # [보안 수정 C3] 2단계 다운로드 후 실행 (curl -o x && sh x)
       '(?i)(curl|wget)\s+[^|]*-[oO]\s+\S+.*(&&|;|\|\|).*(\b(sh|bash|zsh|source)\b|\.\/|python|node|perl)',
       '(?i)\bchmod\s+\+x\s+\S+.*(&&|;).*(\.\/|\bbash\b|\bsh\b)',
-      # [보안 수정 H7] 자격증명/비밀키 읽기·유출
-      '(?i)\b(cat|less|more|head|tail|cp|mv|tar|zip|base64|xxd|od|strings)\b[^|;&]*(\.ssh[\\/]|\.aws[\\/]|\.gnupg[\\/]|\.kube[\\/]config|id_rsa|id_ed25519|id_ecdsa|credentials\b|\.env\b|\.npmrc\b|\.pypirc\b)',
+      # [보안 수정 H7/H-1] 하드 시크릿(ssh/aws/gnupg/kube/id_rsa): 읽기·복사·이동 전부 차단
+      '(?i)\b(cat|less|more|head|tail|cp|mv|tar|zip|base64|xxd|od|strings)\b[^|;&]*(\.ssh[\\/]|\.aws[\\/]|\.gnupg[\\/]|\.kube[\\/]config|id_rsa|id_ed25519|id_ecdsa|credentials(?![.\w-]))',
+      # [보안 수정 H-1] .env/.npmrc/.pypirc: 순수 읽기만 차단 (cp/mv 제외 — 표준 `cp .env.example .env` 허용)
+      '(?i)\b(cat|less|more|head|tail|base64|xxd|od|strings)\b[^|;&]*(\.env(?![.\w-])|\.npmrc(?![.\w-])|\.pypirc(?![.\w-]))',
+      # [보안 수정 M-3] 환경변수 프리로드 임의코드 주입
+      '(?i)(^|[;&|(]|\s)(LD_PRELOAD|LD_LIBRARY_PATH|LD_AUDIT|DYLD_INSERT_LIBRARIES|DYLD_LIBRARY_PATH|NODE_OPTIONS|BASH_ENV|PYTHONSTARTUP|PERL5OPT|RUBYOPT|GIT_SSH_COMMAND|GIT_EXTERNAL_DIFF)\s*=',
       '(?i)\bcurl\s+[^|]*(-T\s|--upload-file|--data-binary\s+@|-d\s+@|-F\s+\S*=@)',
       '(?i)(id_rsa|id_ed25519|credentials|\.env)\b[^|]*\|\s*(curl|wget|nc|ncat)\b'
     )
