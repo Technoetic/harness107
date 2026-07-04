@@ -73,7 +73,7 @@
 | `/webapp 논문 인용 네트워크` | force-directed 인용 관계망 + 시간축 애니메이션 + 검색·필터 + 영향력 노드 강조 |
 | `/webapp 저자 연구 활동 대시보드` | h-index·인용 추이 KPI + 공저자 네트워크 + 키워드 워드클라우드 + 연도별 라인 |
 | `/webapp Literature Review 대시보드` | 논문 분류 매트릭스 + 갭 분석 다이어그램 + 읽기 큐 카드 + 태그 클라우드 |
-| 자연어 `"... 대시보드 만들어줘"` | 위 넷과 동일. 트리거 패턴 7종 모두 지원 |
+| 자연어 `"... 대시보드 인터랙티브 튜토리얼 만들어줘"` | 위 넷과 동일. 트리거 패턴 8종 지원(자연어는 튜토리얼/초보자/인터랙티브 신호 동반 필요 — 오부팅 방지) |
 
 산출물 = **단일 HTML 파일** (Helvetica Neue / 8 배수 grid / accent 1색 / radius {0,4,8,12,16} / 터치 44pt / ARIA 필수).
 
@@ -152,6 +152,9 @@ flowchart TB
 
 > [!IMPORTANT]
 > **auto-approve는 하네스 자율주행이 실제 가동 중일 때만 발화한다.** 프로젝트에 `step_archive/progress.json`이 없으면(= `/webapp` 미트리거, 무관한 일반 세션) 자동승인을 발급하지 않고 정상 권한 흐름으로 떨어뜨린다. 플러그인 설치만으로 모든 세션이 상시 자동승인되는 전역 결함을 차단한다.
+
+> [!NOTE]
+> **보장되는 위험 차단은 2계층**이다: ① `destructive-guard`(exit 2, allow 무관 강제 차단) + ② `auto-approve`(위험 패턴 시 allow 미발급). 3번째 `permission-request-guard`는 `PermissionRequest` 이벤트를 지원하는 Claude Code 버전에서만 동작하는 **defense-in-depth**이며, 미지원 버전에서는 조용히 비활성(무해)이다 — 보안 보장을 이 계층에 의존하지 않는다.
 >
 > 아래 표는 **개발 과정의 감사 회차 서사**다. 실제로 **재현 가능한 검증**은 저장소에 커밋된 [`tests/security-regression.sh`](tests/security-regression.sh)로, 위험 명령 18종 차단 + 정상 명령 8종 승인 유지 + 하네스 비활성 게이트를 45개 케이스로 검사한다 (`bash tests/security-regression.sh`, POSIX 대상). 블랙리스트 방식의 본질적 불완전성(셸 동치표현의 무한성)은 여전하며, 이 스위트는 알려진 우회의 회귀만 보장한다.
 
@@ -208,7 +211,7 @@ flowchart LR
 | 7 | -30 | 3중 hook 동기화 갭 3건. MultiEdit `edits[].new_string`에서 sudo 자동승인 발견 |
 | 8 | -210 | 권한 상승·설치·리버스쉘 패턴 20건 잔존 → 23 PoC 카테고리 전수 차단 |
 | 9 | 0 | **개발 감사 사이클 종료** |
-| 재현 | — | **커밋된 `tests/security-regression.sh` — 45 케이스 (차단 18 + 승인 8 + 게이트) 통과. 신규 커버: 변수 인다이렉션·인터프리터 삭제·git hooksPath·2단계 다운로드·자격증명 유출** |
+| 재현 | — | **커밋된 `tests/security-regression.ps1`(Windows) / `.sh`(POSIX) — 위험 24종 차단 + 정상 15종 승인 유지 + 게이트 = 68 어서션(위험은 destructive-guard exit 2 + auto-approve no-allow 이중 검사) 통과. 커버: 가드 자기무결성·git -c 하이재킹·지속성 write·변수 인다이렉션·인터프리터 삭제·2단계 다운로드·자격증명 유출·환경변수 프리로드** |
 
 위 회차별 셀 수는 개발 과정의 감사 기록이며, 저장소에서 재현 가능한 검증은 `tests/security-regression.sh`(45 케이스)다. 감사 로그 원본은 커밋되어 있지 않다 — 재현 가능한 증거는 이 테스트 스위트로 대체한다.
 
