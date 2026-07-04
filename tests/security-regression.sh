@@ -12,6 +12,15 @@
 #       본 스위트는 POSIX 셸(리눅스/맥) 대상이며 CI에서 실행한다.
 
 set -u
+# Windows(git-bash): .sh 가드가 OS 가드로 no-op되므로 이 스위트는 의미가 없다.
+# 거짓 실패 대신 명시적으로 스킵하고 .ps1 스위트로 안내한다.
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*)
+    echo "SKIP: Windows에서는 .sh 훅이 OS 가드로 비활성화됩니다."
+    echo "      Windows 검증은 다음을 사용하세요:"
+    echo "      powershell -NoProfile -ExecutionPolicy Bypass -File tests/security-regression.ps1"
+    exit 0 ;;
+esac
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../hooks" && pwd)"
 DG="$HOOK_DIR/destructive-guard.sh"
 AA="$HOOK_DIR/auto-approve.sh"

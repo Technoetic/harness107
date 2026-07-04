@@ -536,16 +536,32 @@ npx playwright install chromium
 </div>
 
 > [!NOTE]
-> 9회차 감사 누적 잔여 한계 3건. 모두 hook 차원 차단 불가 영역으로 README에 명시.
+> hook 차원에서 완전 차단이 불가능한 잔여 한계를 정직하게 명시한다.
 
 | # | 한계 | 영향 | 대응 |
 |:---:|:---|:---|:---|
 | 1 | 다른 플러그인의 `bin/` 자동 PATH 상속 | bare `rm` 호출 시 fake binary로 shadow 가능 | 다중 플러그인 enable 시 각 `bin/` 직접 검토 |
 | 2 | PreToolUse `updatedInput` 머지 우선순위 미명시 | 변조본이 destructive-guard 검사 후 적용 가능성 | permission-request-guard가 변조 결과 재검증 |
 | 3 | Windows 사용자 short name (`~/ADMINI~1`) | LLM 자발 생성 가능성 매우 낮음 | well-known 7토큰 fallback 차단 |
+| 4 | **블랙리스트 방식의 본질적 불완전성** | 셸 동치표현은 무한(변수·인터프리터·인코딩·2단계) — 알려진 우회만 차단 | `tests/security-regression`으로 회귀 고정. 근본 대응은 화이트리스트 역전(로드맵) |
+| 5 | **진행 추적이 transcript 정규식 스캔 의존** (H8) | 완료 문구 변형 시 미기록→재개, 예시 인용 시 오집계 위험 | 코드펜스·인용 가드로 오탐 완화. 상태전이가 LLM 산문에 걸리는 구조적 약점은 잔존 |
+| 6 | **step 본문이 참조하는 검증기 다수 미번들** (H5) | tokei/c8/biome/semgrep 등 `*-validator.ps1` 24종 부재 | 부재 시 해당 단계 fail-open(건너뜀). 목록·정책은 [`docs/RETIRED-VALIDATORS.md`](docs/RETIRED-VALIDATORS.md) |
 
 `--dangerously-skip-permissions`와 100% 등가가 아닌 이유: 위 한계 + 화이트리스트 7종만 자동 승인.<br/>
 **다만 harness107 자율주행 목적에는 충분 + 위험 명령은 오히려 더 안전.**
+
+### 재현 가능한 검증
+
+```bash
+# POSIX (macOS/Linux) — .sh 훅 대상
+bash tests/security-regression.sh
+```
+```powershell
+# Windows — .ps1 훅 대상 (실제 Windows에서 실행되는 경로)
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/security-regression.ps1
+```
+
+두 스위트 모두 45 케이스(위험 18 차단 + 정상 8 승인 + 게이트)를 검사한다. Windows에서는 `.sh` 훅이 OS 가드로 no-op되므로 `.ps1` 스위트가 검증 SoT다.
 
 ---
 
