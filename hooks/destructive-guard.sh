@@ -24,8 +24,17 @@ CMD="$(printf '%s' "$CMD" | awk '!/^[[:space:]]*#/ && !/^[[:space:]]*$/')"
 [ -z "$CMD" ] && exit 0
 
 PATTERNS=(
-  'rm[[:space:]]+(-[a-zA-Z]*[rfRF]+[a-zA-Z]*[[:space:]]+)+(/|\.|\*|~|--no-preserve-root)'
-  'rm[[:space:]]+(-[rR][[:space:]]+-[fF]|-[fF][[:space:]]+-[rR])[[:space:]]+'
+  # [보안 수정 H-5] .ps1 GATE-03 파리티 — 위험 타깃 전체 토큰 anchoring.
+  # 구버전 '(/|\.|\*|~)' prefix 매칭은 rm -rf ./dist · /tmp/x · *.log · .cache 같은
+  # 합법 정리 명령까지 exit 2 오차단했다. RMREC(재귀 rm 플래그) + 위험타깃별 분해로 정밀화.
+  'rm[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-[a-zA-Z]*[rR][a-zA-Z]*([[:space:]]+-[a-zA-Z]+)*[[:space:]]+/[[:space:]]*([;&|]|$)'
+  'rm[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-[a-zA-Z]*[rR][a-zA-Z]*([[:space:]]+-[a-zA-Z]+)*[[:space:]]+/\*'
+  'rm[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-[a-zA-Z]*[rR][a-zA-Z]*([[:space:]]+-[a-zA-Z]+)*[[:space:]]+/(home|etc|var|usr|bin|sbin|boot|root|opt|srv|lib|lib64|sys|proc|dev)\b'
+  'rm[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-[a-zA-Z]*[rR][a-zA-Z]*([[:space:]]+-[a-zA-Z]+)*[[:space:]]+~'
+  'rm[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-[a-zA-Z]*[rR][a-zA-Z]*([[:space:]]+-[a-zA-Z]+)*[[:space:]]+\$\{?(HOME|USERPROFILE)'
+  'rm[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-[a-zA-Z]*[rR][a-zA-Z]*([[:space:]]+-[a-zA-Z]+)*[[:space:]]+\.{1,2}/?[[:space:]]*([;&|]|$)'
+  'rm[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*-[a-zA-Z]*[rR][a-zA-Z]*([[:space:]]+-[a-zA-Z]+)*[[:space:]]+\*[[:space:]]*([;&|]|$)'
+  'rm[[:space:]]+.*--no-preserve-root'
   'rm[[:space:]]+--recursive[[:space:]]+'
   'rm[[:space:]]+--force[[:space:]]+--recursive'
   'find[[:space:]]+/[[:space:]]+.*-delete'
