@@ -35,31 +35,27 @@ with open(index_src, encoding="utf-8") as f:
 
 # 1) 로컬 참조 태그 제거 (외부 http(s)는 보존)
 html = re.sub(r'(?i)<link\b[^>]*\bhref\s*=\s*["\'](?!https?:|//)[^"\']*\.css[^>]*>', '', html)
-html = re.sub(r'(?i)<script\b[^>]*\bsrc\s*=\s*["\'](?!https?:|//)[^"\']*\.js[^>]*>\s*</script>', '', html)
+html = re.sub(r'(?i)<script\b[^>]*\bsrc\s*=\s*["\'](?!https?:|//)[^"\']*\.js[^>]*>\s*</script\s*>', '', html)
 
-# 2) CSS 수집 → <style>
+# 2) CSS 수집 → <style> (M-6: 로컬 @import 제거)
+def strip_css_import(css):
+    return re.sub(r'(?im)^[ \t]*@import\s+(?!url\(\s*["\']?https?:|["\']?https?:)[^;]+;[ \t]*\r?\n?', '', css)
 css_files = sorted(glob.glob(os.path.join(src, "**", "*.css"), recursive=True))
 css_parts = []
 for p in css_files:
     rel = os.path.relpath(p, src)
     with open(p, encoding="utf-8") as f:
-        css_parts.append("/* %s */\n%s" % (rel, f.read()))
+        css_parts.append("/* %s */\n%s" % (rel, strip_css_import(f.read())))
 style_block = ("<style>\n" + "\n\n".join(css_parts) + "\n</style>\n") if css_parts else ""
 
 # 3) JS 수집 → import/export 제거 → <script>
+# [수정 H-3] 멀티라인 import/export를 라인 단위로 지우면 SyntaxError → 전체 정규식으로 문 통째 제거.
 def strip_module(js):
-    out = []
-    for ln in js.splitlines():
-        if re.match(r'^\s*import\s', ln):
-            continue
-        if re.match(r'^\s*export\s+default\s', ln):
-            ln = re.sub(r'^\s*export\s+default\s', '', ln)
-        elif re.match(r'^\s*export\s+\{', ln):
-            continue
-        elif re.match(r'^\s*export\s', ln):
-            ln = re.sub(r'^(\s*)export\s+', r'\1', ln)
-        out.append(ln)
-    return "\n".join(out)
+    js = re.sub(r'(?m)^[ \t]*import\b[^;]*?;[ \t]*\r?\n?', '', js, flags=re.DOTALL)
+    js = re.sub(r'(?m)^[ \t]*export[ \t]*\{[^}]*\}[ \t]*(?:from[ \t]*["\'][^"\']*["\'])?[ \t]*;?[ \t]*\r?\n?', '', js, flags=re.DOTALL)
+    js = re.sub(r'(?m)^([ \t]*)export[ \t]+default\b[ \t\r\n]*', r'\1', js)
+    js = re.sub(r'(?m)^([ \t]*)export[ \t]+', r'\1', js)
+    return js
 
 js_files = sorted(glob.glob(os.path.join(src, "**", "*.js"), recursive=True) +
                   glob.glob(os.path.join(src, "**", "*.mjs"), recursive=True))
