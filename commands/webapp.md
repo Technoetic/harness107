@@ -3,14 +3,14 @@ description: 웹앱 인터랙티브 튜토리얼 1회 입력 → step001~050 자
 argument-hint: <주제 한 줄>
 ---
 
-# /webapp — harness107 자율주행 시작
+# /webapp — harness50 자율주행 시작
 
 **입력**: `$ARGUMENTS` (예: `다익스트라 최단경로 알고리즘`, `OAuth 2.0 인증 흐름`, `B-tree 인덱스`)
 
 ## 즉시 실행 절차 (사용자 확인 없이)
 
 1. **harness-rules skill 로드** — 본 세션의 절대 헌법.
-   `Skill` 도구로 `harness107:harness-rules` 호출.
+   `Skill` 도구로 `harness50:harness-rules` 호출.
 
 2. **TOPIC.md 작성** — `step_archive/TOPIC/TOPIC.md`에 다음 형식으로 쓴다.
    `webapp-trigger` hook이 자동 처리하지 않은 경우의 폴백.

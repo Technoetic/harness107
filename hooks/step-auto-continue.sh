@@ -76,7 +76,7 @@ NEXT_PLUS="$(printf '%03d' "$((CURRENT+1))")"
 STEP_FILE="step_archive/archived/step${NEXT_STR}.md"
 
 if [ "$HAS_Q" = "1" ]; then
-  REASON="[HARNESS107 AUTO-RESUME - VIOLATION DETECTED]
+  REASON="[HARNESS50 AUTO-RESUME - VIOLATION DETECTED]
 
 Your last message contained a question, confirmation request, or self-termination phrase.
 This breaks the mandatory auto-execution contract (Step 001~${TOTAL_STR} must run without user confirmation).
@@ -92,7 +92,7 @@ DO:
 
 Resume Step ${NEXT_STR} NOW."
 else
-  REASON="[HARNESS107 AUTO-RESUME]
+  REASON="[HARNESS50 AUTO-RESUME]
 Progress: ${DONE}/${TOTAL} completed.
 Next step to execute: step${NEXT_STR} (${STEP_FILE})
 

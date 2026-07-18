@@ -133,8 +133,8 @@ function Test-SensitivePath([string]$path) {
     '\.claude/settings\.json$', '\.claude/settings\.local\.json$',
     '^/etc/', '^/var/', '^/boot/',
     '/system32/', '/windows/', '/program files/',
-    'harness107/hooks/(destructive-guard|auto-approve|permission-request-guard|step-auto-continue|hooks\.json)',
-    'harness107/\.claude-plugin/plugin\.json$'
+    'harness50/hooks/(destructive-guard|auto-approve|permission-request-guard|step-auto-continue|hooks\.json)',
+    'harness50/\.claude-plugin/plugin\.json$'
   )
   foreach ($sp in $sensitivePathPatterns) {
     if ($normLower -match $sp) { return $true }
@@ -150,7 +150,7 @@ if ($toolName -eq "Bash") {
   try { $cmd = $j.tool_input.command } catch {}
   if (Test-DangerousCommand $cmd) {
     $blocked = $true
-    $reason = "harness107: PermissionRequest blocked - destructive command pattern (cross-plugin tamper protection)"
+    $reason = "harness50: PermissionRequest blocked - destructive command pattern (cross-plugin tamper protection)"
   }
 }
 elseif ($toolName -in @("Write", "Edit", "MultiEdit", "NotebookEdit")) {
@@ -159,14 +159,14 @@ elseif ($toolName -in @("Write", "Edit", "MultiEdit", "NotebookEdit")) {
   if (-not $path) { try { $path = $j.tool_input.notebook_path } catch {} }
   if (Test-SensitivePath $path) {
     $blocked = $true
-    $reason = "harness107: PermissionRequest blocked - sensitive path (cross-plugin tamper protection)"
+    $reason = "harness50: PermissionRequest blocked - sensitive path (cross-plugin tamper protection)"
   }
   # 4회차 D-2/D-3: Edit/MultiEdit 의 old_string/new_string 내 destructive 패턴 추가 검사
   if (-not $blocked -and $toolName -eq "Edit") {
     $ns = $null; try { $ns = $j.tool_input.new_string } catch {}
     if ($ns -and (Test-DangerousCommand $ns)) {
       $blocked = $true
-      $reason = "harness107: PermissionRequest blocked - destructive content in new_string"
+      $reason = "harness50: PermissionRequest blocked - destructive content in new_string"
     }
   }
   if (-not $blocked -and $toolName -eq "MultiEdit") {
@@ -175,7 +175,7 @@ elseif ($toolName -in @("Write", "Edit", "MultiEdit", "NotebookEdit")) {
         $ns = $e.new_string
         if ($ns -and (Test-DangerousCommand $ns)) {
           $blocked = $true
-          $reason = "harness107: PermissionRequest blocked - destructive content in MultiEdit edit"
+          $reason = "harness50: PermissionRequest blocked - destructive content in MultiEdit edit"
           break
         }
       }
@@ -195,7 +195,7 @@ elseif ($toolName -eq "WebFetch") {
     foreach ($dp in $dangerousUrlPatterns) {
       if ($url -match $dp) {
         $blocked = $true
-        $reason = "harness107: PermissionRequest blocked - dangerous URL"
+        $reason = "harness50: PermissionRequest blocked - dangerous URL"
         break
       }
     }

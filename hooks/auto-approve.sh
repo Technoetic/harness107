@@ -3,7 +3,7 @@
 case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) exit 0 ;; esac
 # auto-approve.sh — PreToolUse hook (macOS/Linux)
 #
-# harness107 자율주행을 위한 자동 권한 승인.
+# harness50 자율주행을 위한 자동 권한 승인.
 # --dangerously-skip-permissions 와 동등 효과를 hook 차원에서 구현한다.
 #
 # 출처 (재검증 2회차):
@@ -37,7 +37,7 @@ case "$TOOL" in
   *) exit 0 ;;
 esac
 
-# [보안 수정 — 하네스 활성 게이트] auto-approve는 harness107 자율주행이 실제
+# [보안 수정 — 하네스 활성 게이트] auto-approve는 harness50 자율주행이 실제
 # 가동 중일 때만 발화한다. progress.json이 없으면(무관한 일반 세션) 자동승인을
 # 발급하지 않고 정상 권한 흐름으로 떨어뜨린다 (전역 자동승인 결함 차단).
 PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
@@ -118,8 +118,8 @@ except: pass' 2>/dev/null)"
       '^/var/'
       '^/boot/'
       '/system32/|/windows/|/program files/'
-      'harness107/hooks/(destructive-guard|auto-approve|permission-request-guard|step-auto-continue|hooks\.json)'
-      'harness107/\.claude-plugin/plugin\.json$'
+      'harness50/hooks/(destructive-guard|auto-approve|permission-request-guard|step-auto-continue|hooks\.json)'
+      'harness50/\.claude-plugin/plugin\.json$'
     )
     for sp in "${SENSITIVE_PATH_PATTERNS[@]}"; do
       if printf '%s' "$FPATH_NORM" | grep -Eq "$sp"; then
@@ -339,6 +339,6 @@ if [ "$TOOL" = "Bash" ] && [ -n "${CMD:-}" ]; then
 fi
 
 cat <<EOF
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"harness107 autopilot mode: $TOOL auto-approved (race-safe pattern check passed)"}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"harness50 autopilot mode: $TOOL auto-approved (race-safe pattern check passed)"}}
 EOF
 exit 0

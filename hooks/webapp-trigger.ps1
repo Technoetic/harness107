@@ -132,7 +132,7 @@ if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $by
 Write-Log "progress.json initialized"
 
 # 4) system-reminder 주입
-Write-Output "<harness107-trigger>"
+Write-Output "<harness50-trigger>"
 Write-Output "WEBAPP TUTORIAL TRIGGER DETECTED"
 Write-Output ""
 Write-Output "Bootstrap complete:"
@@ -151,5 +151,5 @@ Write-Output ""
 Write-Output "Do NOT ask the user any clarifying questions."
 Write-Output "Do NOT pause for confirmation."
 Write-Output "Do NOT end the turn until you literally cannot continue."
-Write-Output "</harness107-trigger>"
+Write-Output "</harness50-trigger>"
 exit 0

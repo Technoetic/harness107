@@ -151,8 +151,8 @@ print(s.lower())
     '^/var/'
     '^/boot/'
     '/system32/|/windows/|/program files/'
-    'harness107/hooks/(destructive-guard|auto-approve|permission-request-guard|step-auto-continue|hooks\.json)'
-    'harness107/\.claude-plugin/plugin\.json$'
+    'harness50/hooks/(destructive-guard|auto-approve|permission-request-guard|step-auto-continue|hooks\.json)'
+    'harness50/\.claude-plugin/plugin\.json$'
   )
   for sp in "${patterns[@]}"; do
     if printf '%s' "$norm" | grep -Eq "$sp"; then return 0; fi
@@ -167,18 +167,18 @@ case "$TOOL" in
   Bash)
     if is_dangerous_cmd "$CMD"; then
       BLOCKED=1
-      REASON="harness107: PermissionRequest blocked - destructive command (cross-plugin tamper protection)"
+      REASON="harness50: PermissionRequest blocked - destructive command (cross-plugin tamper protection)"
     fi
     ;;
   Write|Edit|MultiEdit|NotebookEdit)
     if is_sensitive_path "$FPATH"; then
       BLOCKED=1
-      REASON="harness107: PermissionRequest blocked - sensitive path"
+      REASON="harness50: PermissionRequest blocked - sensitive path"
     fi
     # 4회차 D-2/D-3: new_string 내 destructive 검사
     if [ "$BLOCKED" -eq 0 ] && [ -n "$NS" ] && is_dangerous_cmd "$NS"; then
       BLOCKED=1
-      REASON="harness107: PermissionRequest blocked - destructive content in new_string"
+      REASON="harness50: PermissionRequest blocked - destructive content in new_string"
     fi
     ;;
   WebFetch)
@@ -192,7 +192,7 @@ case "$TOOL" in
       for dp in "${url_patterns[@]}"; do
         if printf '%s' "$URL" | grep -Eq "$dp"; then
           BLOCKED=1
-          REASON="harness107: PermissionRequest blocked - dangerous URL"
+          REASON="harness50: PermissionRequest blocked - dangerous URL"
           break
         fi
       done

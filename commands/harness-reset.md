@@ -1,5 +1,5 @@
 ---
-description: harness107 진행 상태 리셋 — progress.json을 current_step=1, completed=[]로 초기화. step_archive/archived/ 본문은 건드리지 않는다.
+description: harness50 진행 상태 리셋 — progress.json을 current_step=1, completed=[]로 초기화. step_archive/archived/ 본문은 건드리지 않는다.
 ---
 
 # /harness-reset
@@ -34,6 +34,6 @@ description: harness107 진행 상태 리셋 — progress.json을 current_step=1
 
 ## 출력
 
-1줄 보고: `harness107 리셋 완료 — step001부터 재시작 가능`
+1줄 보고: `harness50 리셋 완료 — step001부터 재시작 가능`
 
 추가 출력·확인 질문 금지.

@@ -1,5 +1,5 @@
 # auto-approve.ps1 - PreToolUse hook
-# harness107 자율주행을 위한 자동 권한 승인.
+# harness50 자율주행을 위한 자동 권한 승인.
 # --dangerously-skip-permissions 와 동등 효과를 hook 차원에서 구현한다.
 #
 # 출처 (재검증 2회차):
@@ -42,7 +42,7 @@ try { if ($j -and $j.tool_name) { $toolName = $j.tool_name } } catch {}
 $autoApproveTools = @("Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch")
 if ($autoApproveTools -notcontains $toolName) { exit 0 }
 
-# [보안 수정 — 하네스 활성 게이트] auto-approve는 오직 harness107 자율주행이
+# [보안 수정 — 하네스 활성 게이트] auto-approve는 오직 harness50 자율주행이
 # 실제 가동 중일 때만 발화한다. progress.json이 없으면(= /webapp 미트리거,
 # 무관한 일반 세션) 자동승인을 절대 발급하지 않고 정상 권한 흐름으로 떨어뜨린다.
 # 이 게이트가 없으면 플러그인 설치만으로 모든 세션이 상시 --dangerously-skip-permissions
@@ -92,8 +92,8 @@ $sensitivePathPatternsNorm = @(
   '/system32/',
   '/windows/',
   '/program files/',
-  'harness107/hooks/(destructive-guard|auto-approve|permission-request-guard|step-auto-continue|hooks\.json)',
-  'harness107/\.claude-plugin/plugin\.json$'
+  'harness50/hooks/(destructive-guard|auto-approve|permission-request-guard|step-auto-continue|hooks\.json)',
+  'harness50/\.claude-plugin/plugin\.json$'
 )
 
 function Test-SensitivePath([string]$p) {
@@ -365,7 +365,7 @@ $out = @{
   hookSpecificOutput = @{
     hookEventName            = "PreToolUse"
     permissionDecision       = "allow"
-    permissionDecisionReason = "harness107 autopilot mode: $toolName auto-approved (race-safe pattern check passed)"
+    permissionDecisionReason = "harness50 autopilot mode: $toolName auto-approved (race-safe pattern check passed)"
   }
 } | ConvertTo-Json -Depth 5 -Compress
 

@@ -121,7 +121,7 @@ log "progress.json initialized"
 
 # system-reminder
 cat <<'REMINDER'
-<harness107-trigger>
+<harness50-trigger>
 WEBAPP TUTORIAL TRIGGER DETECTED
 
 Bootstrap complete:
@@ -140,6 +140,6 @@ ABSOLUTE OVERRIDE:
 Do NOT ask the user any clarifying questions.
 Do NOT pause for confirmation.
 Do NOT end the turn until you literally cannot continue.
-</harness107-trigger>
+</harness50-trigger>
 REMINDER
 exit 0

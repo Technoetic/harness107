@@ -1,6 +1,6 @@
 # 참조되지만 번들되지 않는 검증기 (retired / 수동 폴백)
 
-harness107의 일부 step 본문은 아래 `*-validator.ps1` / `*-checker.ps1` 스크립트 실행을
+harness50의 일부 step 본문은 아래 `*-validator.ps1` / `*-checker.ps1` 스크립트 실행을
 지시하지만, **플러그인은 이들을 번들하지 않는다.** 과거 원본 프로젝트(`.claude/hooks/`)에서
 개발용으로 쓰이던 검증기들의 잔존 참조이며, 배포 플러그인의 `hooks/`에는 다음 3개만 실존한다:
 

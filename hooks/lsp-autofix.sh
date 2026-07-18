@@ -29,7 +29,7 @@ case "$FP" in
   *) exit 0 ;;
 esac
 case "$FP" in
-  */node_modules/*|*/.git/*|*/step_archive/*|*/.claude/*|*/plugins/harness107/*) exit 0 ;;
+  */node_modules/*|*/.git/*|*/step_archive/*|*/.claude/*|*/plugins/harness50/*) exit 0 ;;
 esac
 
 PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"

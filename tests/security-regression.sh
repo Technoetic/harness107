@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# security-regression.sh — harness107 안전 모델 회귀 테스트 (POSIX / macOS·Linux)
+# security-regression.sh — harness50 안전 모델 회귀 테스트 (POSIX / macOS·Linux)
 #
 # 목적: README의 "위험 명령 차단" 주장을 재현 가능한 스위트로 검증한다.
 #   - MUST_BLOCK: destructive-guard.sh가 exit 2로 차단해야 하는 위험 명령

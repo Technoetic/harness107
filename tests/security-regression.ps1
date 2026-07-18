@@ -1,4 +1,4 @@
-# security-regression.ps1 — harness107 안전 모델 회귀 테스트 (Windows / PowerShell)
+# security-regression.ps1 — harness50 안전 모델 회귀 테스트 (Windows / PowerShell)
 #
 # Windows에서는 .sh 가드가 OS 가드로 no-op되고 .ps1 훅이 실제 실행되므로,
 # 본 스위트가 Windows 대상 검증 SoT다 (POSIX는 security-regression.sh).
@@ -19,7 +19,7 @@ function Ok() { $script:pass++ }
 function Fail($m) { Write-Host "  x FAIL: $m"; $script:fail++ }
 
 # 하네스 활성 게이트 통과용 임시 프로젝트 루트
-$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("h107reg_" + [guid]::NewGuid().ToString("N").Substring(0,8))
+$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("h50reg_" + [guid]::NewGuid().ToString("N").Substring(0,8))
 New-Item -ItemType Directory -Path (Join-Path $tmp "step_archive") -Force | Out-Null
 '{"current_step":1,"completed_steps":[],"total_steps":50}' | Out-File -FilePath (Join-Path $tmp "step_archive/progress.json") -Encoding UTF8
 $env:CLAUDE_PROJECT_DIR = $tmp

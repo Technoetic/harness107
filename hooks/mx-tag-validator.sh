@@ -29,7 +29,7 @@ CUR="$(python3 -c "import json;print(int(json.load(open('$PROGRESS_FILE',encodin
 [ "$CUR" -lt 15 ] && exit 0
 
 case "$FP" in
-  */step_archive/*|*/.claude/*|*/node_modules/*|*/.git/*|*/plugins/harness107/*) exit 0 ;;
+  */step_archive/*|*/.claude/*|*/node_modules/*|*/.git/*|*/plugins/harness50/*) exit 0 ;;
 esac
 [ -f "$FP" ] || exit 0
 

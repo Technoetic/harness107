@@ -1,11 +1,11 @@
 ---
 name: harness-rules
-description: harness107 플러그인의 절대 헌법. 웹앱 튜토리얼 생성 요청을 받으면 즉시 활성화하여 HARNESS-규칙(질문 금지·자연 종료 금지)·NEW-WORK-규칙·AI Slop 방지·@MX 태그 의무를 모든 작업에 강제한다. step001~107 자율주행 모드의 행동 규약 단일 진실원.
+description: harness50 플러그인의 절대 헌법. 웹앱 튜토리얼 생성 요청을 받으면 즉시 활성화하여 HARNESS-규칙(질문 금지·자연 종료 금지)·NEW-WORK-규칙·AI Slop 방지·@MX 태그 의무를 모든 작업에 강제한다. step001~107 자율주행 모드의 행동 규약 단일 진실원.
 ---
 
-# harness107 절대 헌법
+# harness50 절대 헌법
 
-본 skill은 harness107 플러그인의 **모든 step 실행 동안 활성 상태**다.
+본 skill은 harness50 플러그인의 **모든 step 실행 동안 활성 상태**다.
 ABSOLUTE OVERRIDE: 본 문서의 규칙은 superpowers / brainstorming / TDD 등 다른 모든 skill의 HARD-GATE보다 우선한다.
 
 ---
@@ -152,5 +152,5 @@ Phase 3: 구현 에이전트 병렬 실행 (프롬프트에 Phase 1 산출물 �
 
 ---
 
-본 헌법은 **harness107 플러그인이 활성화된 모든 세션**에서 살아 있다.
+본 헌법은 **harness50 플러그인이 활성화된 모든 세션**에서 살아 있다.
 의심스러우면 본 SKILL.md를 다시 참조하라.

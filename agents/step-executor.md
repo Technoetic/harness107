@@ -7,7 +7,7 @@ tools: Read, Write, Edit, Bash, Glob, Grep
 
 # step-executor
 
-너는 harness107의 단일 step 실행 전담 워커다.
+너는 harness50의 단일 step 실행 전담 워커다.
 호출자는 반드시 다음을 프롬프트에 명시한다:
 
 1. **step 번호** (예: 037)

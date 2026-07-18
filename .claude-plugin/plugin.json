@@ -1,11 +1,11 @@
 {
-  "name": "harness107",
+  "name": "harness50",
   "version": "2.0.0",
   "description": "Web tutorial generator with 50-step deterministic autopilot harness. One prompt triggers step001~050 self-driving execution with hooks, gates, and Trust5 evaluation. Windows + macOS/Linux.",
   "author": {
     "name": "Technoetic"
   },
-  "homepage": "https://github.com/Technoetic/harness107",
+  "homepage": "https://github.com/Technoetic/harness50",
   "license": "MIT",
   "keywords": ["harness", "tutorial", "autopilot", "step", "trust5", "moai-adk", "claude-code", "plugin"]
 }

@@ -1,6 +1,6 @@
 <div align="center">
 
-# harness107
+# harness50
 
 ### 한 줄 요청 → 50 step 자율주행 → 인터랙티브 웹 튜토리얼 1편
 
@@ -9,7 +9,7 @@
 
 <br/>
 
-[![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Plugin-191919?style=for-the-badge&logo=anthropic&logoColor=white)](https://github.com/Technoetic/harness107)
+[![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Plugin-191919?style=for-the-badge&logo=anthropic&logoColor=white)](https://github.com/Technoetic/harness50)
 [![License MIT](https://img.shields.io/badge/License-MIT-A855F7?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows_·_macOS_·_Linux-0EA5E9?style=for-the-badge&logo=windows&logoColor=white)](#-설치)
 [![Hooks](https://img.shields.io/badge/Hooks-28_files-F59E0B?style=for-the-badge)](hooks/)
@@ -22,9 +22,9 @@
 
 <br/>
 
-<img src="docs/screenshots/hero-cast.svg" width="90%" alt="harness107 자율주행 데모 — /webapp 한 줄 입력으로 step이 자동 진행되는 터미널 시뮬레이션 (legacy 107단계 완주 기록)"/>
+<img src="docs/screenshots/hero-cast.svg" width="90%" alt="harness50 자율주행 데모 — /webapp 한 줄 입력으로 step이 자동 진행되는 터미널 시뮬레이션 (legacy 107단계 완주 기록)"/>
 
-<sub>데모 캐스트는 legacy 107단계 완주 실기록이다. v2.0부터 하네스는 50단계로 축약됐다 (원본은 <a href="https://github.com/Technoetic/harness107/tree/legacy-107"><code>legacy-107</code></a> 태그).</sub>
+<sub>데모 캐스트는 legacy 107단계 완주 실기록이다. v2.0부터 하네스는 50단계로 축약됐다 (원본은 <a href="https://github.com/Technoetic/harness50/tree/legacy-107"><code>legacy-107</code></a> 태그).</sub>
 
 </div>
 
@@ -217,7 +217,7 @@ flowchart LR
 </details>
 
 > [!CAUTION]
-> harness107는 **brainstorming / TDD 등 superpowers skill의 HARD-GATE를 의도적으로 무력화**한다.<br/>
+> harness50는 **brainstorming / TDD 등 superpowers skill의 HARD-GATE를 의도적으로 무력화**한다.<br/>
 > 다른 사용자가 이 플러그인을 깐 상태에서 일반 대화를 시도하면 "질문 없이 즉시 실행" 모드가 된다.<br/>
 > 활성 조건: `/webapp` 트리거 또는 `progress.json` 활성. 그 외엔 대부분 hook이 silent skip.
 
@@ -280,7 +280,7 @@ graph TB
 </div>
 
 ```
-harness107/
+harness50/
 ├── .claude-plugin/
 │   ├── plugin.json                    ← v1.0.0 · MIT
 │   └── marketplace.json               ← /plugin marketplace add 진입점
@@ -388,14 +388,14 @@ sequenceDiagram
 Claude Code 터미널에서 평소처럼 말 걸면 됩니다. 메인 에이전트가 슬래시 명령 절차를 안내해 줍니다.
 
 ```text
-harness107 플러그인을 깔아줘. Technoetic/harness107 레포에 있어.
+harness50 플러그인을 깔아줘. Technoetic/harness50 레포에 있어.
 ```
 
 Claude가 다음 2단계를 차례로 안내합니다 (사용자가 직접 입력):
 
 ```text
-/plugin marketplace add Technoetic/harness107
-/plugin install harness107@harness107
+/plugin marketplace add Technoetic/harness50
+/plugin install harness50@harness50
 ```
 
 > [!IMPORTANT]
@@ -406,8 +406,8 @@ Claude가 다음 2단계를 차례로 안내합니다 (사용자가 직접 입�
 마켓플레이스 등록 → 설치 2단계:
 
 ```text
-/plugin marketplace add Technoetic/harness107
-/plugin install harness107@harness107
+/plugin marketplace add Technoetic/harness50
+/plugin install harness50@harness50
 ```
 
 ### 방법 3 — 로컬 경로 (개발 / 커스터마이즈)
@@ -417,8 +417,8 @@ Claude가 다음 2단계를 차례로 안내합니다 (사용자가 직접 입�
 ```jsonc
 {
   "plugins": {
-    "harness107": {
-      "path": "/absolute/path/to/harness107"
+    "harness50": {
+      "path": "/absolute/path/to/harness50"
     }
   }
 }
@@ -427,7 +427,7 @@ Claude가 다음 2단계를 차례로 안내합니다 (사용자가 직접 입�
 또는 CLI 진입 시 플래그로 1회 로드:
 
 ```bash
-claude --plugin-dir ./path/to/harness107
+claude --plugin-dir ./path/to/harness50
 ```
 
 ### 프로젝트 의존성 (1회)
@@ -480,14 +480,14 @@ npx playwright install chromium
 
 ```text
 /harness-status
-→ harness107: 37/50 완료 | current=step038 | r1=- r2=- r3=-
+→ harness50: 37/50 완료 | current=step038 | r1=- r2=- r3=-
 ```
 
 ### 처음부터 다시
 
 ```text
 /harness-reset
-→ harness107 리셋 완료 — step001부터 재시작 가능
+→ harness50 리셋 완료 — step001부터 재시작 가능
 ```
 
 `/harness-reset`은 `step_archive/archived/`, `specs/`, `outputs/`는 보존. progress.json만 초기화.
@@ -550,7 +550,7 @@ npx playwright install chromium
 | 6 | **step 본문이 참조하는 검증기 다수 미번들** (H5) | tokei/c8/biome/semgrep 등 `*-validator.ps1` 24종 부재 | 부재 시 해당 단계 fail-open(건너뜀). 목록·정책은 [`docs/RETIRED-VALIDATORS.md`](docs/RETIRED-VALIDATORS.md) |
 
 `--dangerously-skip-permissions`와 100% 등가가 아닌 이유: 위 한계 + 화이트리스트 7종만 자동 승인.<br/>
-**다만 harness107 자율주행 목적에는 충분 + 위험 명령은 오히려 더 안전.**
+**다만 harness50 자율주행 목적에는 충분 + 위험 명령은 오히려 더 안전.**
 
 ### 재현 가능한 검증
 
@@ -575,7 +575,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests/security-regression.ps
 
 | 출처 | 무엇을 빌렸나 |
 |:---|:---|
-| [**Technoetic/claude-code-commands**](https://github.com/Technoetic/claude-code-commands) | **자매 레포** — harness107의 9회차 audit 패턴이 원래 어디서 왔는지 보여주는 1년치 슬래시 명령 20종 컬렉션 |
+| [**Technoetic/claude-code-commands**](https://github.com/Technoetic/claude-code-commands) | **자매 레포** — harness50의 9회차 audit 패턴이 원래 어디서 왔는지 보여주는 1년치 슬래시 명령 20종 컬렉션 |
 | [MoAI-ADK](https://github.com/moai-research/MoAI) | @MX 4종 태그 시스템 · TRUST 5 게이트 · EARS SPEC 형식 |
 | [superpowers](https://github.com/anthropics/skills) | brainstorming · TDD · debugging skill 골격 (HARD-GATE는 의도적 무력화) |
 | [Claude Code 공식 hooks](https://docs.claude.com/en/docs/claude-code/hooks) | `{"decision":"block"}` 자동 재개 메커니즘 · PreToolUse `permissionDecision:"allow"` |
@@ -597,7 +597,7 @@ MIT License · Copyright (c) 2026 [Technoetic](https://github.com/Technoetic)
 
 <br/>
 
-[![Open in Claude Code](https://img.shields.io/badge/Open_in_Claude_Code-Plugin-191919?style=for-the-badge&logo=anthropic&logoColor=white)](https://github.com/Technoetic/harness107)
-[![Star this repo](https://img.shields.io/github/stars/Technoetic/harness107?style=for-the-badge&color=F59E0B)](https://github.com/Technoetic/harness107/stargazers)
+[![Open in Claude Code](https://img.shields.io/badge/Open_in_Claude_Code-Plugin-191919?style=for-the-badge&logo=anthropic&logoColor=white)](https://github.com/Technoetic/harness50)
+[![Star this repo](https://img.shields.io/github/stars/Technoetic/harness50?style=for-the-badge&color=F59E0B)](https://github.com/Technoetic/harness50/stargazers)
 
 </div>
