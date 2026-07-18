@@ -1,5 +1,5 @@
 ---
-description: 웹앱 인터랙티브 튜토리얼 1회 입력 → step001~107 자율주행 완주. /webapp <주제>
+description: 웹앱 인터랙티브 튜토리얼 1회 입력 → step001~050 자율주행 완주. /webapp <주제>
 argument-hint: <주제 한 줄>
 ---
 
@@ -46,7 +46,7 @@ argument-hint: <주제 한 줄>
 
 3. **step001.md Read** — `step_archive/archived/step001.md` 1회 읽기.
 
-4. **연속 실행** — 본문 지시대로 실행 → "Step 001/107 완료" 보고 → 즉시 step002.md Read → … → step107.md까지 멈추지 않고 진행.
+4. **연속 실행** — 본문 지시대로 실행 → "Step 001/50 완료" 보고 → 즉시 step002.md Read → … → step050.md까지 멈추지 않고 진행.
 
 ## 절대 준수
 
@@ -54,7 +54,7 @@ argument-hint: <주제 한 줄>
 - "진행할까요" / "어떻게 할까요" / "다음 턴에서 재개" 모두 금지
 - 토큰 한도 직전까지 한 턴 안에서 가능한 한 많은 step 실행
 - Stop hook이 자동 재개를 처리하므로 인위적으로 턴을 끊지 마라
-- 각 step 완료는 1줄 보고 ("Step NNN/107 완료")만
+- 각 step 완료는 1줄 보고 ("Step NNN/50 완료")만
 
 ## 다음 행동
 

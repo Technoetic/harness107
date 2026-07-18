@@ -59,7 +59,7 @@ if j:
                     except Exception: pass
         except Exception: pass
 
-total=int(progress.get("total_steps",107))
+total=int(progress.get("total_steps",50))
 found=set()
 # .ps1 파리티 (H3 수정): 줄 단위 스캔 + 코드펜스/인용/예시 가드.
 # 모델이 문서 예시 문자열("Step 042/107 완료")을 코드블록·인용·예시로 본문에

@@ -57,7 +57,7 @@ log "TRIGGER matched"
 
 mkdir -p "$STEP_ARCHIVE" "$ARCHIVED_DIR" "$TOPIC_DIR"
 
-# copy step001~107 if missing
+# copy step001~050 if missing
 if [ -d "$ASSET_STEPS" ]; then
   for src in "$ASSET_STEPS"/step*.md; do
     [ -e "$src" ] || continue
@@ -67,7 +67,7 @@ if [ -d "$ASSET_STEPS" ]; then
   done
 fi
 
-# H4 수정: html-bundler를 프로젝트로 복사 (step081/038에서 실행 가능하게)
+# H4 수정: html-bundler를 프로젝트로 복사 (step038에서 실행 가능하게)
 TOOLS_DIR="$STEP_ARCHIVE/tools"
 mkdir -p "$TOOLS_DIR"
 HOOK_DIR="$(dirname "${BASH_SOURCE[0]}")"
@@ -105,7 +105,7 @@ cat >"$PROGRESS_FILE" <<JSON
   "completed_steps": [],
   "skipped_steps": [],
   "failed_steps": [],
-  "total_steps": 107,
+  "total_steps": 50,
   "metrics": { "total_duration_minutes": 0, "total_sessions": 0, "steps_per_session_avg": 0 },
   "trust5_results": { "r1": null, "r2": null, "r3": null },
   "eval_rounds": {
@@ -127,15 +127,15 @@ WEBAPP TUTORIAL TRIGGER DETECTED
 Bootstrap complete:
   - step_archive/ ready
   - step_archive/TOPIC/TOPIC.md written with the user prompt
-  - step_archive/progress.json initialized (current_step=1, total=107)
-  - step_archive/archived/step001.md ~ step107.md available
+  - step_archive/progress.json initialized (current_step=1, total=50)
+  - step_archive/archived/step001.md ~ step050.md available
 
 ABSOLUTE OVERRIDE:
   Before addressing anything else, IMMEDIATELY:
     1. Read step_archive/archived/step001.md
     2. Execute its instructions in full (including TOPIC pickup from TOPIC.md)
-    3. On completion report 'Step 001/107 완료' and Read step002.md
-    4. Continue without user confirmation through step107
+    3. On completion report 'Step 001/50 완료' and Read step002.md
+    4. Continue without user confirmation through step050
 
 Do NOT ask the user any clarifying questions.
 Do NOT pause for confirmation.

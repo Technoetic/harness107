@@ -19,7 +19,7 @@ python3 - <<'PY'
 import json, os, re, datetime
 p=json.load(open(os.environ["PROGRESS_FILE"],encoding="utf-8"))
 spec_dir=os.environ["SPEC_DIR"]; a_dir=os.environ["ARCHIVED_DIR"]
-total=int(p.get("total_steps",107))
+total=int(p.get("total_steps",50))
 cur=int(p.get("current_step",0))
 
 # .ps1 파리티: 매 Stop에서 완료 step 전체의 누락 SPEC을 일괄 생성(상한 10/Stop).

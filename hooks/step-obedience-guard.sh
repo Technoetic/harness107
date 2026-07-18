@@ -13,7 +13,7 @@ if command -v python3 >/dev/null 2>&1; then
   read -r TOTAL DONE NEXT < <(python3 - <<'PY' "$PROGRESS_FILE"
 import json,sys
 p=json.load(open(sys.argv[1],encoding="utf-8"))
-total=int(p.get("total_steps",107))
+total=int(p.get("total_steps",50))
 done=p.get("completed_steps") or []
 done_set=set(int(x) for x in done)
 nxt=None
@@ -23,7 +23,7 @@ print(total, len(done), nxt if nxt is not None else 0)
 PY
   )
 else
-  TOTAL=107; DONE=0; NEXT=1
+  TOTAL=50; DONE=0; NEXT=1
 fi
 
 [ "$DONE" -ge "$TOTAL" ] && exit 0
@@ -49,7 +49,7 @@ BEFORE addressing the user's current message, you MUST:
   2. Execute its instructions to completion.
   3. Move to the next step until either context limit or all steps done.
 
-If the user request is unrelated, treat it as a queued item to address AFTER step107 - NOT as a reason to skip steps.
+If the user request is unrelated, treat it as a queued item to address AFTER step050 - NOT as a reason to skip steps.
 If the user request can be satisfied as part of a step, only do so when the harness flow naturally arrives there.
 </harness107-obedience>
 REMINDER

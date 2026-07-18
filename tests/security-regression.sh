@@ -32,7 +32,7 @@ ok()   { PASS=$((PASS+1)); }
 # 임시 프로젝트 루트 (하네스 활성 게이트 통과용 progress.json 포함)
 TMP="$(mktemp -d)"
 mkdir -p "$TMP/step_archive"
-echo '{"current_step":1,"completed_steps":[],"total_steps":107}' > "$TMP/step_archive/progress.json"
+echo '{"current_step":1,"completed_steps":[],"total_steps":50}' > "$TMP/step_archive/progress.json"
 export CLAUDE_PROJECT_DIR="$TMP"
 cleanup() { rm -rf "$TMP"; }
 trap cleanup EXIT
@@ -96,7 +96,7 @@ echo "== GATE: progress.json 부재 시 auto-approve 미발화 =="
 rm -f "$TMP/step_archive/progress.json"
 out="$(json_bash 'npm run build' | bash "$AA" 2>/dev/null)"
 if printf '%s' "$out" | grep -q '"permissionDecision":"allow"'; then fail "하네스 비활성인데 전역 자동승인 발생"; else ok; fi
-echo '{"current_step":1,"completed_steps":[],"total_steps":107}' > "$TMP/step_archive/progress.json"
+echo '{"current_step":1,"completed_steps":[],"total_steps":50}' > "$TMP/step_archive/progress.json"
 
 echo
 echo "결과: PASS=$PASS FAIL=$FAIL"

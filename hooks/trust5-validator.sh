@@ -14,15 +14,15 @@ command -v python3 >/dev/null 2>&1 || exit 0
 
 DONE="$(python3 -c "import json;p=json.load(open('$PROGRESS_FILE',encoding='utf-8'));print(len(p.get('completed_steps') or []))" 2>/dev/null || echo 0)"
 
-# .ps1 파리티 (2026-06-10 수정): 마일스톤(49/69/104) "통과(>=)" + 해당 라운드
+# .ps1 파리티 (2026-06-10 수정): 마일스톤(38/44/50) "통과(>=)" + 해당 라운드
 # 결과 파일 미생성일 때 발화. 정확일치(==)는 한 턴에 여러 Step이 병합 완료되면
 # 마일스톤을 건너뛰어 게이트가 영구 미발화하는 결함이었다. 가장 높은 미발화
 # 라운드부터 순회하여 아직 파일이 없는 라운드를 실행한다.
 mkdir -p "$OUT_DIR"
 ROUND=""
-if   [ "$DONE" -ge 104 ] && [ ! -f "$OUT_DIR/trust5_r3.md" ]; then ROUND="r3"
-elif [ "$DONE" -ge 69 ]  && [ ! -f "$OUT_DIR/trust5_r2.md" ]; then ROUND="r2"
-elif [ "$DONE" -ge 49 ]  && [ ! -f "$OUT_DIR/trust5_r1.md" ]; then ROUND="r1"
+if   [ "$DONE" -ge 50 ] && [ ! -f "$OUT_DIR/trust5_r3.md" ]; then ROUND="r3"
+elif [ "$DONE" -ge 44 ]  && [ ! -f "$OUT_DIR/trust5_r2.md" ]; then ROUND="r2"
+elif [ "$DONE" -ge 38 ]  && [ ! -f "$OUT_DIR/trust5_r1.md" ]; then ROUND="r1"
 else exit 0
 fi
 OUT_FILE="$OUT_DIR/trust5_$ROUND.md"

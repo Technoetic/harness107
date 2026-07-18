@@ -21,7 +21,7 @@ function Fail($m) { Write-Host "  x FAIL: $m"; $script:fail++ }
 # 하네스 활성 게이트 통과용 임시 프로젝트 루트
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("h107reg_" + [guid]::NewGuid().ToString("N").Substring(0,8))
 New-Item -ItemType Directory -Path (Join-Path $tmp "step_archive") -Force | Out-Null
-'{"current_step":1,"completed_steps":[],"total_steps":107}' | Out-File -FilePath (Join-Path $tmp "step_archive/progress.json") -Encoding UTF8
+'{"current_step":1,"completed_steps":[],"total_steps":50}' | Out-File -FilePath (Join-Path $tmp "step_archive/progress.json") -Encoding UTF8
 $env:CLAUDE_PROJECT_DIR = $tmp
 
 function Invoke-Hook($hook, $cmd) {

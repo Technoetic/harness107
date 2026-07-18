@@ -12,7 +12,7 @@ description: harness107 진행 상태 리셋 — progress.json을 current_step=1
   "completed_steps": [],
   "skipped_steps": [],
   "failed_steps": [],
-  "total_steps": 107,
+  "total_steps": 50,
   "metrics": { "total_duration_minutes": 0, "total_sessions": 0, "steps_per_session_avg": 0 },
   "trust5_results": { "r1": null, "r2": null, "r3": null },
   "eval_rounds": {
@@ -27,7 +27,7 @@ description: harness107 진행 상태 리셋 — progress.json을 current_step=1
 
 ## 보존 대상 (삭제 금지)
 
-- `step_archive/archived/step001~107.md` (본문 그대로)
+- `step_archive/archived/step001~050.md` (본문 그대로)
 - `step_archive/specs/SPEC-*.md` (자동 생성된 SPEC들)
 - `step_archive/outputs/trust5_r*.md` (Trust5 결과)
 - `step_archive/TOPIC/TOPIC.md` (사용자가 명시 삭제 요청 시에만)

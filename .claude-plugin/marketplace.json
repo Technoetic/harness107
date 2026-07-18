@@ -5,15 +5,15 @@
     "url": "https://github.com/Technoetic"
   },
   "metadata": {
-    "description": "harness107 마켓플레이스 — 107-step 자율주행 웹 튜토리얼 하네스 플러그인 배포",
-    "version": "1.0.0"
+    "description": "harness107 마켓플레이스 — 50-step 자율주행 웹 튜토리얼 하네스 플러그인 배포",
+    "version": "2.0.0"
   },
   "plugins": [
     {
       "name": "harness107",
       "source": "./",
-      "description": "Web tutorial generator with 107-step deterministic autopilot harness. One prompt triggers step001~107 self-driving execution with hooks, gates, and Trust5 evaluation. Windows + macOS/Linux.",
-      "version": "1.0.0",
+      "description": "Web tutorial generator with 50-step deterministic autopilot harness. One prompt triggers step001~050 self-driving execution with hooks, gates, and Trust5 evaluation. Windows + macOS/Linux.",
+      "version": "2.0.0",
       "author": { "name": "Technoetic" },
       "homepage": "https://github.com/Technoetic/harness107",
       "license": "MIT",

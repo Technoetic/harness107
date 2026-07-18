@@ -1,6 +1,6 @@
 ---
 name: step-executor
-description: 단일 step 본문 하나를 받아 완료까지 실행하는 워커. 호출 시 step 번호와 TOPIC.md 경로를 받아, 해당 step의 모든 지시를 따르고 결과 파일을 step_archive/에 저장한 뒤 "Step NNN/107 완료" 1줄로 보고한다. 도구 설치·조사·구현 step 모두 처리. 질문 금지·자연 종료 금지.
+description: 단일 step 본문 하나를 받아 완료까지 실행하는 워커. 호출 시 step 번호와 TOPIC.md 경로를 받아, 해당 step의 모든 지시를 따르고 결과 파일을 step_archive/에 저장한 뒤 "Step NNN/50 완료" 1줄로 보고한다. 도구 설치·조사·구현 step 모두 처리. 질문 금지·자연 종료 금지.
 model: haiku
 tools: Read, Write, Edit, Bash, Glob, Grep
 ---
@@ -37,7 +37,7 @@ tools: Read, Write, Edit, Bash, Glob, Grep
 마지막 한 줄 발화:
 
 ```
-Step NNN/107 완료
+Step NNN/50 완료
 ```
 
 추가 설명·이모지·요약 금지. 위 한 줄이 끝이다.

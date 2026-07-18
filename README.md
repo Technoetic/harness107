@@ -2,7 +2,7 @@
 
 # harness107
 
-### 한 줄 요청 → 107 step 자율주행 → 인터랙티브 웹 튜토리얼 1편
+### 한 줄 요청 → 50 step 자율주행 → 인터랙티브 웹 튜토리얼 1편
 
 **"논문 트렌드 분석 대시보드 만들어"** 한 줄을 던지면 컨텍스트 한계 직전까지 멈추지 않는 결정론적 절차가 가동된다.<br/>
 모델을 똑똑하게 만드는 대신 **모델이 놓을 트랙을 좁힌다**.
@@ -13,7 +13,7 @@
 [![License MIT](https://img.shields.io/badge/License-MIT-A855F7?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/Platform-Windows_·_macOS_·_Linux-0EA5E9?style=for-the-badge&logo=windows&logoColor=white)](#-설치)
 [![Hooks](https://img.shields.io/badge/Hooks-28_files-F59E0B?style=for-the-badge)](hooks/)
-[![Steps](https://img.shields.io/badge/Steps-107_files-10B981?style=for-the-badge)](assets/steps/)
+[![Steps](https://img.shields.io/badge/Steps-50_files-10B981?style=for-the-badge)](assets/steps/)
 
 [![Security Tests](https://img.shields.io/badge/Security_Tests-45_cases_·_reproducible-22C55E?style=for-the-badge)](tests/security-regression.sh)
 [![Patterns](https://img.shields.io/badge/Safety_Patterns-200+-EF4444?style=for-the-badge)](hooks/destructive-guard.ps1)
@@ -22,7 +22,9 @@
 
 <br/>
 
-<img src="docs/screenshots/hero-cast.svg" width="90%" alt="harness107 자율주행 데모 — /webapp 한 줄 입력으로 step001~107이 자동 진행되는 터미널 시뮬레이션"/>
+<img src="docs/screenshots/hero-cast.svg" width="90%" alt="harness107 자율주행 데모 — /webapp 한 줄 입력으로 step이 자동 진행되는 터미널 시뮬레이션 (legacy 107단계 완주 기록)"/>
+
+<sub>데모 캐스트는 legacy 107단계 완주 실기록이다. v2.0부터 하네스는 50단계로 축약됐다 (원본은 <a href="https://github.com/Technoetic/harness107/tree/legacy-107"><code>legacy-107</code></a> 태그).</sub>
 
 </div>
 
@@ -37,7 +39,7 @@
 ```text
 사용자 →  /webapp 논문 트렌드 분석 대시보드
                         ↓
-   webapp-trigger.hook  TOPIC.md 자동 작성 + step001~107 부트스트랩
+   webapp-trigger.hook  TOPIC.md 자동 작성 + step001~050 부트스트랩
                         ↓
    step001.md  ───────►  prefill 도구 검증 (Node, npx, Playwright, Biome, …)
    step002.md  ───────►  컨텍스트 전략 청크 작성
@@ -45,14 +47,14 @@
    step025.md  ───────►  4단계 카드 스토리보드 기획
    step030.md  ───────►  통합 설계 (디자인 토큰·SVG·ARIA)
    step037.md  ───────►  단일 HTML 인터랙티브 튜토리얼 구현
-   step049.md  ───────►  TRUST 5 게이트 r1 (50점 만점)
-   step069.md  ───────►  TRUST 5 게이트 r2
-   step104.md  ───────►  TRUST 5 게이트 r3
-   step107.md  ───────►  최종 산출물 + 동봉 메타
+   step038.md  ───────►  빌드 스모크 게이트 + TRUST 5 r1 (50점 만점)
+   step044.md  ───────►  구조 정리 완료 + TRUST 5 r2
+   step045.md  ───────►  E2E 테스트 (프리플라이트 흡수)
+   step050.md  ───────►  콘솔 에러 0 + 최종 build 게이트 + TRUST 5 r3
                         ↓
    Stop hook  ────►  진행 미완료면  {"decision":"block"}  →  자동 재개
                         ↓
-            107 step 완주 후에야 사용자에게 컨트롤 반환
+            50 step 완주 후에야 사용자에게 컨트롤 반환
 ```
 
 > [!IMPORTANT]
@@ -235,7 +237,7 @@ graph TB
 
     subgraph six["6 기둥"]
         P1["1️⃣ 하네스<br/>엔지니어링"]
-        P2["2️⃣ 절차의<br/>원자화 107step"]
+        P2["2️⃣ 절차의<br/>원자화 50step"]
         P3["3️⃣ 질문 금지<br/>결단하는 AI"]
         P4["4️⃣ 자연 종료<br/>금지"]
         P5["5️⃣ AI Slop<br/>방지"]
@@ -315,14 +317,14 @@ harness107/
 │   ├── trust5-validator.{ps1,sh}      ← r1·r2·r3 50점 만점 평가
 │   └── validate-tools.{ps1,sh}        ← 도구 검증 wrapper
 │
-└── assets/steps/                      ← 107개 결정론적 절차
+└── assets/steps/                      ← 50개 결정론적 절차
     ├── step001.md  하네스 프리플라이트
     ├── step002.md  컨텍스트 전략
     ├── …
-    ├── step049.md  ⭐ TRUST 5 게이트 r1
-    ├── step069.md  ⭐ TRUST 5 게이트 r2
-    ├── step104.md  ⭐ TRUST 5 게이트 r3
-    └── step107.md  최종 산출물
+    ├── step038.md  ⭐ 빌드 스모크 게이트 (TRUST 5 r1)
+    ├── step044.md  ⭐ 구조 정리 완료 (TRUST 5 r2)
+    ├── step045.md  E2E 테스트 (구 step084 프리플라이트 흡수)
+    └── step050.md  ⭐ 콘솔 에러 0 + 최종 게이트 (TRUST 5 r3)
 ```
 
 ---
@@ -356,22 +358,22 @@ sequenceDiagram
     LLM->>Progress: completed += 1
     Note over LLM: ...37개 step 실행 후 컨텍스트 부담 인지...
     LLM-->>Stop: 턴 종료
-    Stop->>Progress: completed = 37 / 107 읽음
+    Stop->>Progress: completed = 37 / 50 읽음
     rect rgb(220, 60, 60)
     Stop-->>LLM: stdout {"decision":"block","reason":"step038부터 즉시 실행"}
     end
     Note over LLM: Stop hook이 block을 반환 → 자동으로 다음 턴 시작
     LLM->>LLM: step038 즉시 실행
     LLM->>LLM: step039 실행
-    Note over LLM,Progress: ...completed_steps == 107 도달까지 반복...
+    Note over LLM,Progress: ...completed_steps == 50 도달까지 반복...
     LLM-->>Stop: 턴 종료
-    Stop->>Progress: completed = 107 / 107 확인
+    Stop->>Progress: completed = 50 / 50 확인
     rect rgb(60, 180, 80)
     Stop-->>User: 정상 종료 허용 (자율주행 완료)
     end
 ```
 
-질문 패턴(`"진행할까요?"`, `"다음 턴에서 재개"` 등 50+개) 감지 시 `[VIOLATION DETECTED]` reason과 함께 강제 재실행. 모델이 빠져나갈 길은 progress.json이 107이 되는 그 시점뿐이다.
+질문 패턴(`"진행할까요?"`, `"다음 턴에서 재개"` 등 50+개) 감지 시 `[VIOLATION DETECTED]` reason과 함께 강제 재실행. 모델이 빠져나갈 길은 progress.json이 50이 되는 그 시점뿐이다.
 
 ---
 
@@ -478,7 +480,7 @@ npx playwright install chromium
 
 ```text
 /harness-status
-→ harness107: 37/107 완료 | current=step038 | r1=- r2=- r3=-
+→ harness107: 37/50 완료 | current=step038 | r1=- r2=- r3=-
 ```
 
 ### 처음부터 다시
@@ -507,7 +509,7 @@ npx playwright install chromium
 | **Trackable** 추적성 | `@MX` 4종 태그 커버리지 | 10 | 7 |
 | **총점** | | **50** | **40** PASS |
 
-평가 라운드: r1 = step049 / r2 = step069 / r3 = step104 도달 시 자동 발화.<br/>
+평가 라운드: r1 = step038 / r2 = step044 / r3 = step050 도달 시 자동 발화.<br/>
 40점 이상 PASS · 40점 미만 WARN (fail-open, 자율주행은 계속).
 
 ---

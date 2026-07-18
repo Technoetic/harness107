@@ -7,7 +7,7 @@ description: harness107 진행 상태 조회 — 현재 step / 완료 step 수 /
 `step_archive/progress.json`을 읽어 한 줄로 보고:
 
 ```
-harness107: <completed>/107 완료 | current=stepNNN | r1=AA/50 r2=BB/50 r3=CC/50
+harness107: <completed>/50 완료 | current=stepNNN | r1=AA/50 r2=BB/50 r3=CC/50
 ```
 
 - progress.json 없으면: "harness107 비활성 — /webapp <주제> 로 시작"

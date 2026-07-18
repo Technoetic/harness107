@@ -23,7 +23,7 @@ fi
 read -r TOTAL CURRENT DONE STOP_ACTIVE LAST_MSG_FILE < <(python3 - <<PY "$PROGRESS_FILE"
 import json,sys,os,tempfile
 p=json.load(open(sys.argv[1],encoding='utf-8'))
-total=int(p.get('total_steps',107))
+total=int(p.get('total_steps',50))
 cur=int(p.get('current_step',1))
 done=len(p.get('completed_steps') or [])
 raw=os.environ.get('RAW_STDIN','')

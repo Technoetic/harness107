@@ -17,7 +17,7 @@
 #   - Secured:   semgrep --config=auto 결과 (MoAI OWASP 직매핑 아님)
 #   - Trackable: @MX 태그 4종 커버리지 (본 프로젝트 자체 정의 — MoAI 정식 "Conventional commits"와 다름)
 #
-# 트리거 (2026-06-10 수정): completed_steps 개수가 마일스톤(r1=49/r2=69/r3=104)을
+# 트리거 (2026-06-10 수정): completed_steps 개수가 마일스톤(r1=38/r2=44/r3=50)을
 #   "통과(>=)"했고 해당 라운드 결과 파일이 아직 없을 때 실행.
 #   (구버전의 정확일치(==) 판정은 한 턴에 여러 Step이 병합 완료되면 마일스톤을
 #    건너뛰어 게이트가 영구 미발화 — 실측 499 로그 중 발화 3회뿐이었음)
@@ -53,8 +53,8 @@ if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Forc
 
 $round = $null
 $milestone = 0
-foreach ($k in 49, 69, 104) {
-    $r = @{ 49 = 'r1'; 69 = 'r2'; 104 = 'r3' }[$k]
+foreach ($k in 38, 44, 50) {
+    $r = @{ 38 = "r1"; 44 = "r2"; 50 = "r3" }[$k]
     $f = Join-Path $outDir "trust5_$r.md"
     if ($completedCount -ge $k -and -not (Test-Path $f)) {
         $round = $r
@@ -63,7 +63,7 @@ foreach ($k in 49, 69, 104) {
     }
 }
 if ($null -eq $round) {
-    Write-T5Log "skip: completed=$completedCount, no pending milestone (r1>=49, r2>=69, r3>=104, 미생성 라운드 없음)"
+    Write-T5Log "skip: completed=$completedCount, no pending milestone (r1>=38, r2>=44, r3>=50, 미생성 라운드 없음)"
     exit 0
 }
 $outFile = Join-Path $outDir "trust5_$round.md"

@@ -53,7 +53,7 @@ if (-not (Test-Path $progressFile)) {
         $stepFiles += @(Get-ChildItem -Path $archivedInit -Filter "step???.md" -ErrorAction SilentlyContinue)
     }
     $detected = @($stepFiles | ForEach-Object { $_.Name } | Sort-Object -Unique).Count
-    $totalStepsDetected = if ($detected -gt 0) { $detected } else { 107 }
+    $totalStepsDetected = if ($detected -gt 0) { $detected } else { 50 }
     Write-Host "Detected total_steps from filesystem: $totalStepsDetected"
 
     # 초기 progress.json 생성 (MoAI-ADK 벤치마킹 필드 포함)

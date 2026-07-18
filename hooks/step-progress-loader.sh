@@ -37,7 +37,7 @@ with open(p_path,"w",encoding="utf-8") as f: json.dump(p,f,ensure_ascii=False,in
 
 done=len(p.get("completed_steps") or [])
 cur=int(p.get("current_step",1))
-total=int(p.get("total_steps",107))
+total=int(p.get("total_steps",50))
 print("=== harness107: Step Progress Loader ===")
 print(f"Progress: {done}/{total} completed")
 print(f"Current step: step{cur:03d}")
