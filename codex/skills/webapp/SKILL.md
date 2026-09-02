@@ -56,7 +56,8 @@ Call only `pause`. Report the returned paused status and current step. End the t
 
 ## Boundaries and handoff
 
-- Preserve normal Codex permission confirmations for every tool call.
+- Preserve the current Codex sandbox and normal Codex permission confirmations for every tool call. Never loosen, disable, or change the sandbox or approval settings.
+- Treat the state-manager result as the workflow authority. Never inspect, open, read, write, or edit workflow state, receipt, event, import, or progress storage directly.
 - Session startup may surface context, but it does not execute a step. Explicit start or resume selects the first handoff.
 - After one attempted step, only the already-trusted Stop hook may request one next-step marker for a later turn. The manager may use it to advance after success; a failed step may be selected again only in a later turn.
 - When the Stop hook is inactive or untrusted, the chain stops safely. Tell the user to invoke `$webapp resume` later.

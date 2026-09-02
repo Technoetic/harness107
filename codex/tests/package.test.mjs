@@ -66,6 +66,13 @@ function requirePositive(errors, content, patterns, label) {
   if (!found) errors.push(`missing positive contract: ${label}`);
 }
 
+function requireProhibition(errors, content, patterns, label) {
+  const found = instructionClauses(content).some(clause =>
+    isProhibition(clause) && patterns.every(pattern => pattern.test(clause))
+  );
+  if (!found) errors.push(`missing prohibition: ${label}`);
+}
+
 function forbidAffirmative(errors, content, pattern, label) {
   const found = instructionClauses(content).some(clause =>
     !isProhibition(clause) && pattern.test(clause)
@@ -122,7 +129,7 @@ function validateCommonSafety(errors, text) {
   forbidAffirmative(
     errors,
     text,
-    /(?:dangerously-bypass|\bsandbox\b.*\b(?:unrestricted|disabled?|off)\b|\bdisable\b.*\bsandbox\b)/i,
+    /(?:dangerously-bypass|\b(?:unrestricted|disabled?|off|loosen|change)\b.*\bsandbox\b|\bsandbox\b.*\b(?:unrestricted|disabled?|off|loosen|change)\b)/i,
     "sandbox bypass"
   );
   forbidAffirmative(
@@ -134,7 +141,7 @@ function validateCommonSafety(errors, text) {
   forbidAffirmative(
     errors,
     text,
-    /\b(?:read|write|rewrite|edit|modify|delete|move|archive|inspect)\b.*\b(?:state\.json|progress\.json|receipt[^\s`]*\.jsonl?|event[^\s`]*\.jsonl?|import[^\s`]*\.jsonl?|workflow (?:database|storage))\b/i,
+    /\b(?:open|inspect|read|write|rewrite|edit|modify|delete|move|archive)\b.*\b(?:state\.json|progress\.json|receipt[^\s`]*\.jsonl?|event[^\s`]*\.jsonl?|import[^\s`]*\.jsonl?|workflow (?:database|storage))\b/i,
     "direct workflow storage access"
   );
 }
@@ -316,7 +323,34 @@ function webappContractErrors(text) {
 
   const handoff = section(skill.body, "Boundaries and handoff");
   allowManagerOperations(errors, handoff, [], "handoff section");
-  requirePositive(errors, handoff, [/normal Codex permission confirmations/i], "normal permission confirmations");
+  requirePositive(
+    errors,
+    handoff,
+    [/preserve the current Codex sandbox/i, /normal Codex permission confirmations/i],
+    "current sandbox and normal permission confirmations"
+  );
+  requireProhibition(
+    errors,
+    handoff,
+    [/\bloosen\b/i, /\bdisable\b/i, /\bchange\b/i, /\bsandbox\b/i, /\bapproval settings\b/i],
+    "sandbox and approval setting changes"
+  );
+  requirePositive(
+    errors,
+    handoff,
+    [/state-manager result/i, /workflow authority/i],
+    "manager result is authoritative"
+  );
+  requireProhibition(
+    errors,
+    handoff,
+    [
+      /\binspect\b/i, /\bopen\b/i, /\bread\b/i, /\bwrite\b/i, /\bedit\b/i,
+      /\bworkflow state\b/i, /\breceipt\b/i, /\bevent\b/i, /\bimport\b/i,
+      /\bprogress storage\b/i, /\bdirectly\b/i
+    ],
+    "direct workflow storage access"
+  );
   requirePositive(errors, handoff, [/already-trusted Stop hook/i, /may request one next-step marker/i], "trusted Stop hook handoff");
   requirePositive(errors, handoff, [/inactive or untrusted/i, /chain stops/i], "untrusted Stop hook stops");
   if (!handoff.includes("a failed step may be selected again only in a later turn") ||
@@ -581,6 +615,62 @@ test("webapp semantic contract rejects the review mutation matrix without reject
     [],
     "a prohibition against auto-approval must remain valid"
   );
+});
+
+test("webapp sandbox contract rejects affirmative loosening while accepting prohibitions", async () => {
+  const text = await readSkill("webapp");
+  const unsafe = [
+    "Use an unrestricted sandbox.",
+    "USE AN UNRESTRICTED SANDBOX.",
+    "Use an `unrestricted` `sandbox`.",
+    "Disable the sandbox.",
+    "Loosen the sandbox.",
+    "Change the sandbox."
+  ];
+  const accepted = unsafe.filter(line =>
+    !mutationRejected(webappContractErrors, `${text}\n${line}\n`)
+  );
+  assert.deepEqual(accepted, [], `unsafe sandbox instructions accepted: ${accepted.join(" | ")}`);
+
+  for (const line of [
+    "Never use an unrestricted sandbox.",
+    "NEVER use an `unrestricted` `sandbox`.",
+    "Never loosen, disable, or change the sandbox."
+  ]) {
+    assert.deepEqual(
+      webappContractErrors(`${text}\n${line}\n`),
+      [],
+      `safe sandbox prohibition rejected: ${line}`
+    );
+  }
+});
+
+test("webapp storage contract rejects direct opening while accepting prohibitions", async () => {
+  const text = await readSkill("webapp");
+  const unsafe = [
+    "Open state.json directly.",
+    "OPEN STATE.JSON DIRECTLY.",
+    "Open `state.json` directly.",
+    "Inspect state.json directly.",
+    "Read state.json directly.",
+    "Write state.json directly."
+  ];
+  const accepted = unsafe.filter(line =>
+    !mutationRejected(webappContractErrors, `${text}\n${line}\n`)
+  );
+  assert.deepEqual(accepted, [], `unsafe storage instructions accepted: ${accepted.join(" | ")}`);
+
+  for (const line of [
+    "Never open state.json directly.",
+    "NEVER OPEN `state.json` DIRECTLY.",
+    "Never open/read state.json directly."
+  ]) {
+    assert.deepEqual(
+      webappContractErrors(`${text}\n${line}\n`),
+      [],
+      `safe storage prohibition rejected: ${line}`
+    );
+  }
 });
 
 test("webapp bundled step references cover all fifty regular resources", async () => {
