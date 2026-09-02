@@ -78,6 +78,13 @@ async function appendRawLifecycleEvent(root, event) {
   await writeFile(pathsFor(root).eventsPath, `${JSON.stringify(event)}\n`, { flag: "a" });
 }
 
+async function writeRawLifecycleEvents(root, lifecycleEvents) {
+  await writeFile(
+    pathsFor(root).eventsPath,
+    lifecycleEvents.map(event => `${JSON.stringify(event)}\n`).join("")
+  );
+}
+
 async function startStateReplacementEventSwapper(paths, stateBefore, replacement) {
   const backupPath = `${paths.eventsPath}.post-state-original`;
   const source = String.raw`
@@ -626,6 +633,309 @@ test("a lost Stop output is re-delivered idempotently until its marker is accept
   assert.equal((await events(root)).filter(event =>
     event.kind === "stop_continuation_requested"
   ).length, 1);
+});
+
+test("a directly consumed Stop request closes replay and fails the active attempt once", async t => {
+  for (const stopHookActive of [false, true]) {
+    await t.test(`stop_hook_active=${stopHookActive}`, async () => {
+      const root = await makeWorkspace();
+      const initialized = await init(root, `direct-consume-${stopHookActive}`);
+      const firstStop = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: "turn-direct-consume-request",
+        stop_hook_active: false,
+        last_assistant_message: null
+      });
+      assert.deepEqual(firstStop.output, {
+        decision: "block",
+        reason: markerFor(initialized.continuation)
+      });
+      const started = await begin(root, await readState(root), `direct-consume-attempt-${stopHookActive}`);
+      assert.equal((await events(root)).filter(event =>
+        event.kind === "continuation_prompt_accepted"
+      ).length, 0);
+
+      const stopEvent = {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: `turn-direct-consume-failure-${stopHookActive}`,
+        stop_hook_active: stopHookActive,
+        last_assistant_message: "ignored direct-consumption transcript"
+      };
+      const stopped = await runHook("stop", stopEvent);
+      const failed = await readState(root);
+      assert.equal(stopped.output.decision, "block");
+      assert.equal(stopped.output.reason, markerFor(failed.continuation));
+      assert.notEqual(stopped.output.reason, "[HARNESS50_CONTINUE null]");
+      assert.doesNotMatch(stopped.stdout, /direct-consumption transcript/);
+      assert.equal(failed.current_attempt.id, started.attempt.id);
+      assert.equal(failed.current_attempt.failure_recorded, true);
+      assert.equal(failed.consecutive_failures, 1);
+      const afterFirst = await events(root);
+      assert.equal(afterFirst.filter(event => event.kind === "stop_continuation_requested").length, 2);
+      assert.equal(afterFirst.filter(event =>
+        event.kind === "step_failed" && event.attempt_id === started.attempt.id
+      ).length, 1);
+
+      const repeated = await runHook("stop", stopEvent);
+      if (stopHookActive) {
+        assertEmptySuccess(repeated);
+      } else {
+        assert.deepEqual(repeated.output, stopped.output);
+      }
+      const afterRepeat = await readState(root);
+      assert.equal(afterRepeat.consecutive_failures, 1);
+      assert.equal((await events(root)).filter(event =>
+        event.kind === "step_failed" && event.attempt_id === started.attempt.id
+      ).length, 1);
+    });
+  }
+});
+
+test("malformed authoritative lifecycle records fail safe without markers or mutation", async t => {
+  const cases = [
+    ["missing boundary timestamp", lifecycleEvents => {
+      delete lifecycleEvents[0].timestamp;
+    }],
+    ["noncanonical boundary timestamp", lifecycleEvents => {
+      lifecycleEvents[0].timestamp = "2026-09-02T00:00:00Z";
+    }],
+    ["missing request timestamp", (lifecycleEvents, state) => {
+      lifecycleEvents.push({
+        kind: "stop_continuation_requested",
+        workflow_id: state.workflow_id,
+        step: state.current_step,
+        turn_id: "turn-missing-time",
+        baseline_receipt_count: state.completed_steps.length
+      });
+    }],
+    ["noncanonical request timestamp", (lifecycleEvents, state) => {
+      lifecycleEvents.push({
+        kind: "stop_continuation_requested",
+        timestamp: "2026-09-02T00:00:01Z",
+        workflow_id: state.workflow_id,
+        step: state.current_step,
+        turn_id: "turn-bad-time",
+        baseline_receipt_count: state.completed_steps.length
+      });
+    }],
+    ["empty request turn", (lifecycleEvents, state) => {
+      lifecycleEvents.push({
+        kind: "stop_continuation_requested",
+        timestamp: "2026-09-02T00:00:01.000Z",
+        workflow_id: state.workflow_id,
+        step: state.current_step,
+        turn_id: "",
+        baseline_receipt_count: state.completed_steps.length
+      });
+    }],
+    ["empty relevant workflow", lifecycleEvents => {
+      lifecycleEvents.push({
+        kind: "continuation_prompt_accepted",
+        timestamp: "2026-09-02T00:00:01.000Z",
+        workflow_id: "",
+        step: 1,
+        turn_id: "turn-empty-workflow",
+        baseline_receipt_count: 0
+      });
+    }],
+    ["fractional step", (lifecycleEvents, state) => {
+      lifecycleEvents.push({
+        kind: "stop_continuation_requested",
+        timestamp: "2026-09-02T00:00:01.000Z",
+        workflow_id: state.workflow_id,
+        step: 1.5,
+        turn_id: "turn-fractional-step",
+        baseline_receipt_count: state.completed_steps.length
+      });
+    }],
+    ["out of range baseline", (lifecycleEvents, state) => {
+      lifecycleEvents.push({
+        kind: "stop_continuation_requested",
+        timestamp: "2026-09-02T00:00:01.000Z",
+        workflow_id: state.workflow_id,
+        step: state.current_step,
+        turn_id: "turn-bad-baseline",
+        baseline_receipt_count: 51
+      });
+    }],
+    ["acceptance before request", (lifecycleEvents, state) => {
+      lifecycleEvents.push({
+        kind: "continuation_prompt_accepted",
+        timestamp: "2026-09-02T00:00:01.000Z",
+        workflow_id: state.workflow_id,
+        step: state.current_step,
+        turn_id: "turn-bad-order",
+        baseline_receipt_count: state.completed_steps.length
+      }, {
+        kind: "stop_continuation_requested",
+        timestamp: "2026-09-02T00:00:02.000Z",
+        workflow_id: state.workflow_id,
+        step: state.current_step,
+        turn_id: "turn-bad-order",
+        baseline_receipt_count: state.completed_steps.length
+      });
+    }]
+  ];
+  for (const [name, mutate] of cases) {
+    await t.test(name, async () => {
+      const root = await makeWorkspace();
+      const state = await init(root, "malformed-ledger");
+      const lifecycleEvents = await events(root);
+      mutate(lifecycleEvents, state);
+      await writeRawLifecycleEvents(root, lifecycleEvents);
+      const stateBefore = await readFile(pathsFor(root).statePath);
+      const eventsBefore = await readFile(pathsFor(root).eventsPath);
+      const result = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: "turn-malformed-ledger",
+        stop_hook_active: false,
+        last_assistant_message: "secret ledger diagnostic input"
+      });
+      assertEmptySuccess(result);
+      assert.doesNotMatch(result.stdout, /secret|ledger diagnostic/);
+      assert.ok(Buffer.from(await readFile(pathsFor(root).statePath)).equals(stateBefore));
+      assert.ok(Buffer.from(await readFile(pathsFor(root).eventsPath)).equals(eventsBefore));
+    });
+  }
+});
+
+test("request records after their current attempt consumption fail safe", async () => {
+  const root = await makeWorkspace();
+  const initialized = await init(root, "request-after-consume");
+  const requested = await runHook("stop", {
+    hook_event_name: "Stop",
+    cwd: root,
+    turn_id: "turn-request-before-consume",
+    stop_hook_active: false,
+    last_assistant_message: null
+  });
+  assert.equal(requested.output.decision, "block");
+  await begin(root, initialized, "request-after-consume-attempt");
+  const lifecycleEvents = await events(root);
+  const requestIndex = lifecycleEvents.findIndex(event =>
+    event.kind === "stop_continuation_requested"
+  );
+  const consumedIndex = lifecycleEvents.findIndex(event =>
+    event.kind === "continuation_consumed"
+  );
+  const request = lifecycleEvents[requestIndex];
+  lifecycleEvents.splice(requestIndex, 1);
+  const relocatedConsumed = lifecycleEvents.findIndex(event =>
+    event.kind === "continuation_consumed"
+  );
+  lifecycleEvents.splice(relocatedConsumed + 1, 0, request);
+  assert.ok(consumedIndex > requestIndex);
+  await writeRawLifecycleEvents(root, lifecycleEvents);
+  const stateBefore = await readFile(pathsFor(root).statePath);
+  const eventsBefore = await readFile(pathsFor(root).eventsPath);
+
+  assertEmptySuccess(await runHook("stop", {
+    hook_event_name: "Stop",
+    cwd: root,
+    turn_id: "turn-after-malformed-order",
+    stop_hook_active: false,
+    last_assistant_message: null
+  }));
+  assert.ok(Buffer.from(await readFile(pathsFor(root).statePath)).equals(stateBefore));
+  assert.ok(Buffer.from(await readFile(pathsFor(root).eventsPath)).equals(eventsBefore));
+});
+
+test("malformed consumed and accepted records cannot authorize active-attempt handling", async t => {
+  const cases = [
+    ["missing consumed timestamp", lifecycleEvents => {
+      const consumed = lifecycleEvents.find(event => event.kind === "continuation_consumed");
+      delete consumed.timestamp;
+    }],
+    ["noncanonical consumed timestamp", lifecycleEvents => {
+      const consumed = lifecycleEvents.find(event => event.kind === "continuation_consumed");
+      consumed.timestamp = "2026-09-02T00:00:03Z";
+    }],
+    ["empty consumed attempt", lifecycleEvents => {
+      const consumed = lifecycleEvents.find(event => event.kind === "continuation_consumed");
+      consumed.attempt_id = "";
+    }],
+    ["missing acceptance timestamp", (lifecycleEvents, state) => {
+      const consumedIndex = lifecycleEvents.findIndex(event => event.kind === "continuation_consumed");
+      lifecycleEvents.splice(consumedIndex, 0, {
+        kind: "continuation_prompt_accepted",
+        workflow_id: state.workflow_id,
+        step: state.current_step,
+        turn_id: "turn-record-shape-request",
+        baseline_receipt_count: state.completed_steps.length
+      });
+    }],
+    ["noncanonical acceptance timestamp", (lifecycleEvents, state) => {
+      const consumedIndex = lifecycleEvents.findIndex(event => event.kind === "continuation_consumed");
+      lifecycleEvents.splice(consumedIndex, 0, {
+        kind: "continuation_prompt_accepted",
+        timestamp: "2026-09-02T00:00:03Z",
+        workflow_id: state.workflow_id,
+        step: state.current_step,
+        turn_id: "turn-record-shape-request",
+        baseline_receipt_count: state.completed_steps.length
+      });
+    }],
+    ["acceptance after consumption", (lifecycleEvents, state) => {
+      lifecycleEvents.push({
+        kind: "continuation_prompt_accepted",
+        timestamp: "2026-09-02T00:00:04.000Z",
+        workflow_id: state.workflow_id,
+        step: state.current_step,
+        turn_id: "turn-record-shape-request",
+        baseline_receipt_count: state.completed_steps.length
+      });
+    }]
+  ];
+  for (const [name, mutate] of cases) {
+    await t.test(name, async () => {
+      const root = await makeWorkspace();
+      const initialized = await init(root, "record-shape");
+      const requested = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: "turn-record-shape-request",
+        stop_hook_active: false,
+        last_assistant_message: null
+      });
+      assert.equal(requested.output.decision, "block");
+      await begin(root, initialized, "record-shape-attempt");
+      const state = await readState(root);
+      const lifecycleEvents = await events(root);
+      mutate(lifecycleEvents, state);
+      await writeRawLifecycleEvents(root, lifecycleEvents);
+      const stateBefore = await readFile(pathsFor(root).statePath);
+      const eventsBefore = await readFile(pathsFor(root).eventsPath);
+
+      assertEmptySuccess(await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: "turn-record-shape-stop",
+        stop_hook_active: false,
+        last_assistant_message: null
+      }));
+      assert.ok(Buffer.from(await readFile(pathsFor(root).statePath)).equals(stateBefore));
+      assert.ok(Buffer.from(await readFile(pathsFor(root).eventsPath)).equals(eventsBefore));
+    });
+  }
+});
+
+test("a schema-valid empty Stop turn never publishes a noncanonical request", async () => {
+  const root = await makeWorkspace();
+  await init(root, "empty-stop-turn");
+  const stateBefore = await readFile(pathsFor(root).statePath);
+  const eventsBefore = await readFile(pathsFor(root).eventsPath);
+  assertEmptySuccess(await runHook("stop", {
+    hook_event_name: "Stop",
+    cwd: root,
+    turn_id: "",
+    stop_hook_active: false,
+    last_assistant_message: null
+  }));
+  assert.ok(Buffer.from(await readFile(pathsFor(root).statePath)).equals(stateBefore));
+  assert.ok(Buffer.from(await readFile(pathsFor(root).eventsPath)).equals(eventsBefore));
 });
 
 test("event-first Stop requests replay and accept with null or stale legacy state turn IDs", async t => {

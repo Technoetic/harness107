@@ -530,10 +530,54 @@ function matchesCurrentContinuation(event, state) {
     event.baseline_receipt_count === state.completed_steps.length;
 }
 
+const CONTINUATION_DECISION_EVENTS = new Set([
+  "continuation_issued",
+  "continuation_consumed",
+  "stop_continuation_requested",
+  "continuation_prompt_accepted"
+]);
+
+function nonEmptyLedgerId(value) {
+  return typeof value === "string" && value.length > 0;
+}
+
+function canonicalLedgerTimestamp(value) {
+  if (typeof value !== "string") return false;
+  const milliseconds = Date.parse(value);
+  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
+}
+
+function boundedLedgerInteger(value, minimum, maximum) {
+  return Number.isInteger(value) && value >= minimum && value <= maximum;
+}
+
+function canonicalContinuationDecisionEvent(event) {
+  if (event === null || typeof event !== "object" || Array.isArray(event)) return false;
+  if (!CONTINUATION_DECISION_EVENTS.has(event.kind)) return true;
+  if (
+    !nonEmptyLedgerId(event.workflow_id) ||
+    !canonicalLedgerTimestamp(event.timestamp) ||
+    !boundedLedgerInteger(event.step, 1, 50) ||
+    !boundedLedgerInteger(event.baseline_receipt_count, 0, 50)
+  ) {
+    return false;
+  }
+  if (event.kind === "continuation_consumed") return nonEmptyLedgerId(event.attempt_id);
+  if (
+    event.kind === "stop_continuation_requested" ||
+    event.kind === "continuation_prompt_accepted"
+  ) {
+    return nonEmptyLedgerId(event.turn_id);
+  }
+  return true;
+}
+
 export function currentContinuationLedgerGeneration(events, state) {
   if (!Array.isArray(events) || state === null || typeof state !== "object") return null;
+  if (events.some(event => !canonicalContinuationDecisionEvent(event))) return null;
   let latestWorkflowBoundary = -1;
   let matchingBoundary = -1;
+  let currentConsumptionIndex = null;
   if (state.continuation !== null && state.continuation !== undefined) {
     if (
       state.continuation.workflow_id !== state.workflow_id ||
@@ -568,12 +612,12 @@ export function currentContinuationLedgerGeneration(events, state) {
       }
     }
     if (consumed.length !== 1) return null;
-    const consumedIndex = consumed[0];
+    currentConsumptionIndex = consumed[0];
     for (let index = 0; index < events.length; index += 1) {
       const event = events[index];
       if (event.kind !== "continuation_issued" || event.workflow_id !== state.workflow_id) continue;
       latestWorkflowBoundary = index;
-      if (index < consumedIndex && matchesCurrentContinuation(event, state)) {
+      if (index < currentConsumptionIndex && matchesCurrentContinuation(event, state)) {
         matchingBoundary = index;
       }
     }
@@ -583,26 +627,59 @@ export function currentContinuationLedgerGeneration(events, state) {
   if (matchingBoundary < 0 || matchingBoundary !== latestWorkflowBoundary) return null;
 
   const requests = [];
+  const acceptances = [];
+  const consumptions = [];
   for (let index = matchingBoundary + 1; index < events.length; index += 1) {
     const event = events[index];
-    if (event.kind !== "stop_continuation_requested" || event.workflow_id !== state.workflow_id) {
+    if (!CONTINUATION_DECISION_EVENTS.has(event.kind) || event.workflow_id !== state.workflow_id) {
       continue;
     }
-    if (!matchesCurrentContinuation(event, state) || typeof event.turn_id !== "string") return null;
-    requests.push({ event, index });
+    if (event.kind === "continuation_issued" || !matchesCurrentContinuation(event, state)) return null;
+    if (event.kind === "stop_continuation_requested") requests.push({ event, index });
+    if (event.kind === "continuation_prompt_accepted") acceptances.push({ event, index });
+    if (event.kind === "continuation_consumed") consumptions.push({ event, index });
   }
-  if (requests.length > 1) return null;
+  if (requests.length > 1 || acceptances.length > 1 || consumptions.length > 1) return null;
   const requestRecord = requests[0] ?? null;
-  const accepted = requestRecord !== null && events.slice(requestRecord.index + 1).some(event =>
-    event.kind === "continuation_prompt_accepted" &&
-    matchesCurrentContinuation(event, state) &&
-    event.turn_id === requestRecord.event.turn_id
-  );
+  const acceptanceRecord = acceptances[0] ?? null;
+  const consumptionRecord = consumptions[0] ?? null;
+  if (state.continuation !== null && consumptionRecord !== null) return null;
+  if (
+    state.continuation === null &&
+    (consumptionRecord === null || consumptionRecord.index !== currentConsumptionIndex)
+  ) {
+    return null;
+  }
+  if (acceptanceRecord !== null && (
+    requestRecord === null ||
+    acceptanceRecord.index <= requestRecord.index ||
+    acceptanceRecord.event.turn_id !== requestRecord.event.turn_id
+  )) {
+    return null;
+  }
+  if (
+    requestRecord !== null &&
+    consumptionRecord !== null &&
+    consumptionRecord.index <= requestRecord.index
+  ) {
+    return null;
+  }
+  if (
+    acceptanceRecord !== null &&
+    consumptionRecord !== null &&
+    acceptanceRecord.index >= consumptionRecord.index
+  ) {
+    return null;
+  }
+  const accepted = acceptanceRecord !== null;
+  const consumed = consumptionRecord !== null;
   return Object.freeze({
     boundaryIndex: matchingBoundary,
     request: requestRecord?.event ?? null,
     requestIndex: requestRecord?.index ?? null,
-    accepted
+    accepted,
+    consumed,
+    closed: accepted || (requestRecord !== null && consumed)
   });
 }
 

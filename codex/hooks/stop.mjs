@@ -67,6 +67,8 @@ async function claimContinuation(workspaceRoot, turnId, eventNow) {
     }
     const generation = currentContinuationLedgerGeneration(lifecycleEvents, state);
     if (
+      typeof turnId !== "string" ||
+      turnId.length === 0 ||
       state.status !== "running" ||
       state.current_step === null ||
       state.continuation === null ||
@@ -130,7 +132,8 @@ export async function handleStop(event, { workspaceRoot, eventNow }) {
   if (generation === null) return {};
   const generationRequest = generation.request;
   const generationAccepted = generation.accepted;
-  if (generationRequest !== null && !generationAccepted) {
+  if (generationRequest !== null && !generation.closed) {
+    if (state.continuation === null) return {};
     if (observedEvent.stopHookActive) return {};
     return {
       decision: "block",
