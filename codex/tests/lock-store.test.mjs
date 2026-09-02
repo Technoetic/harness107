@@ -8,7 +8,12 @@ import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { withRunLock } from "../scripts/lib/lock.mjs";
+import {
+  isRunLockHeld,
+  sameRunLockIdentity,
+  withRunLock,
+  withRunLockEventWrite
+} from "../scripts/lib/lock.mjs";
 import { pathsFor } from "../scripts/lib/paths.mjs";
 import { createInitialState } from "../scripts/lib/schema.mjs";
 import {
@@ -523,6 +528,24 @@ test("prepared event batches reject one byte over before mutation and loop short
   assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(prepared.bytes));
 });
 
+test("pinned writes reject an impossible bytesWritten count without changing the ledger", async () => {
+  const root = await makeWorkspace();
+  const paths = pathsFor(root);
+  await mkdir(paths.codexDir, { recursive: true });
+  const original = Buffer.from('{"kind":"original"}\n');
+  await writeFile(paths.eventsPath, original);
+  const prepared = prepareEventBatch([{
+    kind: "workflow_paused",
+    workflow_id: "wf-impossible-write-count",
+    status: "paused"
+  }], { now: () => new Date(baseTime) });
+
+  await assert.rejects(() => withPinnedEventBatch(root, prepared, async () => {}, {
+    writeChunk: async (_handle, _buffer, _offset, length) => ({ bytesWritten: length + 1 })
+  }), error => error.code === "EVENT_WRITE_INTEGRITY");
+  assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(original));
+});
+
 test("pinned batches reject same-inode growth without overwriting at a stale offset", async () => {
   const root = await makeWorkspace();
   const paths = pathsFor(root);
@@ -602,6 +625,133 @@ test("concurrent appendEvent callers serialize the exact boundary", async () => 
   assert.doesNotThrow(() => {
     for (const line of final.toString("utf8").trimEnd().split("\n")) JSON.parse(line);
   });
+});
+
+test("same-owner appendEvent siblings serialize the exact boundary", async () => {
+  const root = await makeWorkspace();
+  const paths = pathsFor(root);
+  await mkdir(paths.codexDir, { recursive: true });
+  const event = {
+    kind: "workflow_paused",
+    workflow_id: "o".repeat(256 * 1024),
+    status: "paused"
+  };
+  const eventNow = () => new Date(baseTime);
+  const prepared = prepareEventBatch([event], { now: eventNow });
+  const prefix = '{"kind":"padding","value":"';
+  const suffix = '"}\n';
+  const paddingLength = (1024 * 1024) - prepared.bytes.length - Buffer.byteLength(prefix + suffix);
+  const original = Buffer.from(prefix + "p".repeat(paddingLength) + suffix);
+  await writeFile(paths.eventsPath, original);
+
+  const settled = await withRunLock(paths.lockPath, () => Promise.allSettled(
+    Array.from({ length: 8 }, () => appendEvent(root, event, { now: eventNow }))
+  ));
+
+  assert.equal(settled[0].status, "fulfilled");
+  assert.equal(settled.filter(result => result.status === "fulfilled").length, 1);
+  for (const result of settled.filter(result => result.status === "rejected")) {
+    assert.equal(result.reason.code, "EVENT_LOG_LIMIT");
+  }
+  const final = await readFile(paths.eventsPath);
+  assert.equal(final.length, 1024 * 1024);
+  assert.ok(final.subarray(0, original.length).equals(original));
+  assert.ok(final.subarray(-prepared.bytes.length).equals(prepared.bytes));
+  assert.doesNotThrow(() => {
+    for (const line of final.toString("utf8").trimEnd().split("\n")) JSON.parse(line);
+  });
+});
+
+test("same-owner pinned batch siblings serialize mutation and exact capacity", async () => {
+  const root = await makeWorkspace();
+  const paths = pathsFor(root);
+  await mkdir(paths.codexDir, { recursive: true });
+  const prepared = prepareEventBatch([{
+    kind: "workflow_paused",
+    workflow_id: "b".repeat(128 * 1024),
+    status: "paused"
+  }], { now: () => new Date(baseTime) });
+  const prefix = '{"kind":"padding","value":"';
+  const suffix = '"}\n';
+  const paddingLength = (1024 * 1024) - prepared.bytes.length - Buffer.byteLength(prefix + suffix);
+  const original = Buffer.from(prefix + "p".repeat(paddingLength) + suffix);
+  await writeFile(paths.eventsPath, original);
+  let mutationCalls = 0;
+
+  const settled = await withRunLock(paths.lockPath, () => Promise.allSettled(
+    Array.from({ length: 4 }, () => withPinnedEventBatch(root, prepared, async () => {
+      mutationCalls += 1;
+    }))
+  ));
+
+  assert.equal(settled[0].status, "fulfilled");
+  assert.equal(settled.filter(result => result.status === "fulfilled").length, 1);
+  for (const result of settled.filter(result => result.status === "rejected")) {
+    assert.equal(result.reason.code, "EVENT_LOG_LIMIT");
+  }
+  assert.equal(mutationCalls, 1);
+  const final = await readFile(paths.eventsPath);
+  assert.equal(final.length, 1024 * 1024);
+  assert.ok(final.subarray(0, original.length).equals(original));
+  assert.ok(final.subarray(-prepared.bytes.length).equals(prepared.bytes));
+  assert.doesNotThrow(() => {
+    for (const line of final.toString("utf8").trimEnd().split("\n")) JSON.parse(line);
+  });
+});
+
+test("a nested event writer fails fast without mutating the ledger", async () => {
+  const root = await makeWorkspace();
+  const paths = pathsFor(root);
+  await mkdir(paths.codexDir, { recursive: true });
+  const original = Buffer.from('{"kind":"original"}\n');
+  await writeFile(paths.eventsPath, original);
+  const prepared = prepareEventBatch([{
+    kind: "workflow_paused",
+    workflow_id: "wf-outer",
+    status: "paused"
+  }], { now: () => new Date(baseTime) });
+
+  await assert.rejects(
+    () => withRunLock(paths.lockPath, () => withPinnedEventBatch(root, prepared, () => (
+      appendEvent(root, {
+        kind: "workflow_paused",
+        workflow_id: "wf-inner",
+        status: "paused"
+      }, { now: () => new Date(baseTime) })
+    ))),
+    error => error.code === "EVENT_WRITE_REENTRANT"
+  );
+  assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(original));
+});
+
+test("Windows case-equivalent lock identities retain the current owner", {
+  skip: process.platform !== "win32"
+}, async () => {
+  const root = await makeWorkspace();
+  const lockPath = pathsFor(root).lockPath;
+  const differentlyCased = lockPath.toUpperCase();
+
+  await withRunLock(lockPath, async () => {
+    assert.equal(isRunLockHeld(differentlyCased), true);
+    await withRunLockEventWrite(differentlyCased, async () => {});
+  });
+});
+
+test("Windows-flavor lock identity normalization is host-portable", () => {
+  assert.equal(
+    sameRunLockIdentity(
+      "C:\\Workspace\\Project\\.harness50-codex\\run.lock",
+      "c:/workspace/project/.HARNESS50-CODEX/RUN.LOCK"
+    ),
+    true
+  );
+  assert.equal(
+    sameRunLockIdentity(
+      "C:\\Workspace\\Project\\.harness50-codex\\run.lock",
+      "C:\\Workspace\\Sibling\\.harness50-codex\\run.lock"
+    ),
+    false
+  );
 });
 
 test("independent appendEvent processes serialize the exact boundary", async () => {

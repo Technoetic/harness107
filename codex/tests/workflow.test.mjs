@@ -522,6 +522,173 @@ test("processStop tolerates an ordinary post-commit telemetry fault and replays 
   }), result);
 });
 
+test("processStop rolls back a partial telemetry write before tolerating its I/O fault", async () => {
+  const root = await makeWorkspace();
+  const initialized = await initWorkflow({
+    workspaceRoot: root,
+    topic: "projection partial write",
+    now: baseTime,
+    idFactory: ids("workflow-projection-partial", "nonce-projection-partial", "generation-projection-partial")
+  });
+  const paths = pathsFor(root);
+  const eventsBefore = await readFile(paths.eventsPath);
+  let writes = 0;
+  const result = await processStop({
+    workspaceRoot: root,
+    turnId: "turn-projection-partial",
+    stopHookActive: false,
+    now: plus(1),
+    eventBatchOptions: {
+      writeChunk: async (handle, buffer, offset, length, position) => {
+        writes += 1;
+        if (writes === 1) return handle.write(buffer, offset, Math.min(length, 3), position);
+        throw Object.assign(new Error("fixture telemetry write failure"), { code: "EIO" });
+      }
+    }
+  });
+
+  assert.equal(writes, 2);
+  assert.deepEqual(result, { decision: "block", continuation: initialized.continuation });
+  assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(eventsBefore));
+  assert.doesNotThrow(() => {
+    for (const line of eventsBefore.toString("utf8").trimEnd().split("\n")) JSON.parse(line);
+  });
+  assert.equal((await readState(root)).stop_delivery.requested_turn_id, "turn-projection-partial");
+  assert.deepEqual(await processStop({
+    workspaceRoot: root,
+    turnId: "turn-projection-partial-retry",
+    stopHookActive: false,
+    now: plus(2)
+  }), result);
+});
+
+test("processStop rejects a path swap during partial-write rollback and replays after repair", async () => {
+  const root = await makeWorkspace();
+  const initialized = await initWorkflow({
+    workspaceRoot: root,
+    topic: "projection rollback swap",
+    now: baseTime,
+    idFactory: ids("workflow-rollback-swap", "nonce-rollback-swap", "generation-rollback-swap")
+  });
+  const paths = pathsFor(root);
+  const eventsBefore = await readFile(paths.eventsPath);
+  const displacedPath = `${paths.eventsPath}.displaced`;
+  const replacement = Buffer.from('{"kind":"replacement"}\n');
+  let writes = 0;
+
+  await assert.rejects(() => processStop({
+    workspaceRoot: root,
+    turnId: "turn-rollback-swap",
+    stopHookActive: false,
+    now: plus(1),
+    eventBatchOptions: {
+      writeChunk: async (handle, buffer, offset, length, position) => {
+        writes += 1;
+        if (writes === 1) return handle.write(buffer, offset, Math.min(length, 3), position);
+        await rename(paths.eventsPath, displacedPath);
+        await writeFile(paths.eventsPath, replacement);
+        throw Object.assign(new Error("fixture telemetry write failure"), { code: "EIO" });
+      }
+    }
+  }), error => error.code === "WORKSPACE_PATH_UNSAFE");
+
+  assert.equal(writes, 2);
+  assert.equal((await readState(root)).stop_delivery.requested_turn_id, "turn-rollback-swap");
+  assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(replacement));
+  const displaced = await readFile(displacedPath);
+  assert.equal(displaced.length, eventsBefore.length + 3);
+  assert.ok(displaced.subarray(0, eventsBefore.length).equals(eventsBefore));
+  await unlink(paths.eventsPath);
+  await unlink(displacedPath);
+  await writeFile(paths.eventsPath, eventsBefore);
+  assert.deepEqual(await processStop({
+    workspaceRoot: root,
+    turnId: "turn-rollback-swap-retry",
+    stopHookActive: false,
+    now: plus(2)
+  }), { decision: "block", continuation: initialized.continuation });
+});
+
+test("processStop never truncates an unverified partial telemetry prefix", async () => {
+  const root = await makeWorkspace();
+  const initialized = await initWorkflow({
+    workspaceRoot: root,
+    topic: "projection rollback content",
+    now: baseTime,
+    idFactory: ids("workflow-rollback-content", "nonce-rollback-content", "generation-rollback-content")
+  });
+  const paths = pathsFor(root);
+  const eventsBefore = await readFile(paths.eventsPath);
+  let writes = 0;
+
+  await assert.rejects(() => processStop({
+    workspaceRoot: root,
+    turnId: "turn-rollback-content",
+    stopHookActive: false,
+    now: plus(1),
+    eventBatchOptions: {
+      writeChunk: async (handle, _buffer, _offset, _length, position) => {
+        writes += 1;
+        if (writes === 1) return handle.write(Buffer.from("bad"), 0, 3, position);
+        throw Object.assign(new Error("fixture telemetry write failure"), { code: "EIO" });
+      }
+    }
+  }), error => error.code === "EVENT_WRITE_INTEGRITY");
+
+  assert.equal(writes, 2);
+  assert.equal((await readState(root)).stop_delivery.requested_turn_id, "turn-rollback-content");
+  const damaged = await readFile(paths.eventsPath);
+  assert.equal(damaged.length, eventsBefore.length + 3);
+  assert.ok(damaged.subarray(0, eventsBefore.length).equals(eventsBefore));
+  assert.equal(damaged.subarray(-3).toString("utf8"), "bad");
+  await writeFile(paths.eventsPath, eventsBefore);
+  assert.deepEqual(await processStop({
+    workspaceRoot: root,
+    turnId: "turn-rollback-content-retry",
+    stopHookActive: false,
+    now: plus(2)
+  }), { decision: "block", continuation: initialized.continuation });
+});
+
+test("processStop does not regrow a concurrently truncated ledger during rollback", async () => {
+  const root = await makeWorkspace();
+  const initialized = await initWorkflow({
+    workspaceRoot: root,
+    topic: "projection rollback truncation",
+    now: baseTime,
+    idFactory: ids("workflow-rollback-truncate", "nonce-rollback-truncate", "generation-rollback-truncate")
+  });
+  const paths = pathsFor(root);
+  const eventsBefore = await readFile(paths.eventsPath);
+  let writes = 0;
+
+  await assert.rejects(() => processStop({
+    workspaceRoot: root,
+    turnId: "turn-rollback-truncate",
+    stopHookActive: false,
+    now: plus(1),
+    eventBatchOptions: {
+      writeChunk: async (handle, buffer, offset, length, position) => {
+        writes += 1;
+        if (writes === 1) return handle.write(buffer, offset, Math.min(length, 3), position);
+        await handle.truncate(eventsBefore.length - 1);
+        throw Object.assign(new Error("fixture telemetry write failure"), { code: "EIO" });
+      }
+    }
+  }), error => error.code === "WORKSPACE_PATH_UNSAFE");
+
+  assert.equal(writes, 2);
+  assert.equal((await readState(root)).stop_delivery.requested_turn_id, "turn-rollback-truncate");
+  assert.equal((await readFile(paths.eventsPath)).length, eventsBefore.length - 1);
+  await writeFile(paths.eventsPath, eventsBefore);
+  assert.deepEqual(await processStop({
+    workspaceRoot: root,
+    turnId: "turn-rollback-truncate-retry",
+    stopHookActive: false,
+    now: plus(2)
+  }), { decision: "block", continuation: initialized.continuation });
+});
+
 test("processStop does not misclassify arbitrary post-commit exceptions as telemetry I/O", async () => {
   const root = await makeWorkspace();
   await initWorkflow({

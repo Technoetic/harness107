@@ -2,12 +2,14 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { link, mkdir, open, readFile, readdir, rename, rmdir, unlink } from "node:fs/promises";
 import { hostname } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, win32 } from "node:path";
 
 import { HarnessError } from "./errors.mjs";
 
 const RETRY_INTERVAL_MS = 25;
 const lockContext = new AsyncLocalStorage();
+const eventWriteContext = new AsyncLocalStorage();
+const eventWriteTail = Symbol("eventWriteTail");
 
 function lockTimeout(lockPath, waitMs) {
   return new HarnessError("LOCK_TIMEOUT", "timed out waiting for the workflow lock", {
@@ -221,14 +223,49 @@ async function releaseLock(owner, beforeRelease) {
 
 export function assertRunLockHeld(lockPath) {
   const owner = lockContext.getStore();
-  if (owner?.lockPath !== lockPath || owner.active !== true) {
+  if (!sameRunLockIdentity(owner?.lockPath, lockPath) || owner.active !== true) {
     throw new HarnessError("ARCHIVE_LOCK_REQUIRED", "active-state archival requires the workspace run lock");
   }
 }
 
 export function isRunLockHeld(lockPath) {
   const owner = lockContext.getStore();
-  return owner?.lockPath === lockPath && owner.active === true;
+  return sameRunLockIdentity(owner?.lockPath, lockPath) && owner.active === true;
+}
+
+export function sameRunLockIdentity(left, right) {
+  if (typeof left !== "string" || typeof right !== "string") return false;
+  if (process.platform === "win32" || (win32.isAbsolute(left) && win32.isAbsolute(right))) {
+    return win32.normalize(left).toLowerCase() === win32.normalize(right).toLowerCase();
+  }
+  return left === right;
+}
+
+export async function withRunLockEventWrite(lockPath, fn) {
+  if (typeof fn !== "function") {
+    throw new HarnessError("LOCK_CALLBACK_INVALID", "lock callback must be a function");
+  }
+  const owner = lockContext.getStore();
+  if (!sameRunLockIdentity(owner?.lockPath, lockPath) || owner.active !== true) {
+    throw new HarnessError("EVENT_WRITE_LOCK_REQUIRED", "event writes require the workspace run lock");
+  }
+  if (eventWriteContext.getStore() === owner) {
+    throw new HarnessError("EVENT_WRITE_REENTRANT", "nested event writes are not permitted");
+  }
+
+  const previous = owner[eventWriteTail] ?? Promise.resolve();
+  let release;
+  const ticket = new Promise(resolve => {
+    release = resolve;
+  });
+  owner[eventWriteTail] = ticket;
+  await previous;
+  try {
+    return await eventWriteContext.run(owner, fn);
+  } finally {
+    release();
+    if (owner[eventWriteTail] === ticket) delete owner[eventWriteTail];
+  }
 }
 
 export async function withRunLock(lockPath, fn, {

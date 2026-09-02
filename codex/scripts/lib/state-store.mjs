@@ -12,7 +12,12 @@ import {
 import { basename, join } from "node:path";
 
 import { HarnessError } from "./errors.mjs";
-import { assertRunLockHeld, isRunLockHeld, withRunLock } from "./lock.mjs";
+import {
+  assertRunLockHeld,
+  isRunLockHeld,
+  withRunLock,
+  withRunLockEventWrite
+} from "./lock.mjs";
 import { pathsFor } from "./paths.mjs";
 import { parseState } from "./schema.mjs";
 
@@ -173,14 +178,19 @@ export function prepareEventBatch(events, { now = () => new Date() } = {}) {
   return prepared;
 }
 
-async function writeAll(handle, bytes, position, writeChunk) {
+async function writeAll(handle, bytes, position, writeChunk, onProgress = () => {}) {
   let offset = 0;
   while (offset < bytes.length) {
-    const result = await writeChunk(handle, bytes, offset, bytes.length - offset, position + offset);
+    const remaining = bytes.length - offset;
+    const result = await writeChunk(handle, bytes, offset, remaining, position + offset);
     if (!Number.isInteger(result?.bytesWritten) || result.bytesWritten <= 0) {
       throw new HarnessError("EVENT_WRITE_FAILED", "event batch write made no progress");
     }
+    if (result.bytesWritten > remaining) {
+      throw new HarnessError("EVENT_WRITE_INTEGRITY", "event batch write reported an invalid byte count");
+    }
     offset += result.bytesWritten;
+    onProgress(offset);
   }
 }
 
@@ -190,8 +200,102 @@ async function defaultWriteChunk(handle, buffer, offset, length, position) {
 
 async function withEventWriteLock(workspaceRoot, operation) {
   const { lockPath } = pathsFor(workspaceRoot);
-  if (isRunLockHeld(lockPath)) return operation();
-  return withRunLock(lockPath, operation);
+  const serialize = () => withRunLockEventWrite(lockPath, operation);
+  if (isRunLockHeld(lockPath)) return serialize();
+  return withRunLock(lockPath, serialize);
+}
+
+async function readEventRegion(handle, length, position) {
+  const bytes = Buffer.alloc(length);
+  let offset = 0;
+  try {
+    while (offset < length) {
+      const result = await handle.read(bytes, offset, length - offset, position + offset);
+      if (!Number.isInteger(result?.bytesRead) || result.bytesRead <= 0) {
+        throw new HarnessError("EVENT_WRITE_INTEGRITY", "partial event write could not be verified");
+      }
+      offset += result.bytesRead;
+    }
+  } catch (error) {
+    if (error instanceof HarnessError) throw error;
+    throw new HarnessError("EVENT_WRITE_INTEGRITY", "partial event write could not be verified");
+  }
+  return bytes;
+}
+
+async function assertRollbackTarget(handle, eventsPath, original, expectedSize) {
+  const opened = await eventHandleStat(handle, "event log could not be rolled back safely");
+  const current = await eventPathStat(eventsPath, "event log could not be rolled back safely");
+  if (
+    !opened.isFile() ||
+    opened.nlink !== 1n ||
+    !sameNode(original, opened) ||
+    opened.size !== expectedSize ||
+    current.isSymbolicLink() ||
+    !current.isFile() ||
+    current.nlink !== 1n ||
+    !sameNode(original, current) ||
+    current.size !== expectedSize
+  ) {
+    throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log could not be rolled back safely");
+  }
+}
+
+async function rollbackPreparedAppend(handle, eventsPath, original, originalSize, prepared, successfulBytes) {
+  const writtenSize = originalSize + BigInt(successfulBytes);
+  await assertRollbackTarget(handle, eventsPath, original, writtenSize);
+  const written = await readEventRegion(handle, successfulBytes, Number(originalSize));
+  if (!written.equals(prepared.subarray(0, successfulBytes))) {
+    throw new HarnessError("EVENT_WRITE_INTEGRITY", "partial event write did not match the prepared batch");
+  }
+  await assertRollbackTarget(handle, eventsPath, original, writtenSize);
+  try {
+    await handle.truncate(Number(originalSize));
+    await handle.sync();
+  } catch {
+    throw new HarnessError("EVENT_ROLLBACK_FAILED", "partial event write could not be rolled back");
+  }
+  const restored = await eventHandleStat(handle, "event log rollback could not be verified safely");
+  const current = await eventPathStat(eventsPath, "event log rollback could not be verified safely");
+  if (
+    !restored.isFile() ||
+    restored.nlink !== 1n ||
+    !sameNode(original, restored) ||
+    restored.size !== originalSize ||
+    current.isSymbolicLink() ||
+    !current.isFile() ||
+    current.nlink !== 1n ||
+    !sameNode(original, current) ||
+    current.size !== originalSize
+  ) {
+    throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log rollback could not be verified safely");
+  }
+}
+
+async function appendPreparedBytes(handle, eventsPath, original, originalSize, prepared, writeChunk) {
+  let successfulBytes = 0;
+  try {
+    await writeAll(
+      handle,
+      prepared,
+      Number(originalSize),
+      writeChunk,
+      count => {
+        successfulBytes = count;
+      }
+    );
+    await handle.sync();
+  } catch (error) {
+    await rollbackPreparedAppend(
+      handle,
+      eventsPath,
+      original,
+      originalSize,
+      prepared,
+      successfulBytes
+    );
+    throw error;
+  }
 }
 
 export async function withPinnedEventBatch(workspaceRoot, prepared, mutation, {
@@ -251,8 +355,7 @@ export async function withPinnedEventBatch(workspaceRoot, prepared, mutation, {
         throw new HarnessError("EVENT_LOG_LIMIT", "event log exceeds the byte limit");
       }
       const expectedSize = prewrite.size + BigInt(prepared.bytes.length);
-      await writeAll(handle, prepared.bytes, Number(prewrite.size), writeChunk);
-      await handle.sync();
+      await appendPreparedBytes(handle, eventsPath, original, prewrite.size, prepared.bytes, writeChunk);
       const written = await eventHandleStat(handle, "event log changed during batch append");
       const final = await eventPathStat(eventsPath, "event log changed during batch append");
       if (
@@ -377,8 +480,14 @@ export async function appendEvent(workspaceRoot, event, { now = () => new Date()
         throw new HarnessError("EVENT_LOG_LIMIT", "event log exceeds the byte limit");
       }
       const expectedSize = opened.size + BigInt(prepared.bytes.length);
-      await writeAll(handle, prepared.bytes, Number(opened.size), defaultWriteChunk);
-      await handle.sync();
+      await appendPreparedBytes(
+        handle,
+        eventsPath,
+        opened,
+        opened.size,
+        prepared.bytes,
+        defaultWriteChunk
+      );
       const written = await eventHandleStat(handle, "event log changed during append");
       const final = await eventPathStat(eventsPath, "event log changed during append");
       if (
