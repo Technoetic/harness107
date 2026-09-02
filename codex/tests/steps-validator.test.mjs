@@ -3348,7 +3348,7 @@ const EXPECTED_REVIEW_TARGET_SHA256 = Object.freeze({
   step040: "f9f626a1124d2221327ef2df23c44a0556fd0f4a431f27994f8a0ba3259ec1d7",
   step041: "c7062942a31f2ce520dfdcad0634082be2a21500ead63cc402fda1be6240e19d",
   step042: "a94fcec2f5371b57985e37587356aa00a866af34adaaf0c7cd9832812ad74ca0",
-  step043: "59c825d6a9df7e3d2ef95a1b6e8921ff9afa6ba7fffcd15bced6dd5ffc4b7469",
+  step043: "41e449abf5e854c6328b1b067c7fe3a707aba4b5c9dc46cb56469ad7c6a5a191",
   step044: "285043f8efa128fd4a03ef9c07201d24de51abf893b5bcf866da8ef19b031f41"
 });
 
@@ -3955,6 +3955,28 @@ function assertStep43Contract(content) {
   assert.match(loop, /정확한 persisted evidence[^]*관찰한 screenshot 영역/i);
   assert.match(loop, /연구 screenshot[^]*구현 screenshot[^]*실제로 열어/i);
   assertBoundedVisualLoop(sections["증거 제한 보강 루프"]);
+  assertStep43RemediationOrder(content);
+}
+
+function assertStep43RemediationOrder(content) {
+  const loop = extractMarkdownSection(content, "증거 제한 보강 루프").replace(/\s+/g, " ");
+  assert.doesNotMatch(
+    loop,
+    /CSS만으로[^.]{0,160}고칠 수 있을 때에만[^.]{0,160}(?:necessary visualization\s+)?JavaScript/i
+  );
+  assert.doesNotMatch(
+    loop,
+    /(?:necessary visualization\s+)?JavaScript[^.]{0,120}only when CSS alone can (?:fix|resolve)/i
+  );
+  assert.match(loop, /CSS를 먼저 사용한다/);
+  assert.match(
+    loop,
+    /CSS만으로 문제를 고칠 수 없고[^.]*data-rendering 책임에 속할 때에만[^.]*necessary visualization JavaScript를 변경한다/i
+  );
+  assert.match(
+    loop,
+    /semantic HTML은[^.]*CSS와 필요한 JavaScript만으로[^.]*적절히 해소할 수 없을 때[^.]*마지막으로 변경한다/i
+  );
 }
 
 function assertStep44Contract(content) {
@@ -4000,6 +4022,25 @@ test("steps041 and 042 preserve class async and CSS separation contracts through
 test("step044 orders semantic componentization before structure accessibility build and milestone gates", async () => {
   const content = await readFile(join(repoRoot, "codex", "assets", "steps", "step044.md"), "utf8");
   assertStep44Contract(content);
+});
+
+test("step043 rejects Korean and English reversals of its CSS to JavaScript responsibility gate", async () => {
+  const original = await readFile(join(repoRoot, "codex", "assets", "steps", "step043.md"), "utf8");
+  const correctGate = "CSS만으로 문제를 고칠 수 없고 그 문제가 data-rendering 책임에 속할 때에만 necessary visualization JavaScript를 변경한다.";
+  const reversedKorean = original.replace(
+    correctGate,
+    "CSS만으로 의미나 data rendering을 고칠 수 있을 때에만 necessary visualization JavaScript를 변경한다."
+  );
+  const reversedEnglish = original.replace(
+    correctGate,
+    "Use necessary visualization JavaScript only when CSS alone can fix the issue and it belongs to data-rendering responsibility."
+  );
+
+  assert.notEqual(reversedKorean, original, "Korean reversal mutation did not change the document");
+  assert.notEqual(reversedEnglish, original, "English reversal mutation did not change the document");
+  assert.throws(() => assertStep43RemediationOrder(reversedKorean));
+  assert.throws(() => assertStep43RemediationOrder(reversedEnglish));
+  assertStep43RemediationOrder(original);
 });
 
 test("review semantic checks reject missing evidence, unavailable-visual bypasses, and reordered milestone gates", async () => {

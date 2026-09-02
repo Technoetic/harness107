@@ -47,9 +47,9 @@ finding이 모두 해소된 경우에만 완료한다.
 
 판정마다 정확한 persisted evidence의 파일·섹션과 관찰한 screenshot 영역, severity,
 해당 selector를 기록한다. 보정은 finding을 해소하는 최소 변경으로 제한하며 CSS를 먼저
-사용하고, CSS만으로 의미나 data rendering을 고칠 수 있을 때에만 necessary visualization
-JavaScript, 마지막으로 semantic HTML을 고려한다. 무관한 redesign이나 조사에 없는
-장식은 추가하지 않는다.
+사용한다. CSS만으로 문제를 고칠 수 없고 그 문제가 data-rendering 책임에 속할 때에만 necessary visualization JavaScript를 변경한다.
+semantic HTML은 CSS와 필요한 JavaScript만으로 의미·구조·접근성 문제를 적절히 해소할
+수 없을 때 마지막으로 변경한다. 무관한 redesign이나 조사에 없는 장식은 추가하지 않는다.
 
 `FAIL`이면 Awwwards 보정 구현자가 판정된 부분만 고치고 같은 선언 경로에 새 screenshot을
 촬영한다. Awwwards 독립 검증자는 연구와 구현 이미지를 다시 실제로 열어 수정 여부와
