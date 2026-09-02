@@ -821,6 +821,58 @@ test("required tooling capabilities block while optional capabilities record an 
   }
 });
 
+test("tooling steps retain bounded provider-neutral worker and reviewer roles", async () => {
+  const expected = [
+    { name: "step006", focus: "테스트 러너 선택·설치·버전 확인" },
+    { name: "step007", focus: "번들 분석 패키지 선택·설치·버전 확인" },
+    { name: "step008", focus: "jscpd 설치 시도·버전 확인 또는 SKIP 근거 수집" },
+    { name: "step009", focus: "Semgrep 환경 점검·설치 시도·버전 확인 또는 SKIP 근거 수집" },
+    { name: "step010", focus: "knip 설치·버전 확인" },
+    { name: "step011", focus: "tokei 설치 시도·버전 확인 또는 SKIP 근거 수집" },
+    { name: "step012", focus: "Lighthouse CI 설치·버전 확인" },
+    { name: "step013", focus: "stylelint 설치·버전 확인·기존 구성 보존" },
+    { name: "step014", focus: "Biome 설치·버전 확인·구성 보존 또는 초기화" },
+    { name: "step015", focus: "madge 설치 시도·버전 확인 또는 SKIP 근거 수집" }
+  ];
+
+  for (const item of expected) {
+    const content = await readFile(
+      join(repoRoot, "codex", "assets", "steps", `${item.name}.md`),
+      "utf8"
+    );
+    const roleSection = /## 실행 역할\n([^]*?)(?=\n## )/.exec(content)?.[1];
+
+    assert.ok(roleSection, `${item.name} is missing its provider-neutral role contract`);
+    assert.match(roleSection, new RegExp(item.focus));
+    assert.match(roleSection, /현재 단계 범위[^]*도구 준비 작업자 역할[^]*위임/);
+    assert.match(roleSection, /검증자 역할[^]*작업자 결과를 그대로 수락하지 않고/);
+    assert.match(roleSection, /위임 기능을 사용할 수 없으면 현재 실행자가[^]*순서대로 수행/);
+    assert.match(roleSection, /별도 작업자를 사용했다고 기록하지 않는다/);
+    assert.match(roleSection, /정상 권한 확인/);
+    assert.doesNotMatch(content, /\b(?:Claude|Haiku|Sonnet)\b/i);
+  }
+});
+
+test("step015 preserves the recommended MX note severity without making it acceptance", async () => {
+  const content = await readFile(
+    join(repoRoot, "codex", "assets", "steps", "step015.md"),
+    "utf8"
+  );
+  const annotationSection = /## 이후 소스 주석 계약\n([^]*?)(?=\n## )/.exec(content)?.[1];
+
+  assert.ok(annotationSection, "step015 is missing its source-annotation contract");
+  assert.match(annotationSection, /태그를 사용할 때[^]*정식 형식/);
+  assert.match(annotationSection, /@MX:ANCHOR:[^\n]*fan_in\s*>=\s*3/);
+  assert.match(annotationSection, /`@MX:NOTE`[^]*(?:권장|권고)/);
+  assert.doesNotMatch(
+    annotationSection,
+    /`@MX:NOTE`[^]{0,100}(?:반드시|필수|의무|최소 하나 둔다)/
+  );
+
+  const index = await loadIndex(repoRoot);
+  assert.ok(index.steps[14].acceptance.every((item) => !/mx|note/i.test(item.id)));
+});
+
 test("preflight documents bind exact frontmatter and titles to only their current step", async () => {
   const expected = [
     { name: "step001", phase: "preflight", number: 1, title: "하네스 프리플라이트 체크" },
