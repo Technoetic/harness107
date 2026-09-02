@@ -423,6 +423,32 @@ test("standard wrappers and file tools consume bounded option abbreviations", as
   }
 });
 
+test("inert Git exec-path and coreutils help stop parsing before dangerous-looking operands", async context => {
+  const root = await makeWorkspace();
+  for (const command of [
+    "git --exec-path",
+    "git --exec-path reset --hard",
+    "cp --help ./safe .git/config",
+    "mv --help .git/config ./local"
+  ]) {
+    await context.test(command, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), {});
+    });
+  }
+  await context.test("--help after the coreutils option separator remains an operand", async () => {
+    assert.deepEqual(
+      await inspect("mv -- .git/config --help", { workspaceRoot: root }),
+      expectedDeny("sensitive-path")
+    );
+  });
+  await context.test("shell redirection still applies to inert coreutils help", async () => {
+    assert.deepEqual(
+      await inspect("cp --help > .git/config", { workspaceRoot: root }),
+      expectedDeny("sensitive-path")
+    );
+  });
+});
+
 test("dynamic substitutions and implicit pipeline targets fail closed without blocking explicit safe paths", async () => {
   const root = await makeWorkspace();
   for (const command of [
@@ -476,6 +502,36 @@ test("pipeline inputs remain mutation sources without turning data sinks into pa
     "Get-Item -Path ./safe | Move-Item -Destination ./local",
     "Get-Item -LiteralPath ./safe | Rename-Item -NewName local",
     "Write-Output -InputObject ./dist | Remove-Item -Recurse -Force"
+  ]) {
+    await context.test(`safe: ${command}`, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), {});
+    });
+  }
+});
+
+test("GNU tee flags expose output files without reclassifying PowerShell Tee-Object data", async context => {
+  const root = await makeWorkspace();
+  for (const [command, rule] of [
+    ["printf value | tee -i .git/config", "sensitive-path"],
+    ["printf value | tee --ignore-interrupts .git/config", "sensitive-path"],
+    ["printf value | tee -ai .git/config", "sensitive-path"],
+    ["printf value | tee -i ../outside.log", "protected-root"],
+    ["printf value | tee --ignore-interrupts C:/outside.log", "protected-root"],
+    ["Write-Output value | Tee-Object -FilePath .git/config", "sensitive-path"]
+  ]) {
+    await context.test(command, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny(rule));
+    });
+  }
+  for (const command of [
+    "printf value | tee",
+    "printf value | tee -i",
+    "printf value | tee --ignore-interrupts",
+    "printf value | tee -i ./notes.txt",
+    "printf value | tee --ignore-interrupts ./notes.txt",
+    "printf value | tee -- ./notes.txt",
+    "Write-Output value | Tee-Object -InputObject .git/config -Variable captured",
+    "Write-Output value | tee -InputObject .git/config -Variable captured"
   ]) {
     await context.test(`safe: ${command}`, async () => {
       assert.deepEqual(await inspect(command, { workspaceRoot: root }), {});
@@ -1031,6 +1087,35 @@ test("PowerShell separators and deterministic path expressions preserve source a
     "Copy-Item -Path C:/external -Destination ('./local')",
     "Set-Content -Path (Join-Path ./docs notes.txt) -Value x",
     "Set-Content -Path ./notes.txt -Value (Join-Path C:/ outside)"
+  ]) {
+    await context.test(`safe: ${command}`, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), {});
+    });
+  }
+});
+
+test("PowerShell unquoted String arrays expose every path operand without splitting quoted comma names", async context => {
+  const root = await makeWorkspace();
+  for (const command of [
+    "Remove-Item -Path ./dist,.git/config -Force",
+    "Remove-Item ./dist,.git/config -Force",
+    "Remove-Item -LiteralPath ./dist,.git/config -Force",
+    "Move-Item -Path ./dist,.git/config -Destination ./local",
+    "Copy-Item -Path ./one,./two -Destination .git/config",
+    "Copy-Item ./one,./two .git/config"
+  ]) {
+    await context.test(command, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny("sensitive-path"));
+    });
+  }
+  for (const command of [
+    "Remove-Item -Path ./dist,./cache -Force",
+    "Remove-Item ./dist,./cache -Force",
+    "Remove-Item -Path './dist,.git/config' -Force",
+    "Remove-Item \"./dist,.git/config\" -Force",
+    "Move-Item -Path ./one,./two -Destination ./local",
+    "Copy-Item -Path .git/config,./one -Destination ./local",
+    "Copy-Item ./one,./two ./local"
   ]) {
     await context.test(`safe: ${command}`, async () => {
       assert.deepEqual(await inspect(command, { workspaceRoot: root }), {});

@@ -321,10 +321,11 @@ function fileMutationName(value) {
   return POWERSHELL_ALIASES.get(executable) ?? executable;
 }
 
-function pushToken(tokens, dynamicTokens, token, dynamic) {
+function pushToken(tokens, dynamicTokens, quotedTokens, token, dynamic, quoted) {
   if (token !== "") {
     tokens.push(token);
     dynamicTokens.push(dynamic);
+    quotedTokens.push(quoted);
   }
   if (tokens.length > MAX_TOKENS) throw new Error("too many shell tokens");
 }
@@ -474,21 +475,25 @@ function lexShell(command) {
   const commands = [];
   let tokens = [];
   let dynamicTokens = [];
+  let quotedTokens = [];
   let token = "";
   let tokenDynamic = false;
+  let tokenQuoted = false;
   let quote = null;
   let index = 0;
   let receivesPipeline = false;
   let substitutions = [];
   const endCommand = separator => {
-    pushToken(tokens, dynamicTokens, token, tokenDynamic);
+    pushToken(tokens, dynamicTokens, quotedTokens, token, tokenDynamic, tokenQuoted);
     token = "";
     tokenDynamic = false;
+    tokenQuoted = false;
     const hadTokens = tokens.length > 0;
     if (hadTokens || substitutions.length > 0) {
       commands.push({
         tokens,
         dynamicTokens,
+        quotedTokens,
         receivesPipeline,
         sendsPipeline: separator === "pipe",
         substitutions
@@ -496,6 +501,7 @@ function lexShell(command) {
     }
     tokens = [];
     dynamicTokens = [];
+    quotedTokens = [];
     substitutions = [];
     if (separator !== undefined && (hadTokens || separator === "pipe")) {
       receivesPipeline = separator === "pipe";
@@ -507,6 +513,7 @@ function lexShell(command) {
     if (quote === null && character === "$" && command[index + 1] === "'") {
       const parsed = ansiCQuote(command, index);
       token += parsed.value;
+      tokenQuoted = true;
       index = parsed.end;
       continue;
     }
@@ -555,6 +562,7 @@ function lexShell(command) {
     }
     if (character === "'" || character === '"') {
       quote = character;
+      tokenQuoted = true;
       index += 1;
       continue;
     }
@@ -563,9 +571,10 @@ function lexShell(command) {
       continue;
     }
     if (/\s/.test(character)) {
-      pushToken(tokens, dynamicTokens, token, tokenDynamic);
+      pushToken(tokens, dynamicTokens, quotedTokens, token, tokenDynamic, tokenQuoted);
       token = "";
       tokenDynamic = false;
+      tokenQuoted = false;
       if (character === "\n" || character === "\r") endCommand("other");
       index += 1;
       continue;
@@ -596,11 +605,13 @@ function lexShell(command) {
       continue;
     }
     if (character === ">") {
-      pushToken(tokens, dynamicTokens, token, tokenDynamic);
+      pushToken(tokens, dynamicTokens, quotedTokens, token, tokenDynamic, tokenQuoted);
       token = "";
       tokenDynamic = false;
+      tokenQuoted = false;
       tokens.push(command[index + 1] === ">" ? ">>" : command[index + 1] === "&" ? ">&" : ">");
       dynamicTokens.push(false);
+      quotedTokens.push(false);
       if ([">", "&", "|"].includes(command[index + 1])) index += 1;
       index += 1;
       continue;
@@ -789,9 +800,10 @@ function parsedEnvShortOption(token) {
   return { attached: "", name: "flag", negated: false };
 }
 
-function envCommandParts(tokens, dynamicTokens) {
+function envCommandParts(tokens, dynamicTokens, quotedTokens) {
   let expandedTokens = [...tokens];
   let expandedDynamics = [...dynamicTokens];
+  let expandedQuotes = [...quotedTokens];
   for (let splitCount = 0; splitCount <= MAX_NESTING; splitCount += 1) {
     let index = 1;
     let expanded = false;
@@ -801,7 +813,8 @@ function envCommandParts(tokens, dynamicTokens) {
       if (token === "--") {
         return {
           tokens: expandedTokens.slice(index + 1),
-          dynamicTokens: expandedDynamics.slice(index + 1)
+          dynamicTokens: expandedDynamics.slice(index + 1),
+          quotedTokens: expandedQuotes.slice(index + 1)
         };
       }
       if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) {
@@ -828,6 +841,12 @@ function envCommandParts(tokens, dynamicTokens) {
           ...parsed[0].dynamicTokens,
           ...expandedDynamics.slice(index + consumed)
         ];
+        expandedQuotes = [
+          expandedQuotes[0],
+          ...expandedQuotes.slice(1, index),
+          ...parsed[0].quotedTokens,
+          ...expandedQuotes.slice(index + consumed)
+        ];
         expanded = true;
         break;
       }
@@ -841,7 +860,8 @@ function envCommandParts(tokens, dynamicTokens) {
       }
       return {
         tokens: expandedTokens.slice(index),
-        dynamicTokens: expandedDynamics.slice(index)
+        dynamicTokens: expandedDynamics.slice(index),
+        quotedTokens: expandedQuotes.slice(index)
       };
     }
     if (!expanded) return null;
@@ -897,9 +917,10 @@ function expandBraceWord(value) {
   return results;
 }
 
-function expandStaticTokens(tokens, dynamicTokens, variables) {
+function expandStaticTokens(tokens, dynamicTokens, quotedTokens, variables) {
   const expandedTokens = [];
   const expandedDynamics = [];
+  const expandedQuotes = [];
   for (let index = 0; index < tokens.length; index += 1) {
     let value = tokens[index];
     let dynamic = dynamicTokens[index];
@@ -924,24 +945,27 @@ function expandStaticTokens(tokens, dynamicTokens, variables) {
       expandedDynamics.push(
         braceValue === value ? dynamic : index === 0 ? dynamicTarget(braceValue) : dynamic
       );
+      expandedQuotes.push(quotedTokens[index] ?? false);
       if (expandedTokens.length > MAX_TOKENS) throw new Error("expanded tokens exceed parser limit");
     }
   }
-  return { tokens: expandedTokens, dynamicTokens: expandedDynamics };
+  return { tokens: expandedTokens, dynamicTokens: expandedDynamics, quotedTokens: expandedQuotes };
 }
 
-function discardStandaloneGrouping(tokens, dynamicTokens) {
+function discardStandaloneGrouping(tokens, dynamicTokens, quotedTokens) {
   let start = 0;
   let end = tokens.length;
   while (start < end && /^(?:\(|\{|begin)$/.test(tokens[start].toLowerCase())) start += 1;
   while (end > start && /^(?:\)|\}|end)$/.test(tokens[end - 1].toLowerCase())) end -= 1;
   const result = {
     tokens: tokens.slice(start, end),
-    dynamicTokens: dynamicTokens.slice(start, end)
+    dynamicTokens: dynamicTokens.slice(start, end),
+    quotedTokens: quotedTokens.slice(start, end)
   };
   while (result.tokens.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(result.tokens[0])) {
     result.tokens.shift();
     result.dynamicTokens.shift();
+    result.quotedTokens.shift();
   }
   return result;
 }
@@ -951,14 +975,15 @@ function collectParsedInvocation(parsed, invocations, depth, variables = new Map
   for (const substitution of parsed.substitutions) {
     collectInvocations(substitution, invocations, depth + 1);
   }
-  const expanded = expandStaticTokens(parsed.tokens, parsed.dynamicTokens, variables);
-  const filtered = discardStandaloneGrouping(expanded.tokens, expanded.dynamicTokens);
-  const { tokens, dynamicTokens } = filtered;
+  const expanded = expandStaticTokens(parsed.tokens, parsed.dynamicTokens, parsed.quotedTokens, variables);
+  const filtered = discardStandaloneGrouping(expanded.tokens, expanded.dynamicTokens, expanded.quotedTokens);
+  const { tokens, dynamicTokens, quotedTokens } = filtered;
   if (tokens.length === 0) return;
   if (invocations.length >= MAX_TOKENS) throw new Error("too many shell invocations");
   const invocation = {
     tokens,
     dynamicTokens,
+    quotedTokens,
     receivesPipeline: parsed.receivesPipeline,
     sendsPipeline: parsed.sendsPipeline ?? false,
     dynamicCommand: dynamicTokens[0] ?? false
@@ -981,12 +1006,13 @@ function collectParsedInvocation(parsed, invocations, depth, variables = new Map
     const nested = gitAliasCommand(tokens);
     if (nested !== null) collectInvocations(nested, invocations, depth + 1);
   } else {
-    const parts = executable === "env" ? envCommandParts(tokens, dynamicTokens) : null;
+    const parts = executable === "env" ? envCommandParts(tokens, dynamicTokens, quotedTokens) : null;
     const start = WRAPPERS.has(executable) ? wrapperCommandStart(tokens, executable) : -1;
     if (parts !== null || start > 0) {
       collectParsedInvocation({
         tokens: parts?.tokens ?? tokens.slice(start),
         dynamicTokens: parts?.dynamicTokens ?? dynamicTokens.slice(start),
+        quotedTokens: parts?.quotedTokens ?? quotedTokens.slice(start),
         receivesPipeline: parsed.receivesPipeline,
         sendsPipeline: parsed.sendsPipeline,
         substitutions: []
@@ -1062,6 +1088,9 @@ function gitSubcommand(tokens) {
   while (index < tokens.length) {
     const token = tokens[index];
     if (["-h", "--help", "-v", "--version"].includes(token)) {
+      return { inert: true, aliases, name: null, args: [] };
+    }
+    if (token === "--exec-path") {
       return { inert: true, aliases, name: null, args: [] };
     }
     if (token === "-c") {
@@ -1281,11 +1310,20 @@ function powerShellWildcard(value) {
   return /[*?\[]/.test(value);
 }
 
-function powerShellFileCandidates(tokens, dynamicTokens, executable) {
+function powerShellPathCandidates(value, dynamic, quoted, wildcard) {
+  const elements = !quoted && value.includes(",") ? value.split(",") : [value];
+  if (
+    elements.length > MAX_TOKENS ||
+    elements.some(element => element.trim() === "")
+  ) return [candidate(value, true)];
+  return elements.map(element => candidate(element, dynamic || (wildcard && powerShellWildcard(element))));
+}
+
+function powerShellFileCandidates(tokens, dynamicTokens, quotedTokens, executable) {
   const explicit = [];
   const copySources = [];
   const copyDestinations = [];
-  const positional = [];
+  const positionalGroups = [];
   let optionsEnded = false;
   for (let index = 1; index < tokens.length; index += 1) {
     const token = tokens[index];
@@ -1295,7 +1333,15 @@ function powerShellFileCandidates(tokens, dynamicTokens, executable) {
     }
     const parsedParameter = optionsEnded ? null : parsedPowerShellParameter(token);
     if (parsedParameter === null) {
-      positional.push(candidate(token, dynamicTokens[index] || powerShellWildcard(token)));
+      const group = executable === "copy-item"
+        ? [candidate(token, dynamicTokens[index] || powerShellWildcard(token))]
+        : powerShellPathCandidates(
+          token,
+          dynamicTokens[index],
+          quotedTokens[index],
+          true
+        );
+      positionalGroups.push(group);
       continue;
     }
     const parameter = resolvedPowerShellParameter(parsedParameter, executable);
@@ -1307,15 +1353,27 @@ function powerShellFileCandidates(tokens, dynamicTokens, executable) {
           ? copySources
           : explicit;
       if (parameter.attached !== null && parameter.attached !== "") {
-        target.push(candidate(
-          parameter.attached,
-          dynamicTokens[index] || (parameter.name !== "literalpath" && powerShellWildcard(parameter.attached))
+        target.push(...(
+          ["literalpath", "path"].includes(parameter.name)
+            ? powerShellPathCandidates(
+              parameter.attached,
+              dynamicTokens[index],
+              quotedTokens[index],
+              parameter.name !== "literalpath"
+            )
+            : [candidate(parameter.attached, dynamicTokens[index])]
         ));
       } else if (index + 1 < tokens.length) {
         const value = tokens[index + 1];
-        target.push(candidate(
-          value,
-          dynamicTokens[index + 1] || (parameter.name !== "literalpath" && powerShellWildcard(value))
+        target.push(...(
+          ["literalpath", "path"].includes(parameter.name)
+            ? powerShellPathCandidates(
+              value,
+              dynamicTokens[index + 1],
+              quotedTokens[index + 1],
+              parameter.name !== "literalpath"
+            )
+            : [candidate(value, dynamicTokens[index + 1])]
         ));
         index += 1;
       } else return [];
@@ -1331,15 +1389,15 @@ function powerShellFileCandidates(tokens, dynamicTokens, executable) {
     if (!POWERSHELL_SWITCH_PARAMETERS.has(parameter.name)) return [];
   }
   if (POWERSHELL_CONTENT_COMMANDS.has(executable)) {
-    return explicit.length > 0 ? explicit : positional.slice(0, 1);
+    return explicit.length > 0 ? explicit : (positionalGroups[0] ?? []);
   }
   if (executable === "copy-item") {
     if (copyDestinations.length > 0) return copyDestinations;
-    if (copySources.length > 0 && positional.length > 0) return positional.slice(-1);
-    return positional.length > 1 ? positional.slice(-1) : [];
+    if (copySources.length > 0 && positionalGroups.length > 0) return positionalGroups.at(-1);
+    return positionalGroups.length > 1 ? positionalGroups.at(-1) : [];
   }
-  const positionalLimit = ["copy-item", "move-item", "rename-item"].includes(executable) ? 2 : positional.length;
-  return [...explicit, ...positional.slice(0, positionalLimit)];
+  const positionalLimit = ["move-item", "rename-item"].includes(executable) ? 2 : positionalGroups.length;
+  return [...explicit, ...positionalGroups.slice(0, positionalLimit).flat()];
 }
 
 function targetDirectoryOption(token) {
@@ -1350,10 +1408,42 @@ function targetDirectoryOption(token) {
   return null;
 }
 
-function fileCandidates(tokens, dynamicTokens) {
+function gnuTeeOption(token) {
+  return /^-[aip]+$/.test(token) ||
+    ["--append", "--ignore-interrupts"].includes(token) ||
+    /^--output-error(?:=.+)?$/.test(token);
+}
+
+function gnuTeeCandidates(tokens, dynamicTokens) {
+  const candidates = [];
+  let optionsEnded = false;
+  for (let index = 1; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (!optionsEnded && ["--help", "--version"].includes(token)) return [];
+    if (!optionsEnded && token === "--") {
+      optionsEnded = true;
+      continue;
+    }
+    if (!optionsEnded && gnuTeeOption(token)) continue;
+    if (!optionsEnded && token.startsWith("-") && token !== "-") return [];
+    if (token !== "-") candidates.push(candidate(token, dynamicTokens[index]));
+  }
+  return candidates;
+}
+
+function fileCandidates(tokens, dynamicTokens, quotedTokens) {
+  if (
+    executableName(tokens[0]) === "tee" &&
+    tokens.slice(1).some(token => token === "--" || gnuTeeOption(token))
+  ) {
+    return gnuTeeCandidates(tokens, dynamicTokens);
+  }
   const executable = fileMutationName(tokens[0]);
+  const optionSeparator = tokens.indexOf("--", 1);
+  const optionArguments = optionSeparator < 0 ? tokens.slice(1) : tokens.slice(1, optionSeparator);
+  const inertFileOperands = ["cp", "mv"].includes(executable) && optionArguments.includes("--help");
   if (POWERSHELL_PATH_COMMANDS.has(executable)) {
-    return powerShellFileCandidates(tokens, dynamicTokens, executable);
+    return powerShellFileCandidates(tokens, dynamicTokens, quotedTokens, executable);
   }
   const candidates = [];
   if (executable === "dd") {
@@ -1393,7 +1483,7 @@ function fileCandidates(tokens, dynamicTokens) {
       if (!token.startsWith("-") || token === "-") break;
     }
   }
-  if (FILE_MUTATORS.has(executable)) {
+  if (FILE_MUTATORS.has(executable) && !inertFileOperands) {
     const positionals = [];
     const targetDirectories = [];
     let optionsEnded = false;
@@ -1634,12 +1724,12 @@ async function classifyShell(command, workspaceRoot) {
   const rules = [];
   for (let invocationIndex = 0; invocationIndex < invocations.length; invocationIndex += 1) {
     const invocation = invocations[invocationIndex];
-    const { tokens, dynamicTokens, receivesPipeline, dynamicCommand } = invocation;
+    const { tokens, dynamicTokens, quotedTokens, receivesPipeline, dynamicCommand } = invocation;
     if (hasEncodedPowerShell(tokens)) rules.push("encoded-command");
     if (isSystemDestructive(tokens)) rules.push("system-destructive");
     if (await isGitDestructive(tokens, workspaceRoot)) rules.push("git-destructive");
     if (dynamicCommand) rules.push("dynamic-target");
-    const candidates = fileCandidates(tokens, dynamicTokens);
+    const candidates = fileCandidates(tokens, dynamicTokens, quotedTokens);
     const mutation = fileMutationName(tokens[0]);
     if (receivesPipeline && PIPELINE_SOURCE_MUTATORS.has(mutation)) {
       const pipelineSources = pipelineOutputCandidates(invocations[invocationIndex - 1]);
