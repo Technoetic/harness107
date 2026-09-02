@@ -223,6 +223,62 @@ test("PowerShell and cmd attached switch forms retain their nested command", asy
   }
 });
 
+test("cmd prefixes combined switches and native file switches preserve command meaning", async context => {
+  const root = await makeWorkspace();
+  const cases = [
+    ["cmd /c @rd /s /q C:/", "protected-root"],
+    ["cmd /q/d/c rd /s /q C:/", "protected-root"],
+    ["cmd /q/d/crd /s /q C:/", "protected-root"],
+    ["ren .git git-old", "sensitive-path"],
+    ["cmd /c @ren .git git-old", "sensitive-path"]
+  ];
+  for (const [command, rule] of cases) {
+    await context.test(command, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny(rule));
+    });
+  }
+  for (const command of [
+    "copy /Y ./safe ./copy",
+    "copy /-Y ./safe ./copy",
+    "move /Y ./safe ./moved",
+    "move /-Y ./safe ./moved",
+    "cmd /c @echo ok",
+    "cmd /q/d/c echo ok"
+  ]) {
+    await context.test(`safe: ${command}`, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), {});
+    });
+  }
+});
+
+test("copy and move destination options remain protected without treating option data as paths", async context => {
+  const root = await makeWorkspace();
+  for (const command of [
+    "cp ./safe --target-directory=../outside",
+    "mv ./safe -t../outside",
+    "cp -t ../outside ./safe",
+    "mv --target-directory ../outside ./safe",
+    "cp --target-directory=C:/outside ./safe"
+  ]) {
+    await context.test(command, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny("protected-root"));
+    });
+  }
+  for (const command of [
+    "cp ./safe --target-directory=./copy",
+    "mv ./safe -t./moved",
+    "cp -t ./copy ./safe",
+    "mv --target-directory ./moved ./safe",
+    "cp --preserve=mode ./safe ./copy",
+    "mv --suffix=.bak ./safe ./moved",
+    "cp -T ./safe ./copy"
+  ]) {
+    await context.test(`safe: ${command}`, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), {});
+    });
+  }
+});
+
 test("escaped executable names, assignments, and execution wrappers cannot hide destructive commands", async () => {
   const root = await makeWorkspace();
   const cases = [
@@ -331,6 +387,46 @@ test("ANSI-C quotes and escaped or globbed metadata targets retain shell semanti
   }
 });
 
+test("bounded static shell expansions cannot hide an executable or protected target", async context => {
+  const root = await makeWorkspace();
+  const cases = [
+    ["x=rm; \"$x\" -rf /", "protected-root"],
+    ["tool=git; \"$tool\" reset --hard", "git-destructive"],
+    ["$(printf rm) -rf /", "protected-root"],
+    ["`printf rm` -rf /", "protected-root"],
+    ["$tool -rf /", "dynamic-target"],
+    ["{rm,-rf,/}", "protected-root"],
+    ["r{m,ubbish} -rf /", "protected-root"],
+    ["rm -rf {/,./dist}", "protected-root"],
+    ["rm -rf ~+", "protected-root"],
+    ["env -S \"rm -rf /\"", "protected-root"],
+    ["env --split-string=\"git reset --hard\"", "git-destructive"],
+    ["env -S \"$DYNAMIC\"", "dynamic-target"]
+  ];
+  for (const [command, rule] of cases) {
+    await context.test(command, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny(rule));
+    });
+  }
+  for (const command of [
+    "echo \"$tool\"",
+    "x=rm; '$x' -rf /",
+    "name=echo; \"$name\" rm -rf /",
+    "x=echo; x=rm | \"$x\" -rf /",
+    "$(printf echo) rm -rf /",
+    "echo $(printf rm)",
+    "echo '{rm,-rf,/}'",
+    "rm -rf '{root,dist}'",
+    "rm -rf ~+/dist",
+    "env -S \"npm test\"",
+    "env -S \"echo $HOME\""
+  ]) {
+    await context.test(`safe: ${command}`, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), {});
+    });
+  }
+});
+
 test("git worktree replacement and force variants deny without treating ordinary branch switches as path checkout", async () => {
   const root = await makeWorkspace();
   for (const command of [
@@ -406,6 +502,42 @@ test("git force-ref forms and existing extensionless checkout paths cannot repla
   }
 });
 
+test("Git forced refs magic pathspecs and destructive remote flags deny while help remains inert", async context => {
+  const root = await makeWorkspace();
+  for (const command of [
+    "git branch -M old new",
+    "git branch -C old new",
+    "git branch -vM old new",
+    "git checkout ':(glob)*'",
+    "git checkout ':(top)*'",
+    "git checkout ':/*'",
+    "git push --delete origin main",
+    "git push -d origin main",
+    "git push --mirror origin",
+    "git push --prune origin"
+  ]) {
+    await context.test(command, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny("git-destructive"));
+    });
+  }
+  for (const command of [
+    "git restore --help README.md",
+    "git restore -h README.md",
+    "git branch --help -M old new",
+    "git checkout --help ':(glob)*'",
+    "git push --help --delete origin main",
+    "git branch -m old new",
+    "git branch -c old new",
+    "git branch -d merged-feature",
+    "git push origin main",
+    "git checkout feature"
+  ]) {
+    await context.test(`safe: ${command}`, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), {});
+    });
+  }
+});
+
 test("PowerShell content data is not classified as a path while explicit targets remain protected", async () => {
   const root = await makeWorkspace();
   for (const command of [
@@ -457,6 +589,32 @@ test("PowerShell write aliases resolve paths without treating executable tools o
     "cpi ./safe ./copy",
     "Write-Output x | Tee-Object -FilePath ./notes.txt",
     "New-Item -Path ./scratch -ItemType Directory"
+  ]) {
+    await context.test(`safe: ${command}`, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), {});
+    });
+  }
+});
+
+test("PowerShell resolves only unambiguous command parameter abbreviations", async context => {
+  const root = await makeWorkspace();
+  for (const command of [
+    "Set-Content -Val x -Pat .git/config",
+    "SC -Val:x -Pat:.git/config",
+    "Copy-Item -Pat ./safe -Dest .git/config",
+    "Tee-Object -Fi .git/config"
+  ]) {
+    await context.test(command, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny("sensitive-path"));
+    });
+  }
+  for (const command of [
+    "Set-Content -Pa .git/config -Val x",
+    "Set-Content -P .git/config -Val x",
+    "Set-Content -Val '$HOME' -Pat ./notes.txt",
+    "Set-Content -Val x -Pat ./notes.txt",
+    "Copy-Item -Pat ./safe -Dest ./copy",
+    "Tee-Object -Fi ./notes.txt"
   ]) {
     await context.test(`safe: ${command}`, async () => {
       assert.deepEqual(await inspect(command, { workspaceRoot: root }), {});
