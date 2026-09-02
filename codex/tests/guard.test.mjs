@@ -270,6 +270,67 @@ test("dynamic substitutions and implicit pipeline targets fail closed without bl
   }
 });
 
+test("nested command substitutions and cmd call wrappers cannot hide destructive invocations", async context => {
+  const root = await makeWorkspace();
+  const cases = [
+    ["echo $(rm -rf /)", "protected-root"],
+    ["X=$(rm -rf /)", "protected-root"],
+    ["echo `rm -rf /`", "protected-root"],
+    ["echo \"$(git reset --hard)\"", "git-destructive"],
+    ["RESULT=`git clean -fdx`", "git-destructive"],
+    ["cmd /c call rd /s /q C:/", "protected-root"]
+  ];
+  for (const [command, rule] of cases) {
+    await context.test(command, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny(rule));
+    });
+  }
+  for (const command of [
+    "echo '$(rm -rf /)'",
+    "echo '`rm -rf /`'",
+    "echo \"$(printf safe)\"",
+    "cmd /c call echo ok"
+  ]) {
+    await context.test(`safe: ${command}`, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), {});
+    });
+  }
+});
+
+test("ANSI-C quotes and escaped or globbed metadata targets retain shell semantics", async context => {
+  const root = await makeWorkspace();
+  const cases = [
+    ["rm -rf $'/'", "protected-root"],
+    ["rm -rf $'\\x2f'", "protected-root"],
+    ["rm -rf $'\\057'", "protected-root"],
+    ["rm -rf .g\\it", "sensitive-path"],
+    ["rm -rf .G\\IT/config", "sensitive-path"],
+    ["rm -rf .g^it/config", "sensitive-path"],
+    ["rm -rf .g[i]t", "dynamic-target"],
+    ["rm -rf .g?t", "dynamic-target"],
+    ["FOO=bar rm -rf $TARGET", "dynamic-target"],
+    ["FOO=bar rm -rf .g[i]t", "dynamic-target"],
+    ["sudo rm -rf $TARGET", "dynamic-target"]
+  ];
+  for (const [command, rule] of cases) {
+    await context.test(command, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny(rule));
+    });
+  }
+  for (const command of [
+    "rm -rf '$HOME'",
+    "rm -rf '.g[i]t'",
+    "rm -rf \"./dist [cached]\"",
+    "FOO=bar rm -rf '$TARGET'",
+    "sudo rm -rf '$HOME'",
+    "exec rm -rf '.g[i]t'"
+  ]) {
+    await context.test(`safe: ${command}`, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), {});
+    });
+  }
+});
+
 test("git worktree replacement and force variants deny without treating ordinary branch switches as path checkout", async () => {
   const root = await makeWorkspace();
   for (const command of [
@@ -301,6 +362,50 @@ test("git worktree replacement and force variants deny without treating ordinary
   }
 });
 
+test("git force-ref forms and existing extensionless checkout paths cannot replace data", async context => {
+  const root = await makeWorkspace();
+  const missingRoot = await makeWorkspace();
+  await writeFile(join(root, "Makefile"), "all:\n\t@true\n");
+  await writeFile(join(root, "LICENSE"), "test license\n");
+  await writeFile(join(root, "release-notes"), "tracked extensionless file\n");
+  for (const command of [
+    "git branch -f main HEAD~1",
+    "git branch --force main HEAD~1",
+    "git switch -C main HEAD~1",
+    "git switch -Cmain HEAD~1",
+    "git switch --force-create main HEAD~1",
+    "git switch --force-create=main HEAD~1",
+    "git checkout Makefile",
+    "git checkout LICENSE",
+    "git checkout release-notes"
+  ]) {
+    await context.test(command, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny("git-destructive"));
+    });
+  }
+  for (const command of ["git checkout Makefile", "git checkout LICENSE"]) {
+    await context.test(`missing worktree entry: ${command}`, async () => {
+      assert.deepEqual(
+        await inspect(command, { workspaceRoot: missingRoot }),
+        expectedDeny("git-destructive")
+      );
+    });
+  }
+  for (const command of [
+    "git branch feature",
+    "git branch --list",
+    "git branch -d merged-feature",
+    "git switch -c feature",
+    "git switch feature",
+    "git checkout -b feature",
+    "git checkout feature"
+  ]) {
+    await context.test(`safe: ${command}`, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), {});
+    });
+  }
+});
+
 test("PowerShell content data is not classified as a path while explicit targets remain protected", async () => {
   const root = await makeWorkspace();
   for (const command of [
@@ -323,6 +428,42 @@ test("PowerShell content data is not classified as a path while explicit targets
   }
 });
 
+test("PowerShell write aliases resolve paths without treating executable tools or values as targets", async context => {
+  const root = await makeWorkspace();
+  const cases = [
+    ["sc .git/config x", "sensitive-path"],
+    ["ac .git/config x", "sensitive-path"],
+    ["clc .git/config", "sensitive-path"],
+    ["cpi ./safe .git/config", "sensitive-path"],
+    ["mi ./safe .git/config", "sensitive-path"],
+    ["rni ./safe .git/config", "sensitive-path"],
+    ["Write-Output x | Tee-Object -FilePath .git/config", "sensitive-path"],
+    ["New-Item -Path .git/config -ItemType File", "sensitive-path"],
+    ["SC -Path:.GIT/config -Value x", "sensitive-path"],
+    ["a\\c -LiteralPath .git/config -Value x", "sensitive-path"],
+    ["tee -FilePath:.git/config", "sensitive-path"],
+    ["ni .git/config -ItemType File", "sensitive-path"]
+  ];
+  for (const [command, rule] of cases) {
+    await context.test(command, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny(rule));
+    });
+  }
+  for (const command of [
+    "sc.exe query",
+    "C:\\Windows\\System32\\sc.exe query",
+    "sc ./notes.txt '$HOME'",
+    "ac -Path ./notes.txt -Value *",
+    "cpi ./safe ./copy",
+    "Write-Output x | Tee-Object -FilePath ./notes.txt",
+    "New-Item -Path ./scratch -ItemType Directory"
+  ]) {
+    await context.test(`safe: ${command}`, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), {});
+    });
+  }
+});
+
 test("new guard parser branches publish their exact active wire rule IDs", async () => {
   const root = await makeWorkspace();
   await init(root, "parser-wire");
@@ -331,7 +472,11 @@ test("new guard parser branches publish their exact active wire rule IDs", async
     ["cmd /Crd /s /q C:/", "protected-root"],
     ["rm -rf $(printf /)", "dynamic-target"],
     ["git restore README.md", "git-destructive"],
-    ["Set-Content -Path .git/config -Value x", "sensitive-path"]
+    ["Set-Content -Path .git/config -Value x", "sensitive-path"],
+    ["echo $(rm -rf /)", "protected-root"],
+    ["rm -rf .g[i]t", "dynamic-target"],
+    ["git switch -C main HEAD~1", "git-destructive"],
+    ["sc .git/config x", "sensitive-path"]
   ];
   for (const [index, [command, rule]] of cases.entries()) {
     const result = await runHook("pre-tool-use", {

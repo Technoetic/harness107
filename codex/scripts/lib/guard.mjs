@@ -52,6 +52,7 @@ const FILE_MUTATORS = new Set([
   "move",
   "move-item",
   "mv",
+  "new-item",
   "out-file",
   "rd",
   "remove-item",
@@ -62,34 +63,49 @@ const FILE_MUTATORS = new Set([
   "set-acl",
   "set-content",
   "takeown",
+  "tee-object",
   "truncate",
   "unlink"
 ]);
 const NESTED_SHELLS = new Set(["bash", "dash", "sh", "zsh"]);
 const POWERSHELLS = new Set(["powershell", "pwsh"]);
-const WRAPPERS = new Set(["builtin", "command", "doas", "exec", "nohup", "sudo"]);
+const WRAPPERS = new Set(["builtin", "call", "command", "doas", "exec", "nohup", "sudo"]);
+const POWERSHELL_ALIASES = new Map([
+  ["ac", "add-content"],
+  ["clc", "clear-content"],
+  ["cpi", "copy-item"],
+  ["mi", "move-item"],
+  ["ni", "new-item"],
+  ["rni", "rename-item"],
+  ["sc", "set-content"],
+  ["tee", "tee-object"]
+]);
 const CMD_SWITCHES = new Set(["/a", "/d", "/f", "/i", "/n", "/q", "/s"]);
 const POWERSHELL_PATH_COMMANDS = new Set([
   "add-content",
   "clear-content",
   "copy-item",
   "move-item",
+  "new-item",
   "out-file",
   "remove-item",
   "rename-item",
   "ri",
-  "set-content"
+  "set-content",
+  "tee-object"
 ]);
 const POWERSHELL_CONTENT_COMMANDS = new Set([
   "add-content",
   "clear-content",
   "out-file",
-  "set-content"
+  "set-content",
+  "tee-object"
 ]);
 const POWERSHELL_PATH_PARAMETERS = new Set([
   "destination",
   "filepath",
   "literalpath",
+  "name",
   "newname",
   "path",
   "target"
@@ -105,11 +121,14 @@ const POWERSHELL_VALUE_PARAMETERS = new Set([
   "include",
   "informationaction",
   "informationvariable",
+  "itemtype",
   "outbuffer",
   "outvariable",
   "pipelinevariable",
   "stream",
+  "type",
   "value",
+  "variable",
   "warningaction",
   "warningvariable"
 ]);
@@ -142,6 +161,19 @@ const SENSITIVE_FILES = new Set([
   "microsoft.powershell_profile.ps1"
 ]);
 const WINDOWS_RESERVED = /^(?:con|prn|aux|nul|clock\$|com[1-9]|lpt[1-9])(?:\..*)?$/i;
+const CONVENTIONAL_EXTENSIONLESS_FILES = new Set([
+  "authors",
+  "changelog",
+  "copying",
+  "dockerfile",
+  "jenkinsfile",
+  "license",
+  "makefile",
+  "notice",
+  "procfile",
+  "readme",
+  "vagrantfile"
+]);
 
 function plainObject(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
@@ -173,6 +205,7 @@ const KNOWN_EXECUTABLES = new Set([
   ...NESTED_SHELLS,
   ...POWERSHELLS,
   ...WRAPPERS,
+  ...POWERSHELL_ALIASES.keys(),
   "cmd",
   "dd",
   "env",
@@ -198,8 +231,19 @@ function executableName(value) {
     : direct;
 }
 
-function pushToken(tokens, token) {
-  if (token !== "") tokens.push(token);
+function fileMutationName(value) {
+  const executable = executableName(value);
+  const unwrapped = value.replace(/^[({]+|[)}]+$/g, "");
+  const leaf = unwrapped.split(/[\\/]/).at(-1);
+  if (/\.(?:exe|com)$/i.test(leaf)) return executable;
+  return POWERSHELL_ALIASES.get(executable) ?? executable;
+}
+
+function pushToken(tokens, dynamicTokens, token, dynamic) {
+  if (token !== "") {
+    tokens.push(token);
+    dynamicTokens.push(dynamic);
+  }
   if (tokens.length > MAX_TOKENS) throw new Error("too many shell tokens");
 }
 
@@ -230,22 +274,105 @@ function substitutionEnd(command, start) {
   throw new Error("unterminated command substitution");
 }
 
+function backtickEnd(command, start) {
+  for (let index = start + 1; index < command.length; index += 1) {
+    if (command[index] === "\\") {
+      index += 1;
+      continue;
+    }
+    if (command[index] === "`") return index + 1;
+  }
+  return null;
+}
+
+const ANSI_C_ESCAPES = new Map([
+  ["a", "\u0007"],
+  ["b", "\b"],
+  ["e", "\u001b"],
+  ["E", "\u001b"],
+  ["f", "\f"],
+  ["n", "\n"],
+  ["r", "\r"],
+  ["t", "\t"],
+  ["v", "\u000b"],
+  ["\\", "\\"],
+  ["'", "'"],
+  ['"', '"']
+]);
+
+function ansiCQuote(command, start) {
+  let value = "";
+  let index = start + 2;
+  while (index < command.length) {
+    const character = command[index];
+    if (character === "'") return { end: index + 1, value };
+    if (character !== "\\") {
+      value += character;
+      index += 1;
+      continue;
+    }
+    const escaped = command[index + 1];
+    if (escaped === undefined) throw new Error("unterminated ANSI-C quote");
+    if (ANSI_C_ESCAPES.has(escaped)) {
+      value += ANSI_C_ESCAPES.get(escaped);
+      index += 2;
+      continue;
+    }
+    const remainder = command.slice(index + 1);
+    const numeric = /^(?:x([0-9a-fA-F]{1,2})|u([0-9a-fA-F]{4})|U([0-9a-fA-F]{8})|([0-7]{1,3}))/.exec(remainder);
+    if (numeric !== null) {
+      const digits = numeric.slice(1).find(part => part !== undefined);
+      const radix = numeric[4] === undefined ? 16 : 8;
+      const codePoint = Number.parseInt(digits, radix);
+      if (!Number.isSafeInteger(codePoint) || codePoint > 0x10ffff) {
+        throw new Error("invalid ANSI-C escape");
+      }
+      value += String.fromCodePoint(codePoint);
+      index += numeric[0].length + 1;
+      continue;
+    }
+    throw new Error("unsupported ANSI-C escape");
+  }
+  throw new Error("unterminated ANSI-C quote");
+}
+
+function hasDynamicShellSyntax(command, index, token, quote) {
+  const character = command[index];
+  const next = command[index + 1] ?? "";
+  if (character === "$") return /[({A-Za-z0-9_@*#?$!\-]/.test(next);
+  if (character === "%") return command.indexOf("%", index + 1) > index + 1;
+  if (character === "!") return command.indexOf("!", index + 1) > index + 1;
+  if (quote !== null) return false;
+  if (character === "*" || character === "?" || character === "[") return true;
+  if (character === "{") return token !== "";
+  if (character === "@") return token === "" && /[A-Za-z_(]/.test(next);
+  return character === "~" && token === "" && (next === "" || /[\\/]/.test(next));
+}
+
 function lexShell(command) {
   if (Buffer.byteLength(command, "utf8") > MAX_COMMAND_BYTES || command.includes("\0")) {
     throw new Error("shell input is outside the bounded parser contract");
   }
   const commands = [];
   let tokens = [];
+  let dynamicTokens = [];
   let token = "";
+  let tokenDynamic = false;
   let quote = null;
   let index = 0;
   let receivesPipeline = false;
+  let substitutions = [];
   const endCommand = separator => {
-    pushToken(tokens, token);
+    pushToken(tokens, dynamicTokens, token, tokenDynamic);
     token = "";
+    tokenDynamic = false;
     const hadTokens = tokens.length > 0;
-    if (hadTokens) commands.push({ tokens, receivesPipeline });
+    if (hadTokens || substitutions.length > 0) {
+      commands.push({ tokens, dynamicTokens, receivesPipeline, substitutions });
+    }
     tokens = [];
+    dynamicTokens = [];
+    substitutions = [];
     if (separator !== undefined && (hadTokens || separator === "pipe")) {
       receivesPipeline = separator === "pipe";
     }
@@ -253,6 +380,30 @@ function lexShell(command) {
 
   while (index < command.length) {
     const character = command[index];
+    if (quote === null && character === "$" && command[index + 1] === "'") {
+      const parsed = ansiCQuote(command, index);
+      token += parsed.value;
+      index = parsed.end;
+      continue;
+    }
+    if (quote !== "'" && character === "$" && command[index + 1] === "(") {
+      const end = substitutionEnd(command, index);
+      substitutions.push(command.slice(index + 2, end - 1));
+      token += command.slice(index, end);
+      tokenDynamic = true;
+      index = end;
+      continue;
+    }
+    if (quote !== "'" && character === "`") {
+      const end = backtickEnd(command, index);
+      if (end !== null) {
+        substitutions.push(command.slice(index + 1, end - 1));
+        token += command.slice(index, end);
+        tokenDynamic = true;
+        index = end;
+        continue;
+      }
+    }
     if (quote === "'") {
       if (character === "'") quote = null;
       else token += character;
@@ -272,6 +423,7 @@ function lexShell(command) {
         token += command[index + 1];
         index += 1;
       } else {
+        if (hasDynamicShellSyntax(command, index, token, quote)) tokenDynamic = true;
         token += character;
       }
       index += 1;
@@ -282,19 +434,14 @@ function lexShell(command) {
       index += 1;
       continue;
     }
-    if (character === "$" && command[index + 1] === "(") {
-      const end = substitutionEnd(command, index);
-      token += command.slice(index, end);
-      index = end;
-      continue;
-    }
     if (character === "#" && token === "" && tokens.length > 0) {
       while (index < command.length && command[index] !== "\n") index += 1;
       continue;
     }
     if (/\s/.test(character)) {
-      pushToken(tokens, token);
+      pushToken(tokens, dynamicTokens, token, tokenDynamic);
       token = "";
+      tokenDynamic = false;
       if (character === "\n" || character === "\r") endCommand("other");
       index += 1;
       continue;
@@ -322,13 +469,16 @@ function lexShell(command) {
       continue;
     }
     if (character === ">") {
-      pushToken(tokens, token);
+      pushToken(tokens, dynamicTokens, token, tokenDynamic);
       token = "";
+      tokenDynamic = false;
       tokens.push(command[index + 1] === ">" ? ">>" : ">");
+      dynamicTokens.push(false);
       if (command[index + 1] === ">") index += 1;
       index += 1;
       continue;
     }
+    if (hasDynamicShellSyntax(command, index, token, quote)) tokenDynamic = true;
     if (character === "\\") {
       const next = command[index + 1];
       if (next !== undefined && /[(){}]/.test(next) && /^(?:[A-Za-z]:|\\\\)/.test(token)) {
@@ -369,13 +519,16 @@ function parsedPowerShellSwitch(token) {
   return { name: match[1].toLowerCase(), attached: match[2] === undefined ? null : match[3] };
 }
 
-function commandAfterPowerShell(tokens) {
+function commandAfterPowerShell(tokens, dynamicTokens) {
   for (let index = 1; index < tokens.length; index += 1) {
     const option = parsedPowerShellSwitch(tokens[index]);
     if (option === null || option.name.length === 0 || !"command".startsWith(option.name)) continue;
     const remainder = tokens.slice(index + 1);
     if (option.attached !== null && option.attached !== "") remainder.unshift(option.attached);
-    return remainder.join(" ");
+    return {
+      command: remainder.join(" "),
+      dynamic: dynamicTokens.slice(index).some(Boolean)
+    };
   }
   return null;
 }
@@ -453,41 +606,72 @@ function envCommandStart(tokens) {
   return -1;
 }
 
-function discardStandaloneGrouping(tokens) {
+function discardStandaloneGrouping(tokens, dynamicTokens) {
   let start = 0;
   let end = tokens.length;
   while (start < end && /^(?:\(|\{|begin)$/.test(tokens[start].toLowerCase())) start += 1;
   while (end > start && /^(?:\)|\}|end)$/.test(tokens[end - 1].toLowerCase())) end -= 1;
-  const result = tokens.slice(start, end);
-  while (result.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(result[0])) result.shift();
+  const result = {
+    tokens: tokens.slice(start, end),
+    dynamicTokens: dynamicTokens.slice(start, end)
+  };
+  while (result.tokens.length > 0 && /^[A-Za-z_][A-Za-z0-9_]*=/.test(result.tokens[0])) {
+    result.tokens.shift();
+    result.dynamicTokens.shift();
+  }
   return result;
+}
+
+function collectParsedInvocation(parsed, invocations, depth) {
+  if (depth > MAX_NESTING) throw new Error("nested shell depth exceeds parser limit");
+  for (const substitution of parsed.substitutions) {
+    collectInvocations(substitution, invocations, depth + 1);
+  }
+  const filtered = discardStandaloneGrouping(parsed.tokens, parsed.dynamicTokens);
+  const { tokens, dynamicTokens } = filtered;
+  if (tokens.length === 0) return;
+  if (invocations.length >= MAX_TOKENS) throw new Error("too many shell invocations");
+  const invocation = {
+    tokens,
+    dynamicTokens,
+    receivesPipeline: parsed.receivesPipeline,
+    dynamicCommand: false
+  };
+  invocations.push(invocation);
+  const executable = executableName(tokens[0]);
+  if (NESTED_SHELLS.has(executable)) {
+    const nested = commandAfter(tokens, new Set(["-c", "--command"]), /^-[a-z]*c[a-z]*$/i);
+    if (nested !== null && nested.trim() !== "") collectInvocations(nested, invocations, depth + 1);
+  } else if (executable === "cmd") {
+    const nested = commandAfterCmd(tokens);
+    if (nested !== null && nested.trim() !== "") collectInvocations(nested, invocations, depth + 1);
+  } else if (POWERSHELLS.has(executable)) {
+    const nested = commandAfterPowerShell(tokens, dynamicTokens);
+    if (nested !== null && nested.command.trim() !== "") {
+      invocation.dynamicCommand = nested.dynamic;
+      collectInvocations(nested.command, invocations, depth + 1);
+    }
+  } else {
+    const start = WRAPPERS.has(executable)
+      ? wrapperCommandStart(tokens, executable)
+      : executable === "env"
+        ? envCommandStart(tokens)
+        : -1;
+    if (start > 0) {
+      collectParsedInvocation({
+        tokens: tokens.slice(start),
+        dynamicTokens: dynamicTokens.slice(start),
+        receivesPipeline: parsed.receivesPipeline,
+        substitutions: []
+      }, invocations, depth + 1);
+    }
+  }
 }
 
 function collectInvocations(command, invocations, depth = 0) {
   if (depth > MAX_NESTING) throw new Error("nested shell depth exceeds parser limit");
   for (const parsed of lexShell(command)) {
-    const parsedTokens = parsed.tokens;
-    const tokens = discardStandaloneGrouping(parsedTokens);
-    if (tokens.length === 0) continue;
-    if (invocations.length >= MAX_TOKENS) throw new Error("too many shell invocations");
-    invocations.push({ tokens, receivesPipeline: parsed.receivesPipeline });
-    const executable = executableName(tokens[0]);
-    if (NESTED_SHELLS.has(executable)) {
-      const nested = commandAfter(tokens, new Set(["-c", "--command"]), /^-[a-z]*c[a-z]*$/i);
-      if (nested !== null && nested.trim() !== "") collectInvocations(nested, invocations, depth + 1);
-    } else if (executable === "cmd") {
-      const nested = commandAfterCmd(tokens);
-      if (nested !== null && nested.trim() !== "") collectInvocations(nested, invocations, depth + 1);
-    } else if (POWERSHELLS.has(executable)) {
-      const nested = commandAfterPowerShell(tokens);
-      if (nested !== null && nested.trim() !== "") collectInvocations(nested, invocations, depth + 1);
-    } else if (WRAPPERS.has(executable)) {
-      const start = wrapperCommandStart(tokens, executable);
-      if (start > 0) collectInvocations(tokens.slice(start).join(" "), invocations, depth + 1);
-    } else if (executable === "env") {
-      const start = envCommandStart(tokens);
-      if (start > 0) collectInvocations(tokens.slice(start).join(" "), invocations, depth + 1);
-    }
+    collectParsedInvocation(parsed, invocations, depth);
   }
 }
 
@@ -530,7 +714,20 @@ function gitSubcommand(tokens) {
   return null;
 }
 
-function isGitDestructive(tokens) {
+async function checkoutArgumentIsPath(argument, workspaceRoot) {
+  const pathApi = windowsPath(workspaceRoot) ? win32 : posix;
+  const root = pathApi.resolve(workspaceRoot);
+  const target = pathApi.resolve(root, argument);
+  if (isOutside(pathApi, root, target)) return true;
+  try {
+    await lstat(target);
+    return true;
+  } catch (error) {
+    return error?.code !== "ENOENT";
+  }
+}
+
+async function isGitDestructive(tokens, workspaceRoot) {
   const subcommand = gitSubcommand(tokens);
   if (subcommand === null) return false;
   const { name, args } = subcommand;
@@ -573,13 +770,27 @@ function isGitDestructive(tokens) {
       /[\\/]/.test(positionals[0]) ||
       /\.[A-Za-z0-9_-]+$/.test(positionals[0])
     )) return true;
+    if (
+      positionals.length === 1 &&
+      CONVENTIONAL_EXTENSIONLESS_FILES.has(positionals[0].toLowerCase())
+    ) return true;
+    if (positionals.length === 1 && await checkoutArgumentIsPath(positionals[0], workspaceRoot)) {
+      return true;
+    }
   }
   if (name === "branch") {
-    return args.some(argument => argument === "-D" || argument === "--force");
+    return args.some(argument =>
+      argument === "-D" ||
+      argument === "--force" ||
+      (/^-[^-]/.test(argument) && argument.slice(1).includes("f"))
+    );
   }
   if (name === "switch") {
     return args.some(argument =>
+      argument === "-C" ||
+      /^-C.+/.test(argument) ||
       argument === "--force" ||
+      /^--force-create(?:=|$)/.test(argument) ||
       argument === "--discard-changes" ||
       (/^-[^-]/.test(argument) && argument.slice(1).includes("f"))
     );
@@ -593,21 +804,36 @@ function parsedPowerShellParameter(token) {
   return { name: match[1].toLowerCase(), attached: match[2] === undefined ? null : match[3] };
 }
 
-function powerShellFileCandidates(tokens, executable) {
+function candidate(value, dynamic = false) {
+  return { value, dynamic };
+}
+
+function powerShellWildcard(value) {
+  return /[*?\[]/.test(value);
+}
+
+function powerShellFileCandidates(tokens, dynamicTokens, executable) {
   const explicit = [];
   const positional = [];
   for (let index = 1; index < tokens.length; index += 1) {
     const token = tokens[index];
     const parameter = parsedPowerShellParameter(token);
     if (parameter === null) {
-      positional.push(token);
+      positional.push(candidate(token, dynamicTokens[index] || powerShellWildcard(token)));
       continue;
     }
     if (POWERSHELL_PATH_PARAMETERS.has(parameter.name)) {
       if (parameter.attached !== null && parameter.attached !== "") {
-        explicit.push(parameter.attached);
+        explicit.push(candidate(
+          parameter.attached,
+          dynamicTokens[index] || (parameter.name !== "literalpath" && powerShellWildcard(parameter.attached))
+        ));
       } else if (index + 1 < tokens.length) {
-        explicit.push(tokens[index + 1]);
+        const value = tokens[index + 1];
+        explicit.push(candidate(
+          value,
+          dynamicTokens[index + 1] || (parameter.name !== "literalpath" && powerShellWildcard(value))
+        ));
         index += 1;
       }
       continue;
@@ -621,10 +847,10 @@ function powerShellFileCandidates(tokens, executable) {
   return [...explicit, ...positional.slice(0, positionalLimit)];
 }
 
-function fileCandidates(tokens) {
-  const executable = executableName(tokens[0]);
+function fileCandidates(tokens, dynamicTokens) {
+  const executable = fileMutationName(tokens[0]);
   if (POWERSHELL_PATH_COMMANDS.has(executable)) {
-    return powerShellFileCandidates(tokens, executable);
+    return powerShellFileCandidates(tokens, dynamicTokens, executable);
   }
   const candidates = [];
   if (FILE_MUTATORS.has(executable)) {
@@ -637,16 +863,21 @@ function fileCandidates(tokens) {
       }
       const parameterValue = /^-(?:literalpath|path|destination|target):(.+)$/i.exec(token);
       if (parameterValue !== null) {
-        candidates.push(parameterValue[1]);
+        candidates.push(candidate(parameterValue[1], dynamicTokens[index]));
         continue;
       }
       if (!optionsEnded && token.startsWith("-") && token !== "-") continue;
       if (!optionsEnded && ["del", "erase", "rd"].includes(executable) && CMD_SWITCHES.has(token.toLowerCase())) continue;
-      candidates.push(token);
+      candidates.push(candidate(
+        token,
+        dynamicTokens[index] || (["del", "erase"].includes(executable) && powerShellWildcard(token))
+      ));
     }
   }
   for (let index = 0; index < tokens.length - 1; index += 1) {
-    if (tokens[index] === ">" || tokens[index] === ">>") candidates.push(tokens[index + 1]);
+    if (tokens[index] === ">" || tokens[index] === ">>") {
+      candidates.push(candidate(tokens[index + 1], dynamicTokens[index + 1]));
+    }
   }
   return candidates;
 }
@@ -667,7 +898,7 @@ function windowsAmbiguity(value) {
 }
 
 function dynamicTarget(value) {
-  return /(?:\$\{|\$[A-Za-z0-9_(@*#?$!\-]|%[^%\r\n]+%|![^!\r\n]+!|^@[A-Za-z_(]|[*?`]|^~(?:[\\/]|$)|[{}])/u.test(value);
+  return /(?:\$\{|\$[A-Za-z0-9_(@*#?$!\-]|%[^%\r\n]+%|![^!\r\n]+!|^@[A-Za-z_(]|[*?`]|\[[^\]\r\n]*\]|^~(?:[\\/]|$)|[{}])/u.test(value);
 }
 
 function windowsPath(value) {
@@ -684,7 +915,7 @@ function isOutside(pathApi, root, target) {
   return difference === ".." || difference.startsWith(`..${pathApi.sep}`) || pathApi.isAbsolute(difference);
 }
 
-function isSensitivePath(value) {
+function isSensitivePathLiteral(value) {
   const segments = value.replaceAll("\\", "/").split("/").filter(Boolean);
   const lowered = segments.map(segment => segment.toLowerCase());
   if (lowered.some(segment => SENSITIVE_DIRECTORIES.has(segment))) return true;
@@ -694,6 +925,17 @@ function isSensitivePath(value) {
     /^credentials(?:\.|$)/.test(name) ||
     /\.(?:key|pem|p12|pfx)$/i.test(name) ||
     /(?:^|_)profile\.ps1$/i.test(name);
+}
+
+function isSensitivePath(value) {
+  const variants = new Set([
+    value,
+    value
+      .replace(/\\([^\\/\r\n])/g, "$1")
+      .replace(/\^([^\^\r\n])/g, "$1")
+      .replace(/`([^`\r\n])/g, "$1")
+  ]);
+  return [...variants].some(isSensitivePathLiteral);
 }
 
 async function physicalRisk(pathApi, root, target) {
@@ -731,7 +973,7 @@ async function physicalRisk(pathApi, root, target) {
   return null;
 }
 
-async function analyzeTarget(value, workspaceRoot, { patch = false } = {}) {
+async function analyzeTarget(value, workspaceRoot, { patch = false, dynamic } = {}) {
   if (typeof value !== "string" || value.trim() === "" || value.includes("\0")) {
     return patch ? "patch-outside-workspace" : "dynamic-target";
   }
@@ -777,7 +1019,7 @@ async function analyzeTarget(value, workspaceRoot, { patch = false } = {}) {
   if (isSensitivePath(targetText) || isSensitivePath(pathApi.relative(root, resolvedTarget))) {
     return patch ? "patch-sensitive-path" : "sensitive-path";
   }
-  if (dynamicTarget(targetText)) {
+  if (dynamic === true || (dynamic === undefined && dynamicTarget(targetText))) {
     return patch ? "patch-outside-workspace" : "dynamic-target";
   }
   const physical = await physicalRisk(pathApi, root, resolvedTarget);
@@ -795,16 +1037,17 @@ async function classifyShell(command, workspaceRoot) {
   }
   const rules = [];
   for (const invocation of invocations) {
-    const { tokens, receivesPipeline } = invocation;
+    const { tokens, dynamicTokens, receivesPipeline, dynamicCommand } = invocation;
     if (hasEncodedPowerShell(tokens)) rules.push("encoded-command");
     if (isSystemDestructive(tokens)) rules.push("system-destructive");
-    if (isGitDestructive(tokens)) rules.push("git-destructive");
-    const candidates = fileCandidates(tokens);
-    if (receivesPipeline && FILE_MUTATORS.has(executableName(tokens[0])) && candidates.length === 0) {
+    if (await isGitDestructive(tokens, workspaceRoot)) rules.push("git-destructive");
+    if (dynamicCommand) rules.push("dynamic-target");
+    const candidates = fileCandidates(tokens, dynamicTokens);
+    if (receivesPipeline && FILE_MUTATORS.has(fileMutationName(tokens[0])) && candidates.length === 0) {
       rules.push("dynamic-target");
     }
-    for (const candidate of candidates) {
-      const risk = await analyzeTarget(candidate, workspaceRoot);
+    for (const { value, dynamic } of candidates) {
+      const risk = await analyzeTarget(value, workspaceRoot, { dynamic });
       if (risk !== null) rules.push(risk);
     }
   }
