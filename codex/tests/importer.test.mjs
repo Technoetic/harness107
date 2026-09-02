@@ -1,6 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile, readdir, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  stat,
+  symlink,
+  writeFile
+} from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -15,6 +23,7 @@ import { createInitialState } from "../scripts/lib/schema.mjs";
 import { readState, writeStateAtomic } from "../scripts/lib/state-store.mjs";
 import {
   hashFile,
+  makeDirectoryLink,
   makePluginFixture,
   makeWorkspace,
   readJson,
@@ -460,4 +469,241 @@ test("step-definition targets cannot escape the selected plugin root", async () 
     errorCode("CODEX_STEP_DEFINITIONS")
   );
   assert.equal(await readState(root), null);
+});
+
+test("writable importer paths reject physical redirects before writing outside the workspace", async t => {
+  const fixtures = [
+    {
+      name: "imports directory junction or symlink",
+      prefix: 0,
+      prepare: async (root, outside) => {
+        await mkdir(pathsFor(root).codexDir, { recursive: true });
+        await makeDirectoryLink(outside, pathsFor(root).importsDir);
+      }
+    },
+    {
+      name: "receipts directory junction or symlink",
+      prefix: 1,
+      prepare: async (root, outside) => {
+        await mkdir(pathsFor(root).codexDir, { recursive: true });
+        await makeDirectoryLink(outside, pathsFor(root).receiptsDir);
+      }
+    },
+    {
+      name: "Codex metadata directory junction or symlink",
+      prefix: 1,
+      prepare: async (root, outside) => {
+        await makeDirectoryLink(outside, pathsFor(root).codexDir);
+      }
+    }
+  ];
+
+  for (const fixture of fixtures) {
+    await t.test(fixture.name, async () => {
+      const root = await makeWorkspace();
+      const outside = await makeWorkspace();
+      const pluginRoot = await makePluginFixture();
+      await writeClaudeCompletedPrefix(root, fixture.prefix);
+      await fixture.prepare(root, outside);
+
+      await assert.rejects(
+        () => importClaudeProgress({ workspaceRoot: root, pluginRoot, now, idFactory: ids("unsafe") }),
+        errorCode("IMPORT_PATH_UNSAFE")
+      );
+      assert.deepEqual(await readdir(outside), []);
+    });
+  }
+});
+
+test("readable importer paths reject links and redirected roots before following them", async t => {
+  await t.test("workspace root junction or symlink", async () => {
+    const container = await makeWorkspace();
+    const realRoot = await makeWorkspace();
+    const linkedRoot = join(container, "linked-workspace");
+    const pluginRoot = await makePluginFixture();
+    await writeClaudeCompletedPrefix(realRoot, 0);
+    await makeDirectoryLink(realRoot, linkedRoot);
+
+    await assert.rejects(
+      () => importClaudeProgress({ workspaceRoot: linkedRoot, pluginRoot, now, idFactory: ids("unsafe") }),
+      errorCode("IMPORT_PATH_UNSAFE")
+    );
+    await assert.rejects(() => stat(pathsFor(realRoot).codexDir), error => error.code === "ENOENT");
+  });
+
+  await t.test("plugin root junction or symlink", async () => {
+    const root = await makeWorkspace();
+    const container = await makeWorkspace();
+    const realPluginRoot = await makePluginFixture();
+    const linkedPluginRoot = join(container, "linked-plugin");
+    await writeClaudeCompletedPrefix(root, 0);
+    await makeDirectoryLink(realPluginRoot, linkedPluginRoot);
+
+    await assert.rejects(
+      () => importClaudeProgress({ workspaceRoot: root, pluginRoot: linkedPluginRoot, now, idFactory: ids("unsafe") }),
+      errorCode("IMPORT_PATH_UNSAFE")
+    );
+    await assert.rejects(() => stat(pathsFor(root).codexDir), error => error.code === "ENOENT");
+  });
+
+  await t.test("Claude source archive junction or symlink", async () => {
+    const root = await makeWorkspace();
+    const outside = await makeWorkspace();
+    const pluginRoot = await makePluginFixture();
+    await writeClaudeCompletedPrefix(outside, 0);
+    await makeDirectoryLink(join(outside, "step_archive"), join(root, "step_archive"));
+
+    await assert.rejects(
+      () => importClaudeProgress({ workspaceRoot: root, pluginRoot, now, idFactory: ids("unsafe") }),
+      errorCode("IMPORT_PATH_UNSAFE")
+    );
+    assert.deepEqual((await readdir(join(outside, "step_archive"))).sort(), ["TOPIC", "progress.json"]);
+  });
+
+  await t.test("Claude topic directory junction or symlink", async () => {
+    const root = await makeWorkspace();
+    const outside = await makeWorkspace();
+    const pluginRoot = await makePluginFixture();
+    await writeClaudeCompletedPrefix(root, 0);
+    const topicPath = join(root, "step_archive", "TOPIC");
+    const outsideTopic = join(outside, "topic-target");
+    await rename(topicPath, outsideTopic);
+    await makeDirectoryLink(outsideTopic, topicPath);
+
+    await assert.rejects(
+      () => importClaudeProgress({ workspaceRoot: root, pluginRoot, now, idFactory: ids("unsafe") }),
+      errorCode("IMPORT_PATH_UNSAFE")
+    );
+    assert.deepEqual(await readdir(outsideTopic), ["TOPIC.md"]);
+  });
+
+  await t.test("Codex step-definition directory junction or symlink", async () => {
+    const root = await makeWorkspace();
+    const outside = await makeWorkspace();
+    const pluginRoot = await makePluginFixture();
+    await writeClaudeCompletedPrefix(root, 0);
+    const stepsPath = join(pluginRoot, "codex", "assets", "steps");
+    const outsideSteps = join(outside, "steps-target");
+    await rename(stepsPath, outsideSteps);
+    await makeDirectoryLink(outsideSteps, stepsPath);
+
+    await assert.rejects(
+      () => importClaudeProgress({ workspaceRoot: root, pluginRoot, now, idFactory: ids("unsafe") }),
+      errorCode("IMPORT_PATH_UNSAFE")
+    );
+    await assert.rejects(() => stat(pathsFor(root).codexDir), error => error.code === "ENOENT");
+  });
+});
+
+test("POSIX direct source, topic, and step-definition file symlinks are rejected", {
+  skip: process.platform === "win32"
+}, async t => {
+  const fixtures = [
+    {
+      name: "progress file",
+      setup: async (root, pluginRoot, outside) => {
+        const path = join(root, "step_archive", "progress.json");
+        const target = join(outside, "progress.json");
+        await rename(path, target);
+        await symlink(target, path, "file");
+      }
+    },
+    {
+      name: "topic file",
+      setup: async (root, pluginRoot, outside) => {
+        const path = join(root, "step_archive", "TOPIC", "TOPIC.md");
+        const target = join(outside, "TOPIC.md");
+        await rename(path, target);
+        await symlink(target, path, "file");
+      }
+    },
+    {
+      name: "step definition file",
+      setup: async (root, pluginRoot, outside) => {
+        const path = join(pluginRoot, "codex", "assets", "steps", "step001.md");
+        const target = join(outside, "step001.md");
+        await rename(path, target);
+        await symlink(target, path, "file");
+      }
+    }
+  ];
+
+  for (const fixture of fixtures) {
+    await t.test(fixture.name, async () => {
+      const root = await makeWorkspace();
+      const outside = await makeWorkspace();
+      const pluginRoot = await makePluginFixture();
+      await writeClaudeCompletedPrefix(root, 0);
+      await fixture.setup(root, pluginRoot, outside);
+      await assert.rejects(
+        () => importClaudeProgress({ workspaceRoot: root, pluginRoot, now, idFactory: ids("unsafe") }),
+        errorCode("IMPORT_PATH_UNSAFE")
+      );
+    });
+  }
+});
+
+test("source replacement during a single-handle read aborts instead of mixing generations", async () => {
+  const root = await makeWorkspace();
+  const pluginRoot = await makePluginFixture();
+  const originalBytes = await writeClaudeCompletedPrefix(root, 1);
+  const sourcePath = join(root, "step_archive", "progress.json");
+  const openedGenerationPath = join(root, "step_archive", "progress.opened.json");
+  const replacementBytes = Buffer.from(`${JSON.stringify({
+    total_steps: 50,
+    current_step: 3,
+    completed_steps: [1, 2]
+  })}\n`);
+
+  await assert.rejects(
+    () => importClaudeProgress({
+      workspaceRoot: root,
+      pluginRoot,
+      now,
+      idFactory: ids("source-race"),
+      hooks: {
+        afterSourceOpen: async () => {
+          await rename(sourcePath, openedGenerationPath);
+          await writeFile(sourcePath, replacementBytes);
+        }
+      }
+    }),
+    errorCode("CLAUDE_SOURCE_CHANGED")
+  );
+
+  assert.deepEqual(await readFile(openedGenerationPath), originalBytes);
+  assert.deepEqual(await readFile(sourcePath), replacementBytes);
+  assert.equal(await readState(root), null);
+  assert.deepEqual(await readReceipts(root), []);
+  await assert.rejects(() => readdir(pathsFor(root).importsDir), error => error.code === "ENOENT");
+  assert.equal((await readJson(pathsFor(root).importErrorPath)).code, "CLAUDE_SOURCE_CHANGED");
+});
+
+test("matching state visible after a state-writer throw stays authoritative without import-error", async () => {
+  const root = await makeWorkspace();
+  const pluginRoot = await makePluginFixture();
+  await writeClaudeCompletedPrefix(root, 1);
+
+  await assert.rejects(
+    () => importClaudeProgress({
+      workspaceRoot: root,
+      pluginRoot,
+      now,
+      idFactory: ids("ambiguous-state"),
+      stateWriter: async (workspaceRoot, state) => {
+        await writeStateAtomic(workspaceRoot, state);
+        throw new Error("injected failure after state publication");
+      }
+    }),
+    errorCode("IMPORT_STATE_DURABILITY_AMBIGUOUS")
+  );
+
+  const state = await readState(root);
+  assert.equal(state.workflow_id, "ambiguous-state");
+  assert.deepEqual(state.completed_steps, [1]);
+  await assert.rejects(() => readFile(pathsFor(root).importErrorPath), error => error.code === "ENOENT");
+  await assert.rejects(
+    () => importClaudeProgress({ workspaceRoot: root, pluginRoot, now, idFactory: ids("retry") }),
+    errorCode("CODEX_STATE_EXISTS")
+  );
 });

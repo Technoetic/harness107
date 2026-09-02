@@ -1,31 +1,33 @@
 import { createHash, randomUUID } from "node:crypto";
+import { constants as fileConstants } from "node:fs";
 import {
   link,
+  lstat,
   mkdir,
   open,
-  readFile,
+  realpath,
   readdir,
-  stat,
   unlink
 } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { HarnessError } from "./errors.mjs";
 import { withRunLock } from "./lock.mjs";
 import { assertInside, pathsFor } from "./paths.mjs";
 import {
-  readReceipts,
+  receiptPath,
   syncDirectoryDurable,
   writeReceiptExclusive
 } from "./receipts.mjs";
-import { createInitialState, validateState } from "./schema.mjs";
-import { appendEvent, readState, writeStateAtomic } from "./state-store.mjs";
+import { createInitialState, parseState, validateState } from "./schema.mjs";
+import { appendEvent, writeStateAtomic } from "./state-store.mjs";
 
 const STEP_COUNT = 50;
 const SOURCE_PATH = "step_archive/progress.json";
 const TOPIC_PATH = "step_archive/TOPIC/TOPIC.md";
 const IMPORT_ACTION = "repair the Claude state or use a separate workspace";
 const HOOK_NAMES = new Set([
+  "afterSourceOpen",
   "afterSnapshot",
   "afterMetadata",
   "afterReceipt",
@@ -162,66 +164,244 @@ function timestampForPath(date) {
   return date.toISOString().replace(/[:.]/g, "-");
 }
 
-async function entries(path) {
-  try {
-    return await readdir(path);
-  } catch (error) {
-    if (error?.code === "ENOENT") return [];
-    throw error;
-  }
+function samePath(left, right) {
+  const normalizedLeft = resolve(left);
+  const normalizedRight = resolve(right);
+  return process.platform === "win32"
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
 }
 
-async function fileExists(path) {
-  try {
-    await stat(path);
-    return true;
-  } catch (error) {
-    if (error?.code === "ENOENT") return false;
-    throw error;
-  }
+function sameNode(left, right) {
+  return (
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.mode === right.mode &&
+    left.isDirectory() === right.isDirectory() &&
+    left.isFile() === right.isFile()
+  );
 }
 
-async function assertNoExistingImport(workspaceRoot) {
-  const paths = pathsFor(workspaceRoot);
-  if (await fileExists(paths.statePath)) {
+function stableFileGeneration(left, right) {
+  return (
+    sameNode(left, right) &&
+    left.size === right.size &&
+    left.mtimeNs === right.mtimeNs &&
+    left.ctimeNs === right.ctimeNs &&
+    left.birthtimeNs === right.birthtimeNs
+  );
+}
+
+function unsafePath(message, details = {}) {
+  fail("IMPORT_PATH_UNSAFE", message, details);
+}
+
+async function physicalRoot(path, label) {
+  if (typeof path !== "string" || path.trim() === "") {
+    fail("IMPORT_OPTIONS_INVALID", `${label} root is required`);
+  }
+  const lexicalRoot = resolve(path);
+  let rootStat;
+  let canonicalRoot;
+  try {
+    rootStat = await lstat(lexicalRoot, { bigint: true });
+    if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+      unsafePath(`${label} root must be a physical directory`, { path: lexicalRoot });
+    }
+    canonicalRoot = await realpath(lexicalRoot);
+  } catch (error) {
+    if (error?.code === "IMPORT_PATH_UNSAFE") throw error;
+    unsafePath(`${label} root cannot be physically resolved`, { path: lexicalRoot });
+  }
+  if (!samePath(lexicalRoot, canonicalRoot)) {
+    unsafePath(`${label} root cannot traverse a link or reparse point`, { path: lexicalRoot });
+  }
+  return { label, lexicalRoot, canonicalRoot, rootStat };
+}
+
+async function assertPhysicalPath(root, candidatePath, {
+  allowMissing = true,
+  kind = null
+} = {}) {
+  let lexicalPath;
+  try {
+    lexicalPath = assertInside(root.lexicalRoot, candidatePath);
+  } catch {
+    unsafePath(`${root.label} path escapes its physical root`);
+  }
+
+  let currentRootStat;
+  let currentCanonicalRoot;
+  try {
+    currentRootStat = await lstat(root.lexicalRoot, { bigint: true });
+    currentCanonicalRoot = await realpath(root.lexicalRoot);
+  } catch {
+    unsafePath(`${root.label} root changed during import`);
+  }
+  if (
+    currentRootStat.isSymbolicLink() ||
+    !currentRootStat.isDirectory() ||
+    !sameNode(root.rootStat, currentRootStat) ||
+    !samePath(root.canonicalRoot, currentCanonicalRoot)
+  ) {
+    unsafePath(`${root.label} root changed during import`);
+  }
+
+  const pathFromRoot = relative(root.lexicalRoot, lexicalPath);
+  if (
+    pathFromRoot === ".." ||
+    pathFromRoot.startsWith(`..${sep}`) ||
+    isAbsolute(pathFromRoot)
+  ) {
+    unsafePath(`${root.label} path escapes its physical root`, { path: lexicalPath });
+  }
+  const components = pathFromRoot === "" ? [] : pathFromRoot.split(sep);
+  let currentPath = root.lexicalRoot;
+  let finalStat = currentRootStat;
+  for (let index = 0; index < components.length; index += 1) {
+    currentPath = join(currentPath, components[index]);
+    let beforeRealpath;
     try {
-      if (await readState(workspaceRoot)) {
+      beforeRealpath = await lstat(currentPath, { bigint: true });
+    } catch (error) {
+      if (error?.code === "ENOENT" && allowMissing) {
+        return { path: lexicalPath, exists: false, stat: null };
+      }
+      if (error?.code === "ENOENT") {
+        unsafePath(`${root.label} path is missing`, { path: lexicalPath });
+      }
+      throw error;
+    }
+    if (beforeRealpath.isSymbolicLink()) {
+      unsafePath(`${root.label} path traverses a link or reparse point`, { path: currentPath });
+    }
+    if (index < components.length - 1 && !beforeRealpath.isDirectory()) {
+      unsafePath(`${root.label} path has a non-directory ancestor`, { path: currentPath });
+    }
+
+    let canonicalPath;
+    let afterRealpath;
+    try {
+      canonicalPath = await realpath(currentPath);
+      afterRealpath = await lstat(currentPath, { bigint: true });
+    } catch {
+      unsafePath(`${root.label} path changed during physical resolution`, { path: currentPath });
+    }
+    const expectedCanonical = join(root.canonicalRoot, ...components.slice(0, index + 1));
+    if (
+      afterRealpath.isSymbolicLink() ||
+      !sameNode(beforeRealpath, afterRealpath) ||
+      !samePath(canonicalPath, expectedCanonical)
+    ) {
+      unsafePath(`${root.label} path traverses or changed to a link or reparse point`, {
+        path: currentPath
+      });
+    }
+    finalStat = afterRealpath;
+  }
+
+  if (kind === "file" && !finalStat.isFile()) {
+    unsafePath(`${root.label} path must be a physical file`, { path: lexicalPath });
+  }
+  if (kind === "directory" && !finalStat.isDirectory()) {
+    unsafePath(`${root.label} path must be a physical directory`, { path: lexicalPath });
+  }
+  return { path: lexicalPath, exists: true, stat: finalStat };
+}
+
+async function secureEntries(root, path) {
+  const before = await assertPhysicalPath(root, path, { kind: "directory" });
+  if (!before.exists) return [];
+  const result = await readdir(before.path);
+  const after = await assertPhysicalPath(root, path, { allowMissing: false, kind: "directory" });
+  if (!sameNode(before.stat, after.stat)) {
+    unsafePath(`${root.label} directory changed while being read`, { path: before.path });
+  }
+  return result;
+}
+
+async function secureReadState(workspace, workspaceRoot) {
+  const { statePath } = pathsFor(workspaceRoot);
+  const checked = await assertPhysicalPath(workspace, statePath, { kind: "file" });
+  if (!checked.exists) return null;
+  const { bytes } = await readContainedFile(workspace, statePath, {
+    missingCode: "IMPORT_INCOMPLETE",
+    missingMessage: "Codex state disappeared during import",
+    changedCode: "IMPORT_PATH_UNSAFE",
+    changedMessage: "Codex state changed while being read"
+  });
+  return parseState(bytes.toString("utf8"));
+}
+
+async function assertNoExistingImport(workspace, workspaceRoot) {
+  const paths = pathsFor(workspaceRoot);
+  const stateEntry = await assertPhysicalPath(workspace, paths.statePath, { kind: "file" });
+  if (stateEntry.exists) {
+    try {
+      if (await secureReadState(workspace, workspaceRoot)) {
         fail("CODEX_STATE_EXISTS", "a valid Codex state already exists");
       }
     } catch (error) {
-      if (error?.code === "CODEX_STATE_EXISTS") throw error;
+      if (error?.code === "CODEX_STATE_EXISTS" || error?.code === "IMPORT_PATH_UNSAFE") throw error;
       fail("IMPORT_INCOMPLETE", "Codex state exists but is not a valid resumable import");
     }
   }
 
-  const [receiptEntries, importEntries, hasImportError] = await Promise.all([
-    entries(paths.receiptsDir),
-    entries(paths.importsDir),
-    fileExists(paths.importErrorPath)
+  const [receiptEntries, importEntries, importErrorEntry] = await Promise.all([
+    secureEntries(workspace, paths.receiptsDir),
+    secureEntries(workspace, paths.importsDir),
+    assertPhysicalPath(workspace, paths.importErrorPath, { kind: "file" })
   ]);
-  if (receiptEntries.length > 0 || importEntries.length > 0 || hasImportError) {
+  if (receiptEntries.length > 0 || importEntries.length > 0 || importErrorEntry.exists) {
     fail(
       "IMPORT_INCOMPLETE",
       "Codex import artifacts exist without valid state; use the recoverable reset path"
     );
   }
-  const receipts = await readReceipts(workspaceRoot);
-  if (receipts.length > 0) {
-    fail("IMPORT_INCOMPLETE", "Codex receipts exist without valid state; use the recoverable reset path");
+}
+
+async function preflightWorkspacePaths(workspace, workspaceRoot) {
+  const paths = pathsFor(workspaceRoot);
+  const sourcePath = join(workspaceRoot, "step_archive", "progress.json");
+  const topicPath = join(workspaceRoot, "step_archive", "TOPIC", "TOPIC.md");
+  for (const [path, kind] of [
+    [sourcePath, "file"],
+    [topicPath, "file"],
+    [paths.codexDir, "directory"],
+    [paths.importsDir, "directory"],
+    [paths.receiptsDir, "directory"],
+    [paths.statePath, "file"],
+    [paths.eventsPath, "file"],
+    [paths.importErrorPath, "file"],
+    [paths.lockPath, "directory"]
+  ]) {
+    await assertPhysicalPath(workspace, path, { kind });
   }
 }
 
-async function ensureDirectory(directoryPath) {
-  await mkdir(directoryPath, { recursive: true, mode: 0o700 });
+async function preflightPluginPaths(plugin, pluginRoot) {
+  await assertPhysicalPath(
+    plugin,
+    join(pluginRoot, "codex", "assets", "steps", "index.json"),
+    { kind: "file" }
+  );
 }
 
-async function publishImmutableFile(path, bytes) {
+async function ensureDirectory(root, directoryPath) {
+  await assertPhysicalPath(root, directoryPath, { kind: "directory" });
+  await mkdir(directoryPath, { recursive: true, mode: 0o700 });
+  return assertPhysicalPath(root, directoryPath, { allowMissing: false, kind: "directory" });
+}
+
+async function publishImmutableFile(root, path, bytes) {
   const directoryPath = dirname(path);
-  await ensureDirectory(directoryPath);
+  const directory = await ensureDirectory(root, directoryPath);
   const temporaryPath = join(
     directoryPath,
     `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`
   );
+  await assertPhysicalPath(root, temporaryPath, { kind: "file" });
+  await assertPhysicalPath(root, path, { kind: "file" });
   let handle;
   let temporaryExists = false;
   try {
@@ -231,17 +411,30 @@ async function publishImmutableFile(path, bytes) {
     await handle.sync();
     await handle.close();
     handle = undefined;
+    const temporary = await assertPhysicalPath(root, temporaryPath, {
+      allowMissing: false,
+      kind: "file"
+    });
+    const currentDirectory = await assertPhysicalPath(root, directoryPath, {
+      allowMissing: false,
+      kind: "directory"
+    });
+    if (!sameNode(directory.stat, currentDirectory.stat)) {
+      unsafePath("import storage directory changed before publication", { path: directoryPath });
+    }
     try {
-      await link(temporaryPath, path);
+      await link(temporary.path, path);
     } catch (error) {
       if (error?.code === "EEXIST") {
         fail("IMPORT_ARTIFACT_EXISTS", "an import artifact already exists and will not be overwritten");
       }
       throw error;
     }
-    await unlink(temporaryPath);
+    await assertPhysicalPath(root, path, { allowMissing: false, kind: "file" });
+    await unlink(temporary.path);
     temporaryExists = false;
     await syncDirectoryDurable(directoryPath);
+    await assertPhysicalPath(root, directoryPath, { allowMissing: false, kind: "directory" });
   } finally {
     await handle?.close().catch(() => {});
     if (temporaryExists) {
@@ -252,8 +445,54 @@ async function publishImmutableFile(path, bytes) {
   }
 }
 
-async function writeJsonImmutable(path, value) {
-  await publishImmutableFile(path, `${JSON.stringify(value, null, 2)}\n`);
+async function writeJsonImmutable(root, path, value) {
+  await publishImmutableFile(root, path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+async function readContainedFile(root, path, {
+  missingCode,
+  missingMessage,
+  changedCode,
+  changedMessage,
+  afterOpen
+}) {
+  const checked = await assertPhysicalPath(root, path, { kind: "file" });
+  if (!checked.exists) fail(missingCode, missingMessage);
+  const flags = typeof fileConstants.O_NOFOLLOW === "number"
+    ? fileConstants.O_RDONLY | fileConstants.O_NOFOLLOW
+    : "r";
+  let handle;
+  try {
+    handle = await open(checked.path, flags);
+    const before = await handle.stat({ bigint: true });
+    const pathAtOpen = await assertPhysicalPath(root, checked.path, {
+      allowMissing: false,
+      kind: "file"
+    });
+    if (!sameNode(before, pathAtOpen.stat)) {
+      fail(changedCode, changedMessage);
+    }
+    await afterOpen?.({ path: checked.path, stat: before });
+    const bytes = await handle.readFile();
+    const after = await handle.stat({ bigint: true });
+    const pathAfterRead = await assertPhysicalPath(root, checked.path, {
+      allowMissing: false,
+      kind: "file"
+    });
+    if (
+      !stableFileGeneration(before, after) ||
+      !sameNode(after, pathAfterRead.stat) ||
+      after.size !== BigInt(bytes.length)
+    ) {
+      fail(changedCode, changedMessage);
+    }
+    return { bytes, stat: after };
+  } catch (error) {
+    if (error?.code === "ELOOP") unsafePath(`${root.label} file became a link`, { path });
+    throw error;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
 }
 
 function parseProgress(rawBytes) {
@@ -268,35 +507,33 @@ function parseProgress(rawBytes) {
   }
 }
 
-async function loadTopic(workspaceRoot) {
-  const topicPath = assertInside(workspaceRoot, join(workspaceRoot, "step_archive", "TOPIC", "TOPIC.md"));
-  let bytes;
-  try {
-    bytes = await readFile(topicPath);
-  } catch (error) {
-    if (error?.code === "ENOENT") {
-      fail("CLAUDE_TOPIC_MISSING", "the required Claude topic is missing");
-    }
-    throw error;
-  }
+async function loadTopic(workspace, workspaceRoot) {
+  const topicPath = join(workspaceRoot, "step_archive", "TOPIC", "TOPIC.md");
+  const { bytes } = await readContainedFile(workspace, topicPath, {
+    missingCode: "CLAUDE_TOPIC_MISSING",
+    missingMessage: "the required Claude topic is missing",
+    changedCode: "IMPORT_PATH_UNSAFE",
+    changedMessage: "the Claude topic changed while being read"
+  });
   if (bytes.length === 0 || bytes.toString("utf8").trim() === "") {
     fail("CLAUDE_TOPIC_MISSING", "the required Claude topic is empty");
   }
   return sha256(bytes);
 }
 
-async function loadStepDefinitions(pluginRoot) {
-  if (typeof pluginRoot !== "string" || pluginRoot.trim() === "") {
-    fail("IMPORT_OPTIONS_INVALID", "pluginRoot is required");
-  }
-  const indexPath = assertInside(
-    pluginRoot,
-    join(pluginRoot, "codex", "assets", "steps", "index.json")
-  );
+async function loadStepDefinitions(plugin, pluginRoot) {
+  const indexPath = join(pluginRoot, "codex", "assets", "steps", "index.json");
   let index;
   try {
-    index = JSON.parse(await readFile(indexPath, "utf8"));
-  } catch {
+    const { bytes } = await readContainedFile(plugin, indexPath, {
+      missingCode: "CODEX_STEP_DEFINITIONS",
+      missingMessage: "Codex step definitions are missing",
+      changedCode: "IMPORT_PATH_UNSAFE",
+      changedMessage: "Codex step definitions changed while being read"
+    });
+    index = JSON.parse(bytes.toString("utf8"));
+  } catch (error) {
+    if (error?.code === "IMPORT_PATH_UNSAFE") throw error;
     fail("CODEX_STEP_DEFINITIONS", "Codex step definitions are missing or invalid");
   }
   if (!isPlainObject(index) || index.schema_version !== 1 || !Array.isArray(index.steps) || index.steps.length !== STEP_COUNT) {
@@ -314,11 +551,18 @@ async function loadStepDefinitions(pluginRoot) {
     ) {
       fail("CODEX_STEP_DEFINITIONS", `Codex definition ${id} is not canonical`, { step: number });
     }
-    const definitionPath = assertInside(pluginRoot, join(pluginRoot, ...target.split("/")));
+    const definitionPath = join(pluginRoot, ...target.split("/"));
     let contents;
     try {
-      contents = await readFile(definitionPath, "utf8");
-    } catch {
+      const { bytes } = await readContainedFile(plugin, definitionPath, {
+        missingCode: "CODEX_STEP_DEFINITIONS",
+        missingMessage: `Codex definition ${id} is missing`,
+        changedCode: "IMPORT_PATH_UNSAFE",
+        changedMessage: `Codex definition ${id} changed while being read`
+      });
+      contents = bytes.toString("utf8");
+    } catch (error) {
+      if (error?.code === "IMPORT_PATH_UNSAFE") throw error;
       fail("CODEX_STEP_DEFINITIONS", `Codex definition ${id} is missing`, { step: number });
     }
     if (contents.trim() === "") {
@@ -378,7 +622,7 @@ function failureCode(error) {
       : "CLAUDE_IMPORT_FAILED";
 }
 
-async function recordImportError(path, {
+async function recordImportError(workspace, path, {
   error,
   sourcePreserved,
   sourceSha256,
@@ -393,7 +637,7 @@ async function recordImportError(path, {
     occurred_at: occurredAt,
     action: IMPORT_ACTION
   };
-  await writeJsonImmutable(path, artifact);
+  await writeJsonImmutable(workspace, path, artifact);
 }
 
 export async function importClaudeProgress({
@@ -402,39 +646,60 @@ export async function importClaudeProgress({
   now = () => new Date(),
   idFactory = randomUUID,
   lockOptions = {},
-  hooks = {}
+  hooks = {},
+  stateWriter = writeStateAtomic
 } = {}) {
   validateIdFactory(idFactory);
   const importHooks = validateHooks(hooks);
   if (!isPlainObject(lockOptions)) {
     fail("IMPORT_OPTIONS_INVALID", "lockOptions must be an object");
   }
-  const paths = pathsFor(workspaceRoot);
+  if (typeof stateWriter !== "function") {
+    fail("IMPORT_OPTIONS_INVALID", "stateWriter must be a function");
+  }
+  const workspace = await physicalRoot(workspaceRoot, "workspace");
+  const plugin = await physicalRoot(pluginRoot, "plugin");
+  const safeWorkspaceRoot = workspace.lexicalRoot;
+  const safePluginRoot = plugin.lexicalRoot;
+  const paths = pathsFor(safeWorkspaceRoot);
+  await preflightWorkspacePaths(workspace, safeWorkspaceRoot);
+  await preflightPluginPaths(plugin, safePluginRoot);
+
   return withRunLock(paths.lockPath, async () => {
-    await assertNoExistingImport(workspaceRoot);
+    await assertPhysicalPath(workspace, paths.lockPath, {
+      allowMissing: false,
+      kind: "directory"
+    });
+    await preflightWorkspacePaths(workspace, safeWorkspaceRoot);
+    await preflightPluginPaths(plugin, safePluginRoot);
+    await assertNoExistingImport(workspace, safeWorkspaceRoot);
     const importDate = importedAtFrom(now);
     const importedAt = importDate.toISOString();
-    const sourcePath = assertInside(
-      workspaceRoot,
-      join(workspaceRoot, "step_archive", "progress.json")
-    );
+    const sourcePath = join(safeWorkspaceRoot, "step_archive", "progress.json");
     const baseName = `claude-progress-${timestampForPath(importDate)}`;
-    const snapshotPath = assertInside(workspaceRoot, join(paths.importsDir, `${baseName}.json`));
-    const metadataPath = assertInside(workspaceRoot, join(paths.importsDir, `${baseName}.meta.json`));
+    const snapshotPath = assertInside(safeWorkspaceRoot, join(paths.importsDir, `${baseName}.json`));
+    const metadataPath = assertInside(safeWorkspaceRoot, join(paths.importsDir, `${baseName}.meta.json`));
     let sourcePreserved = false;
     let sourceSha256 = null;
     let stateWritten = false;
+    let expectedState = null;
 
     try {
-      const [sourceBytes, sourceStat] = await Promise.all([readFile(sourcePath), stat(sourcePath)]);
+      const { bytes: sourceBytes, stat: sourceStat } = await readContainedFile(workspace, sourcePath, {
+        missingCode: "CLAUDE_PROGRESS_MISSING",
+        missingMessage: "Claude progress.json is missing",
+        changedCode: "CLAUDE_SOURCE_CHANGED",
+        changedMessage: "Claude progress.json changed while being read",
+        afterOpen: importHooks.afterSourceOpen
+      });
       sourceSha256 = sha256(sourceBytes);
-      await publishImmutableFile(snapshotPath, sourceBytes);
+      await publishImmutableFile(workspace, snapshotPath, sourceBytes);
       sourcePreserved = true;
       await importHooks.afterSnapshot?.({ snapshotPath });
 
       const normalized = normalizeClaudeProgress(parseProgress(sourceBytes));
-      const topicSha256 = await loadTopic(workspaceRoot);
-      await loadStepDefinitions(pluginRoot);
+      const topicSha256 = await loadTopic(workspace, safeWorkspaceRoot);
+      await loadStepDefinitions(plugin, safePluginRoot);
       const workflowId = idFactory();
       if (typeof workflowId !== "string" || workflowId.trim() === "") {
         fail("IMPORT_OPTIONS_INVALID", "idFactory must return a non-empty workflow ID");
@@ -444,35 +709,72 @@ export async function importClaudeProgress({
         source_path: SOURCE_PATH,
         source_sha256: sourceSha256,
         size: sourceBytes.length,
-        source_mtime: sourceStat.mtime.toISOString(),
+        source_mtime: new Date(Number((sourceStat.mtimeNs + 500_000n) / 1_000_000n)).toISOString(),
         imported_at: importedAt,
         workflow_id: workflowId,
         normalized_prefix: normalized.completed_steps,
         warnings: normalized.warnings
       };
-      await writeJsonImmutable(metadataPath, metadata);
+      await writeJsonImmutable(workspace, metadataPath, metadata);
       await importHooks.afterMetadata?.({ metadataPath });
 
       for (const step of normalized.completed_steps) {
-        await writeReceiptExclusive(workspaceRoot, importedReceipt({
+        await assertPhysicalPath(workspace, paths.receiptsDir, { kind: "directory" });
+        await writeReceiptExclusive(safeWorkspaceRoot, importedReceipt({
           workflowId,
           step,
           importedAt,
           sourceSha256
         }));
+        await assertPhysicalPath(workspace, paths.receiptsDir, {
+          allowMissing: false,
+          kind: "directory"
+        });
+        await assertPhysicalPath(workspace, receiptPath(safeWorkspaceRoot, step), {
+          allowMissing: false,
+          kind: "file"
+        });
         await importHooks.afterReceipt?.({ step });
       }
 
-      const state = importedState({
-        workspaceRoot,
+      expectedState = importedState({
+        workspaceRoot: safeWorkspaceRoot,
         workflowId,
         topicSha256,
         normalized,
         sourceSha256,
         importedAt
       });
-      await importHooks.beforeStateWrite?.({ state });
-      const durableState = await writeStateAtomic(workspaceRoot, state);
+      await importHooks.beforeStateWrite?.({ state: expectedState });
+      await assertPhysicalPath(workspace, paths.statePath, { kind: "file" });
+      let writerResult;
+      try {
+        writerResult = await stateWriter(safeWorkspaceRoot, expectedState);
+      } catch (error) {
+        let visibleState = null;
+        try {
+          visibleState = await secureReadState(workspace, safeWorkspaceRoot);
+        } catch (probeError) {
+          if (probeError?.code === "IMPORT_PATH_UNSAFE") throw probeError;
+        }
+        if (visibleState !== null && JSON.stringify(visibleState) === JSON.stringify(expectedState)) {
+          stateWritten = true;
+          throw new HarnessError(
+            "IMPORT_STATE_DURABILITY_AMBIGUOUS",
+            "the matching imported state is visible after a state durability failure",
+            { cause_code: typeof error?.code === "string" ? error.code : "UNKNOWN" }
+          );
+        }
+        throw error;
+      }
+      const durableState = await secureReadState(workspace, safeWorkspaceRoot);
+      if (
+        durableState === null ||
+        JSON.stringify(durableState) !== JSON.stringify(expectedState) ||
+        JSON.stringify(writerResult) !== JSON.stringify(expectedState)
+      ) {
+        fail("IMPORT_STATE_PUBLISH_MISMATCH", "state writer did not publish the expected imported state");
+      }
       stateWritten = true;
       await importHooks.beforeEvent?.({ state: durableState });
       const event = {
@@ -481,7 +783,12 @@ export async function importClaudeProgress({
         imported_prefix_count: normalized.completed_steps.length
       };
       if (durableState.current_step !== null) event.selected_step = durableState.current_step;
-      await appendEvent(workspaceRoot, event, { now });
+      await assertPhysicalPath(workspace, paths.eventsPath, { kind: "file" });
+      await appendEvent(safeWorkspaceRoot, event, { now });
+      await assertPhysicalPath(workspace, paths.eventsPath, {
+        allowMissing: false,
+        kind: "file"
+      });
       return {
         state: durableState,
         warnings: normalized.warnings,
@@ -489,8 +796,8 @@ export async function importClaudeProgress({
         metadata_path: metadataPath
       };
     } catch (error) {
-      if (!stateWritten) {
-        await recordImportError(paths.importErrorPath, {
+      if (!stateWritten && error?.code !== "IMPORT_PATH_UNSAFE") {
+        await recordImportError(workspace, paths.importErrorPath, {
           error,
           sourcePreserved,
           sourceSha256,

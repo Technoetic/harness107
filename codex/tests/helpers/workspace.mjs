@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -32,6 +32,10 @@ export async function makeWorkspace() {
   const workspace = cleanupPath(mkdtempSync(join(temporaryRoot, "harness50-codex-")));
   workspaces.add(workspace);
   return workspace;
+}
+
+export async function makeDirectoryLink(target, path) {
+  await symlink(resolve(target), path, process.platform === "win32" ? "junction" : "dir");
 }
 
 export async function hashFile(path) {
