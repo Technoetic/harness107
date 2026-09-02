@@ -287,16 +287,25 @@ function isDirectEntrypoint() {
   }
 }
 
+export async function runDirect(argv, {
+  stderr = process.stderr,
+  runMain = main
+} = {}) {
+  try {
+    const code = await Promise.resolve().then(() => runMain(argv));
+    process.exitCode = code;
+    return code;
+  } catch (error) {
+    process.exitCode = 1;
+    try {
+      await writeOutput(stderr, errorDocument(error));
+    } catch {
+      // A failed diagnostic stream cannot safely receive another diagnostic.
+    }
+    return 1;
+  }
+}
+
 if (isDirectEntrypoint()) {
-  Promise.resolve()
-    .then(() => main(process.argv.slice(2)))
-    .then(
-      code => {
-        process.exitCode = code;
-      },
-      error => {
-        process.exitCode = 1;
-        return writeOutput(process.stderr, errorDocument(error)).catch(() => {});
-      }
-    );
+  void runDirect(process.argv.slice(2));
 }

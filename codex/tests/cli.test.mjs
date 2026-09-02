@@ -23,6 +23,7 @@ const INPUT_LIMIT = 1024 * 1024;
 const IMPORT_ACTION = "repair the Claude state or use a separate workspace";
 const cliPath = fileURLToPath(new URL("../scripts/harness-state.mjs", import.meta.url));
 const jsonIoUrl = new URL("../scripts/lib/json-io.mjs", import.meta.url).href;
+const harnessStateUrl = new URL("../scripts/harness-state.mjs", import.meta.url).href;
 
 function evidence(detail = "verified by CLI") {
   return [{
@@ -92,9 +93,9 @@ async function runCliWithClosedStdout(args) {
   });
 }
 
-async function inspectOutputTimeout(mode) {
+async function inspectOutputQuarantine(mode) {
   const script = `
-    import { Writable } from "node:stream";
+    import { EventEmitter } from "node:events";
     import { writeOutput } from ${JSON.stringify(jsonIoUrl)};
     const mode = ${JSON.stringify(mode)};
     const secret = "late output secret";
@@ -102,12 +103,43 @@ async function inspectOutputTimeout(mode) {
     const unhandled = [];
     process.on("uncaughtException", error => uncaught.push(error.message));
     process.on("unhandledRejection", error => unhandled.push(error?.message ?? String(error)));
-    const terminalEvents = [];
-    let pendingCallback = null;
-    const output = new Writable({
-      write(_chunk, _encoding, callback) {
-        pendingCallback = callback;
+
+    class HostileWritable extends EventEmitter {
+      constructor({ backpressure = false, destroyMode = "close" } = {}) {
+        super();
+        this.backpressure = backpressure;
+        this.destroyMode = destroyMode;
+        this.destroyed = false;
+        this.closed = false;
+        this.writable = true;
+        this.writableEnded = false;
+        this.callbacks = [];
       }
+
+      write(_value, callback) {
+        this.callbacks.push(error => {
+          callback(error);
+          if (error) this.emit("error", error);
+        });
+        return !this.backpressure;
+      }
+
+      destroy() {
+        if (this.destroyMode === "throw") throw new Error(secret);
+        if (this.destroyMode === "noop") return this;
+        this.destroyed = true;
+        this.closed = true;
+        this.emit("close");
+        return this;
+      }
+    }
+
+    const terminalEvents = [];
+    const output = new HostileWritable({
+      backpressure: mode === "backpressure",
+      destroyMode: ["close-then-error", "destroy-noop", "double-error", "never", "repeated"].includes(mode)
+        ? "noop"
+        : mode === "destroy-throw" ? "throw" : "close"
     });
     output.on("close", () => terminalEvents.push("close"));
     const baseline = {
@@ -115,30 +147,61 @@ async function inspectOutputTimeout(mode) {
       close: output.listenerCount("close"),
       drain: output.listenerCount("drain")
     };
-    let rejection = null;
-    try {
-      await writeOutput(output, "fixture", { timeoutMs: 5 });
-    } catch (error) {
-      rejection = { code: error.code, message: error.message };
+    const timeoutMs = mode === "direct-stderr" ? 1000 : 5;
+    const rejections = [];
+    const startedAt = Date.now();
+    const attempts = mode === "repeated" ? 3 : 1;
+    let directExitCode = null;
+    if (mode === "direct-stderr") {
+      const { runDirect } = await import(${JSON.stringify(harnessStateUrl)});
+      await runDirect([], {
+        stderr: output,
+        runMain() {
+          throw new Error(secret);
+        }
+      });
+      directExitCode = process.exitCode;
+    } else {
+      for (let index = 0; index < attempts; index += 1) {
+        try {
+          await writeOutput(output, "fixture", { timeoutMs });
+        } catch (error) {
+          rejections.push({ code: error.code, message: error.message });
+        }
+      }
     }
-    const rejectedBeforeTerminal = terminalEvents.length === 0;
+    const rejectedAfterMs = Date.now() - startedAt;
     const during = {
       error: output.listenerCount("error"),
       close: output.listenerCount("close"),
       drain: output.listenerCount("drain")
     };
-    if (mode === "callback-error") pendingCallback(new Error(secret));
-    else if (mode === "emitted-error") output.emit("error", new Error(secret));
-    else if (mode === "close") output.destroy();
-    await new Promise(resolve => setTimeout(resolve, 180));
+    setTimeout(() => {
+      if (mode === "delayed-callback-error") output.callbacks[0](new Error(secret));
+      else if (mode === "delayed-emitted-error" || mode === "backpressure" || mode === "direct-stderr") {
+        output.emit("error", new Error(secret));
+      } else if (mode === "double-error" || mode === "destroy-noop" || mode === "destroy-throw" || mode === "repeated") {
+        output.emit("error", new Error(secret));
+        output.emit("error", new Error(secret));
+      } else if (mode === "callback-success-then-error") {
+        output.callbacks[0](null);
+        output.emit("error", new Error(secret));
+      } else if (mode === "close-then-error") {
+        output.closed = true;
+        output.emit("close");
+        output.emit("error", new Error(secret));
+      }
+    }, 240);
+    await new Promise(resolve => setTimeout(resolve, 300));
     const final = {
       error: output.listenerCount("error"),
       close: output.listenerCount("close"),
       drain: output.listenerCount("drain")
     };
     process.stdout.write(JSON.stringify({
-      rejection,
-      rejectedBeforeTerminal,
+      rejections,
+      directExitCode,
+      rejectedAfterMs,
       baseline,
       during,
       final,
@@ -147,6 +210,7 @@ async function inspectOutputTimeout(mode) {
       uncaught,
       unhandled
     }) + "\\n");
+    process.exitCode = 0;
   `;
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, ["--input-type=module", "--eval", script], {
@@ -168,15 +232,15 @@ async function inspectOutputTimeout(mode) {
       outputBytes += chunk.length;
       if (outputBytes > INPUT_LIMIT) {
         child.kill();
-        finish(() => reject(new Error("output-timeout fixture exceeded its output limit")));
+        finish(() => reject(new Error("output-quarantine fixture exceeded its output limit")));
         return;
       }
       target.push(Buffer.from(chunk));
     };
     const timer = setTimeout(() => {
       child.kill();
-      finish(() => reject(new Error("output-timeout fixture timed out")));
-    }, 3000);
+      finish(() => reject(new Error("output-quarantine fixture timed out")));
+    }, 5000);
     child.once("error", error => finish(() => reject(error)));
     child.stdout.on("data", chunk => collect(stdout, chunk));
     child.stderr.on("data", chunk => collect(stderr, chunk));
@@ -503,32 +567,71 @@ test("main rejects an output close before completion and removes its temporary l
 });
 
 for (const fixture of [
-  { mode: "callback-error", label: "delayed callback error" },
-  { mode: "emitted-error", label: "delayed emitted error" },
-  { mode: "close", label: "close after timeout" },
-  { mode: "never", label: "non-terminating write" }
+  { mode: "delayed-callback-error", label: "a callback error beyond the old cleanup window" },
+  { mode: "delayed-emitted-error", label: "an emitted error beyond the old cleanup window" },
+  { mode: "double-error", label: "repeated late errors" },
+  { mode: "callback-success-then-error", label: "an error after callback success" },
+  { mode: "backpressure", label: "an error after backpressure without drain" },
+  { mode: "close-then-error", label: "an error after close" },
+  { mode: "destroy-noop", label: "late errors when destroy is a no-op" },
+  { mode: "destroy-throw", label: "late errors when destroy throws" },
+  { mode: "never", label: "a non-terminating stream" }
 ]) {
-  test(`writeOutput guards ${fixture.label} until bounded transport cleanup`, async () => {
-    const result = await inspectOutputTimeout(fixture.mode);
+  test(`writeOutput quarantines ${fixture.label} without retaining temporary listeners`, async () => {
+    const result = await inspectOutputQuarantine(fixture.mode);
     assert.equal(result.code, 0, result.stderr);
     assert.equal(result.stderr, "");
     assert.doesNotMatch(result.stderr, /late output secret|Error:|node:internal|json-io\.mjs/i);
     const inspection = JSON.parse(result.stdout);
-    assert.deepEqual(inspection.rejection, {
+    assert.deepEqual(inspection.rejections, [{
       code: "OUTPUT_STREAM",
       message: "output stream failed"
-    });
-    assert.equal(inspection.rejectedBeforeTerminal, true);
+    }]);
+    assert.ok(inspection.rejectedAfterMs < 200, `timeout settled after ${inspection.rejectedAfterMs} ms`);
     assert.equal(inspection.during.error, inspection.baseline.error + 1);
-    assert.equal(inspection.during.close, inspection.baseline.close + 1);
-    assert.equal(inspection.during.drain, inspection.baseline.drain + 1);
+    assert.equal(inspection.during.close, inspection.baseline.close);
+    assert.equal(inspection.during.drain, inspection.baseline.drain);
     assert.deepEqual(inspection.uncaught, []);
     assert.deepEqual(inspection.unhandled, []);
-    assert.equal(inspection.destroyed, true);
-    assert.deepEqual(inspection.terminalEvents, ["close"]);
-    assert.deepEqual(inspection.final, inspection.baseline);
+    assert.equal(inspection.final.error, inspection.baseline.error + 1);
+    assert.equal(inspection.final.close, inspection.baseline.close);
+    assert.equal(inspection.final.drain, inspection.baseline.drain);
   });
 }
+
+test("repeated writeOutput timeouts share exactly one quarantine guard", async () => {
+  const result = await inspectOutputQuarantine("repeated");
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  const inspection = JSON.parse(result.stdout);
+  assert.deepEqual(inspection.rejections, Array.from({ length: 3 }, () => ({
+    code: "OUTPUT_STREAM",
+    message: "output stream failed"
+  })));
+  assert.equal(inspection.during.error, inspection.baseline.error + 1);
+  assert.equal(inspection.during.close, inspection.baseline.close);
+  assert.equal(inspection.during.drain, inspection.baseline.drain);
+  assert.deepEqual(inspection.final, inspection.during);
+  assert.deepEqual(inspection.uncaught, []);
+  assert.deepEqual(inspection.unhandled, []);
+});
+
+test("the direct error-path stderr timeout retains its one guard for later errors", async () => {
+  const result = await inspectOutputQuarantine("direct-stderr");
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  assert.doesNotMatch(result.stderr, /late output secret|Error:|node:internal|json-io\.mjs/i);
+  const inspection = JSON.parse(result.stdout);
+  assert.deepEqual(inspection.rejections, []);
+  assert.equal(inspection.directExitCode, 1);
+  assert.ok(inspection.rejectedAfterMs >= 900);
+  assert.ok(inspection.rejectedAfterMs < 1300, `stderr timeout settled after ${inspection.rejectedAfterMs} ms`);
+  assert.equal(inspection.final.error, inspection.baseline.error + 1);
+  assert.equal(inspection.final.close, inspection.baseline.close);
+  assert.equal(inspection.final.drain, inspection.baseline.drain);
+  assert.deepEqual(inspection.uncaught, []);
+  assert.deepEqual(inspection.unhandled, []);
+});
 
 test("main supports injected streams and importing the module does not execute the entrypoint", async () => {
   const root = await makeWorkspace();
