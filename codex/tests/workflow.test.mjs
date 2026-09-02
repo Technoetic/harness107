@@ -2,7 +2,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, watch } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  renameSync,
+  rmdirSync,
+  symlinkSync,
+  unlinkSync,
+  watch
+} from "node:fs";
 import {
   mkdir,
   readFile,
@@ -12,7 +20,7 @@ import {
   unlink,
   writeFile
 } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { importClaudeProgress } from "../scripts/lib/importer.mjs";
 import {
@@ -85,6 +93,44 @@ function evidenceFor(step, detail = `verified step ${step}`) {
 async function readEvents(root) {
   const raw = await readFile(pathsFor(root).eventsPath, "utf8");
   return raw.trimEnd().split("\n").filter(Boolean).map(line => JSON.parse(line));
+}
+
+function replaceWithDirectoryLink(path, target) {
+  const heldPath = `${path}.held-for-containment-test`;
+  if (existsSync(path)) renameSync(path, heldPath);
+  symlinkSync(resolve(target), path, process.platform === "win32" ? "junction" : "dir");
+  return () => {
+    if (existsSync(path)) {
+      try {
+        if (lstatSync(path).isSymbolicLink()) unlinkSync(path);
+        else rmdirSync(path);
+      } catch (error) {
+        if (process.platform !== "win32") throw error;
+        rmdirSync(path);
+      }
+    }
+    if (existsSync(heldPath)) renameSync(heldPath, path);
+  };
+}
+
+function callbackEvidence(callback, detail = "callback evidence") {
+  let called = false;
+  const item = {
+    acceptance_id: "state-transition",
+    kind: "check",
+    ok: true
+  };
+  Object.defineProperty(item, "detail", {
+    enumerable: true,
+    get() {
+      if (!called) {
+        called = true;
+        callback();
+      }
+      return detail;
+    }
+  });
+  return [item];
 }
 
 async function crashChildAfterReceipt({ root, pluginRoot, step, attemptId, summary, evidence, now }) {
@@ -987,6 +1033,82 @@ test("pause renews a live owner lease and rejects the exact expiry boundary", as
   assert.deepEqual(await readState(expiredRoot), started.state);
 });
 
+test("begin rejects a codex directory swap performed by its idFactory without outside writes", async () => {
+  const root = await makeWorkspace();
+  const external = await makeWorkspace();
+  const initialized = await initWorkflow({
+    workspaceRoot: root,
+    topic: "callback containment",
+    now: baseTime,
+    idFactory: ids("workflow-callback", "nonce-callback")
+  });
+  await writeFile(join(external, "sentinel.txt"), "outside-before\n");
+  const codexDir = pathsFor(root).codexDir;
+  let restore;
+  try {
+    await assert.rejects(
+      () => beginStep({
+        workspaceRoot: root,
+        step: 1,
+        sessionId: "session-callback",
+        marker: { ...initialized.continuation },
+        now: plus(1),
+        idFactory: () => {
+          restore = replaceWithDirectoryLink(codexDir, external);
+          return "attempt-after-swap";
+        }
+      }),
+      error => error.code === "WORKSPACE_PATH_UNSAFE"
+    );
+    assert.deepEqual((await readdir(external)).sort(), ["sentinel.txt"]);
+    assert.equal(await readFile(join(external, "sentinel.txt"), "utf8"), "outside-before\n");
+  } finally {
+    restore?.();
+  }
+  assert.deepEqual(await readState(root), initialized);
+});
+
+test("evidence callbacks cannot redirect receipt, state, or event control paths", async () => {
+  const pluginRoot = await makePluginFixture();
+  for (const controlName of ["receiptsDir", "statePath", "eventsPath"]) {
+    const root = await makeWorkspace();
+    const external = await makeWorkspace();
+    const started = await initAndBegin(root);
+    const controlPath = pathsFor(root)[controlName];
+    await writeFile(join(external, "sentinel.txt"), "outside-before\n");
+    let restore;
+    const evidence = callbackEvidence(() => {
+      restore = replaceWithDirectoryLink(controlPath, external);
+    });
+    try {
+      const operation = controlName === "receiptsDir"
+        ? () => completeStep({
+            workspaceRoot: root,
+            pluginRoot,
+            step: 1,
+            attemptId: started.attempt.id,
+            summary: "must remain contained",
+            evidence,
+            now: plus(2)
+          })
+        : () => failStep({
+            workspaceRoot: root,
+            step: 1,
+            attemptId: started.attempt.id,
+            reason: "must remain contained",
+            evidence,
+            now: plus(2)
+          });
+      await assert.rejects(operation, error => error.code === "WORKSPACE_PATH_UNSAFE");
+      assert.deepEqual((await readdir(external)).sort(), ["sentinel.txt"]);
+      assert.equal(await readFile(join(external, "sentinel.txt"), "utf8"), "outside-before\n");
+    } finally {
+      restore?.();
+    }
+    assert.deepEqual(await readState(root), started.state);
+  }
+});
+
 test("reconcile advances a receipt crash gap and blocks malformed receipt storage", async () => {
   const root = await makeWorkspace();
   const started = await initAndBegin(root);
@@ -1009,6 +1131,187 @@ test("reconcile advances a receipt crash gap and blocks malformed receipt storag
   assert.equal(blocked.status, "blocked");
   assert.equal(blocked.blocked_reason, "RECEIPT_PARSE_ERROR");
   assert.deepEqual(blocked.completed_steps, [1]);
+});
+
+test("reconcile blocks a mismatched forward attempt without discarding the active attempt", async () => {
+  const root = await makeWorkspace();
+  const started = await initAndBegin(root);
+  await writeReceiptExclusive(root, {
+    schema_version: 1,
+    workflow_id: started.state.workflow_id,
+    step: 1,
+    attempt_id: "different-attempt-generation",
+    provenance: "codex-verified",
+    completed_at: plus(2),
+    summary: "not the persisted attempt",
+    evidence: evidenceFor(1)
+  });
+
+  const blocked = await reconcileWorkflow({ workspaceRoot: root, now: plus(3) });
+  assert.equal(blocked.status, "blocked");
+  assert.equal(blocked.blocked_reason, "RECEIPT_ATTEMPT_MISMATCH");
+  assert.deepEqual(blocked.completed_steps, []);
+  assert.deepEqual(blocked.current_attempt, started.attempt);
+  assert.equal(blocked.current_step, 1);
+});
+
+test("reconcile exact crash-gap recovery releases an owner at the lease boundary", async () => {
+  const root = await makeWorkspace();
+  const started = await initAndBegin(root, { initNow: baseTime, beginNow: baseTime });
+  await writeReceiptExclusive(root, {
+    schema_version: 1,
+    workflow_id: started.state.workflow_id,
+    step: 1,
+    attempt_id: started.attempt.id,
+    provenance: "codex-verified",
+    completed_at: plus(1),
+    summary: "exact persisted attempt",
+    evidence: evidenceFor(1)
+  });
+
+  const recovered = await reconcileWorkflow({ workspaceRoot: root, now: plus(OWNER_LEASE_MS) });
+  assert.deepEqual(recovered.completed_steps, [1]);
+  assert.equal(recovered.current_step, 2);
+  assert.equal(recovered.owner, null);
+});
+
+test("reconcile converts malformed and sensitive receipt evidence into safe blocked state", async () => {
+  for (const [rawEvidence, expectedCode] of [
+    [[{ acceptance_id: "state-transition", kind: "check", detail: 42, ok: true }], "EVIDENCE_INVALID"],
+    [[{
+      acceptance_id: "state-transition",
+      kind: "check",
+      detail: "Authorization: Bearer abcdefghijklmnop",
+      ok: true
+    }], "SENSITIVE_EVIDENCE"]
+  ]) {
+    const root = await makeWorkspace();
+    const started = await initAndBegin(root);
+    await mkdir(pathsFor(root).receiptsDir, { recursive: true });
+    await writeFile(receiptPath(root, 1), `${JSON.stringify({
+      schema_version: 1,
+      workflow_id: started.state.workflow_id,
+      step: 1,
+      attempt_id: started.attempt.id,
+      provenance: "codex-verified",
+      completed_at: plus(2),
+      summary: "malformed evidence",
+      evidence: rawEvidence
+    })}\n`);
+
+    const blocked = await reconcileWorkflow({ workspaceRoot: root, now: plus(3) });
+    assert.equal(blocked.status, "blocked");
+    assert.equal(blocked.blocked_reason, expectedCode);
+    assert.deepEqual(blocked.completed_steps, []);
+    assert.equal(blocked.current_step, 1);
+    assert.equal(blocked.continuation, null);
+  }
+});
+
+test("reconcile preserves a valid trusted prefix before later malformed evidence", async () => {
+  const root = await makeWorkspace();
+  const pluginRoot = await makePluginFixture();
+  const started = await initAndBegin(root);
+  const afterStepOne = await completeStep({
+    workspaceRoot: root,
+    pluginRoot,
+    step: 1,
+    attemptId: started.attempt.id,
+    summary: "valid native prefix",
+    evidence: evidenceFor(1),
+    now: plus(2)
+  });
+  await writeFile(receiptPath(root, 2), `${JSON.stringify({
+    schema_version: 1,
+    workflow_id: afterStepOne.workflow_id,
+    step: 2,
+    attempt_id: "malformed-step-two",
+    provenance: "codex-verified",
+    completed_at: plus(3),
+    summary: "bad later evidence",
+    evidence: [{ acceptance_id: null, kind: "check", detail: false, ok: true }]
+  })}\n`);
+
+  const blocked = await reconcileWorkflow({ workspaceRoot: root, now: plus(4) });
+  assert.equal(blocked.status, "blocked");
+  assert.equal(blocked.blocked_reason, "EVIDENCE_INVALID");
+  assert.deepEqual(blocked.completed_steps, [1]);
+  assert.equal(blocked.current_step, 2);
+});
+
+test("reconcile rejects imported receipt provenance in a native workflow", async () => {
+  const root = await makeWorkspace();
+  const started = await initAndBegin(root);
+  await writeReceiptExclusive(root, {
+    schema_version: 1,
+    workflow_id: started.state.workflow_id,
+    step: 1,
+    attempt_id: null,
+    provenance: "claude-progress-import",
+    source_sha256: "b".repeat(64),
+    completed_at: plus(2),
+    summary: "foreign imported history",
+    evidence: evidenceFor(1)
+  });
+
+  const blocked = await reconcileWorkflow({ workspaceRoot: root, now: plus(3) });
+  assert.equal(blocked.status, "blocked");
+  assert.equal(blocked.blocked_reason, "RECEIPT_PROVENANCE_MISMATCH");
+  assert.deepEqual(blocked.completed_steps, []);
+  assert.deepEqual(blocked.current_attempt, started.attempt);
+});
+
+test("reconcile enforces imported receipt source hash and declared prefix", async () => {
+  for (const mutation of ["source", "prefix"]) {
+    const root = await makeWorkspace();
+    const pluginRoot = await makePluginFixture();
+    await writeClaudeCompletedPrefix(root, 2);
+    await importClaudeProgress({
+      workspaceRoot: root,
+      pluginRoot,
+      now: () => new Date(baseTime),
+      idFactory: ids(`workflow-import-${mutation}`)
+    });
+    if (mutation === "source") {
+      const receipt = (await readReceipts(root))[1];
+      await writeFile(receiptPath(root, 2), `${JSON.stringify({
+        ...receipt,
+        source_sha256: "c".repeat(64)
+      }, null, 2)}\n`);
+    } else {
+      const state = await readState(root);
+      await writeStateAtomic(root, {
+        ...state,
+        imported_from: { ...state.imported_from, prefix_length: 1 }
+      });
+    }
+
+    const blocked = await reconcileWorkflow({ workspaceRoot: root, now: plus(1) });
+    assert.equal(blocked.status, "blocked");
+    assert.equal(
+      blocked.blocked_reason,
+      mutation === "source" ? "RECEIPT_IMPORT_SOURCE_MISMATCH" : "RECEIPT_IMPORT_PREFIX_MISMATCH"
+    );
+    assert.deepEqual(blocked.completed_steps, [1]);
+    assert.equal(blocked.imported_from.prefix_length, 1);
+  }
+});
+
+test("reconcile preserves a valid imported receipt prefix", async () => {
+  const root = await makeWorkspace();
+  const pluginRoot = await makePluginFixture();
+  await writeClaudeCompletedPrefix(root, 2);
+  await importClaudeProgress({
+    workspaceRoot: root,
+    pluginRoot,
+    now: () => new Date(baseTime),
+    idFactory: ids("workflow-valid-import")
+  });
+  const before = await readState(root);
+  const reconciled = await reconcileWorkflow({ workspaceRoot: root, now: plus(1) });
+  assert.deepEqual(reconciled, before);
+  assert.deepEqual(reconciled.completed_steps, [1, 2]);
+  assert.equal(reconciled.imported_from.prefix_length, 2);
 });
 
 test("malformed first receipt discards state-only completion while later corruption preserves valid prefix", async () => {
@@ -1199,6 +1502,31 @@ test("reset rejects a redirected backups directory before moving metadata outsid
   );
   assert.deepEqual(await readState(root), before);
   assert.equal(await readFile(join(external, "sentinel.txt"), "utf8"), "outside-before\n");
+  assert.deepEqual((await readdir(external)).sort(), ["sentinel.txt"]);
+});
+
+test("reset does not execute an unknown caller idFactory during archival", async () => {
+  const root = await makeWorkspace();
+  const external = await makeWorkspace();
+  await initWorkflow({
+    workspaceRoot: root,
+    topic: "reset callback isolation",
+    now: baseTime,
+    idFactory: ids("workflow-reset-callback", "nonce-reset-callback")
+  });
+  await writeFile(join(external, "sentinel.txt"), "outside-before\n");
+  let called = false;
+  const result = await resetWorkflow({
+    workspaceRoot: root,
+    now: plus(1),
+    idFactory: () => {
+      called = true;
+      replaceWithDirectoryLink(pathsFor(root).backupsDir, external);
+      return "hostile-reset-id";
+    }
+  });
+  assert.equal(called, false);
+  assert.equal(existsSync(join(result.backupPath, "state.json")), true);
   assert.deepEqual((await readdir(external)).sort(), ["sentinel.txt"]);
 });
 

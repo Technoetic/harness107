@@ -72,6 +72,14 @@ const IMPORT_ERROR_FIELDS = new Set([
   "occurred_at",
   "action"
 ]);
+const RECEIPT_VALIDATION_CODES = new Set([
+  "EVIDENCE_INVALID",
+  "RECEIPT_CONFLICT",
+  "RECEIPT_INVALID",
+  "RECEIPT_PARSE_ERROR",
+  "RECEIPT_PATH_MISMATCH",
+  "SENSITIVE_EVIDENCE"
+]);
 
 function fail(code, message, details = {}) {
   throw new HarnessError(code, message, details);
@@ -248,30 +256,150 @@ async function withMutation(workspaceRoot, rawNow, callback) {
     paths.codexDir,
     paths.lockPath
   ]);
-  return withRunLock(paths.lockPath, () => callback(paths, clock), { now: clock.now });
+  return withRunLock(paths.lockPath, async () => {
+    const guard = await captureMutationGuard(paths);
+    try {
+      const result = await callback(paths, clock, guard);
+      await assertMutationGuard(guard);
+      return result;
+    } catch (error) {
+      await assertMutationGuard(guard);
+      throw error;
+    }
+  }, { now: clock.now });
 }
 
-async function requireState(workspaceRoot) {
-  const state = await readState(workspaceRoot);
+function mutationControlPaths(paths) {
+  return [
+    join(paths.workspaceRoot, "step_archive"),
+    join(paths.workspaceRoot, "step_archive", "TOPIC"),
+    join(paths.workspaceRoot, ...TOPIC_RELATIVE_PATH.split("/")),
+    paths.codexDir,
+    paths.lockPath,
+    paths.statePath,
+    paths.receiptsDir,
+    paths.eventsPath,
+    paths.backupsDir,
+    paths.importsDir,
+    paths.importErrorPath
+  ];
+}
+
+async function captureMutationGuard(paths) {
+  const stablePaths = [
+    paths.workspaceRoot,
+    join(paths.workspaceRoot, "step_archive"),
+    paths.codexDir,
+    paths.lockPath
+  ];
+  await assertPhysicalComponents(paths.workspaceRoot, mutationControlPaths(paths));
+  const identities = new Map();
+  for (const path of stablePaths) {
+    const value = await lstat(path, { bigint: true });
+    identities.set(path, value);
+  }
+  return { paths, identities };
+}
+
+async function assertMutationGuard(guard, extraPaths = []) {
+  const { paths, identities } = guard;
+  await assertPhysicalComponents(paths.workspaceRoot, [
+    ...mutationControlPaths(paths),
+    ...extraPaths
+  ]);
+  for (const [path, expected] of identities) {
+    let current;
+    try {
+      current = await lstat(path, { bigint: true });
+    } catch (error) {
+      fail("WORKSPACE_PATH_UNSAFE", "workflow storage changed during a locked mutation", {
+        cause_code: typeof error?.code === "string" ? error.code : "INVALID"
+      });
+    }
+    if (current.isSymbolicLink() || !sameNode(expected, current)) {
+      fail("WORKSPACE_PATH_UNSAFE", "workflow storage changed during a locked mutation");
+    }
+  }
+}
+
+async function guardedOperation(guard, paths, operation) {
+  await assertMutationGuard(guard, paths);
+  try {
+    const result = await operation();
+    await assertMutationGuard(guard, paths);
+    return result;
+  } catch (error) {
+    await assertMutationGuard(guard, paths);
+    throw error;
+  }
+}
+
+async function guardedId(idFactory, label, guard) {
+  const value = nextId(idFactory, label);
+  await assertMutationGuard(guard);
+  return value;
+}
+
+function frozenEvidence(evidence) {
+  const sanitized = sanitizeEvidence(evidence);
+  for (const item of sanitized) Object.freeze(item);
+  return Object.freeze(sanitized);
+}
+
+async function requireState(workspaceRoot, guard) {
+  const state = await guardedOperation(
+    guard,
+    [pathsFor(workspaceRoot).statePath],
+    () => readState(workspaceRoot)
+  );
   if (state === null) fail("WORKFLOW_NOT_FOUND", "no active Codex workflow exists");
   return validateState(state);
 }
 
-async function appendEvents(workspaceRoot, events, clock) {
+async function guardedReadReceipts(workspaceRoot, guard) {
+  return guardedOperation(
+    guard,
+    [pathsFor(workspaceRoot).receiptsDir],
+    () => readReceipts(workspaceRoot)
+  );
+}
+
+async function guardedWriteState(workspaceRoot, state, guard) {
+  return guardedOperation(
+    guard,
+    [pathsFor(workspaceRoot).statePath],
+    () => writeStateAtomic(workspaceRoot, state)
+  );
+}
+
+async function guardedWriteReceipt(workspaceRoot, receipt, guard) {
+  return guardedOperation(
+    guard,
+    [pathsFor(workspaceRoot).receiptsDir, receiptPath(workspaceRoot, receipt.step)],
+    () => writeReceiptExclusive(workspaceRoot, receipt)
+  );
+}
+
+async function appendEvents(workspaceRoot, events, clock, guard) {
   for (const event of events) {
-    await appendEvent(workspaceRoot, { ...event, timestamp: clock.iso }, { now: clock.now });
+    await guardedOperation(
+      guard,
+      [pathsFor(workspaceRoot).eventsPath],
+      () => appendEvent(workspaceRoot, { ...event, timestamp: clock.iso }, { now: clock.now })
+    );
   }
 }
 
-async function appendRejectedContinuation(workspaceRoot, state, error, clock) {
+async function appendRejectedContinuation(workspaceRoot, state, error, clock, guard) {
   try {
     await appendEvents(workspaceRoot, [{
       kind: "continuation_replay_rejected",
       workflow_id: state.workflow_id,
       step: state.current_step,
       error_code: error.code
-    }], clock);
-  } catch {
+    }], clock, guard);
+  } catch (appendError) {
+    if (appendError?.code === "WORKSPACE_PATH_UNSAFE") throw appendError;
     // Rejection is authoritative even when its diagnostic event cannot be appended.
   }
 }
@@ -440,11 +568,20 @@ export async function initWorkflow({
 } = {}) {
   requireText(topic, "topic", "TOPIC_INVALID");
   requireFactory(idFactory);
-  return withMutation(workspaceRoot, now, async (paths, clock) => {
-    await assertNoInitConflict(paths.workspaceRoot, paths);
-    const workflowId = nextId(idFactory, "workflow ID");
-    const nonce = nextId(idFactory, "continuation nonce");
-    const createdTopic = await writeTopicExclusive(paths.workspaceRoot, topic);
+  return withMutation(workspaceRoot, now, async (paths, clock, guard) => {
+    await guardedOperation(
+      guard,
+      [join(paths.workspaceRoot, "step_archive"), paths.codexDir],
+      () => assertNoInitConflict(paths.workspaceRoot, paths)
+    );
+    const workflowId = await guardedId(idFactory, "workflow ID", guard);
+    const nonce = await guardedId(idFactory, "continuation nonce", guard);
+    const topicPath = join(paths.workspaceRoot, ...TOPIC_RELATIVE_PATH.split("/"));
+    const createdTopic = await guardedOperation(
+      guard,
+      [topicPath],
+      () => writeTopicExclusive(paths.workspaceRoot, topic)
+    );
     let state = createInitialState({
       workflowId,
       workspaceRoot: paths.workspaceRoot,
@@ -453,10 +590,21 @@ export async function initWorkflow({
     });
     state = issueContinuation(state, { now: clock.iso, nonce });
     try {
-      state = await writeStateAtomic(paths.workspaceRoot, state);
+      state = await guardedWriteState(paths.workspaceRoot, state, guard);
     } catch (error) {
-      if (await readState(paths.workspaceRoot).catch(() => null) === null) {
-        await unlink(createdTopic.path).catch(() => {});
+      if (await guardedOperation(
+        guard,
+        [paths.statePath],
+        () => readState(paths.workspaceRoot)
+      ).catch(readError => {
+        if (readError?.code === "WORKSPACE_PATH_UNSAFE") throw readError;
+        return null;
+      }) === null) {
+        await guardedOperation(guard, [createdTopic.path], async () => {
+          await unlink(createdTopic.path).catch(unlinkError => {
+            if (unlinkError?.code !== "ENOENT") throw unlinkError;
+          });
+        });
       }
       throw error;
     }
@@ -465,7 +613,7 @@ export async function initWorkflow({
       workflow_id: state.workflow_id,
       step: state.current_step,
       baseline_receipt_count: state.completed_steps.length
-    }], clock);
+    }], clock, guard);
     return state;
   });
 }
@@ -481,8 +629,8 @@ export async function beginStep({
   requireStep(step);
   const requestedSession = normalizeSessionId(sessionId);
   requireFactory(idFactory);
-  return withMutation(workspaceRoot, now, async (paths, clock) => {
-    let state = assertMonotonicClock(await requireState(paths.workspaceRoot), clock);
+  return withMutation(workspaceRoot, now, async (paths, clock, guard) => {
+    let state = assertMonotonicClock(await requireState(paths.workspaceRoot, guard), clock);
     if (state.status !== "running") fail("WORKFLOW_STATE", "begin requires a running workflow");
     if (state.current_step !== step) {
       fail("STEP_MISMATCH", "begin step must match the current step", {
@@ -500,20 +648,22 @@ export async function beginStep({
     const continuationGeneration = state.continuation;
     try {
       state = consumeContinuation(state, { marker });
+      await assertMutationGuard(guard);
     } catch (error) {
+      await assertMutationGuard(guard);
       if (typeof error?.code === "string" && error.code.startsWith("CONTINUATION_")) {
-        await appendRejectedContinuation(paths.workspaceRoot, state, error, clock);
+        await appendRejectedContinuation(paths.workspaceRoot, state, error, clock, guard);
       }
       throw error;
     }
     state = state.owner === null
       ? claimOwner(state, { sessionId: requestedSession, now: clock.iso })
       : assertOwner(state, { sessionId: requestedSession, now: clock.iso });
-    const rawAttemptId = nextId(idFactory, "attempt ID");
+    const rawAttemptId = await guardedId(idFactory, "attempt ID", guard);
     const attemptId = generationId("attempt", rawAttemptId, state, {
       continuation_generation: continuationGeneration
     });
-    const receipts = await readReceipts(paths.workspaceRoot);
+    const receipts = await guardedReadReceipts(paths.workspaceRoot, guard);
     if (
       state.current_attempt?.id === attemptId ||
       receipts.some(receipt => receipt.attempt_id === attemptId)
@@ -536,7 +686,7 @@ export async function beginStep({
       current_attempt: attempt,
       updated_at: clock.iso
     });
-    state = await writeStateAtomic(paths.workspaceRoot, state);
+    state = await guardedWriteState(paths.workspaceRoot, state, guard);
     await appendEvents(paths.workspaceRoot, [{
       kind: "continuation_consumed",
       workflow_id: state.workflow_id,
@@ -544,7 +694,7 @@ export async function beginStep({
       attempt_id: attempt.id,
       ...(requestedSession === null ? {} : { session_id: requestedSession }),
       baseline_receipt_count: state.completed_steps.length
-    }], clock);
+    }], clock, guard);
     return { state, attempt: state.current_attempt };
   });
 }
@@ -628,11 +778,13 @@ export async function completeStep({
   requireStep(step);
   requireText(attemptId, "attemptId", "ATTEMPT_INVALID");
   requireText(summary, "summary", "RECEIPT_INVALID");
-  return withMutation(workspaceRoot, now, async (paths, clock) => {
+  return withMutation(workspaceRoot, now, async (paths, clock, guard) => {
     await validatePluginRoot(pluginRoot);
-    const sanitizedEvidence = sanitizeEvidence(evidence);
-    let state = assertMonotonicClock(await requireState(paths.workspaceRoot), clock);
-    const receipts = await readReceipts(paths.workspaceRoot);
+    await assertMutationGuard(guard);
+    const sanitizedEvidence = frozenEvidence(evidence);
+    await assertMutationGuard(guard);
+    let state = assertMonotonicClock(await requireState(paths.workspaceRoot, guard), clock);
+    const receipts = await guardedReadReceipts(paths.workspaceRoot, guard);
     const existing = receipts.find(receipt => receipt.step === step);
     const semanticReceipt = receiptForCompletion(state, {
       step,
@@ -669,7 +821,7 @@ export async function completeStep({
       receipt = existing;
     } else {
       state = renewAttemptOwner(state, attempt, clock);
-      receipt = await writeReceiptExclusive(paths.workspaceRoot, semanticReceipt);
+      receipt = await guardedWriteReceipt(paths.workspaceRoot, semanticReceipt, guard);
     }
 
     const completedSteps = [...state.completed_steps, step];
@@ -687,7 +839,7 @@ export async function completeStep({
       completed_at: completed ? receipt.completed_at : null
     });
     if (!completed) state = issueContinuation(state, { now: clock.iso });
-    state = await writeStateAtomic(paths.workspaceRoot, state);
+    state = await guardedWriteState(paths.workspaceRoot, state, guard);
     const events = [{
       kind: "step_completed",
       workflow_id: state.workflow_id,
@@ -703,7 +855,7 @@ export async function completeStep({
         baseline_receipt_count: state.completed_steps.length
       });
     }
-    await appendEvents(paths.workspaceRoot, events, clock);
+    await appendEvents(paths.workspaceRoot, events, clock, guard);
     return state;
   });
 }
@@ -719,9 +871,10 @@ export async function failStep({
   requireStep(step);
   requireText(attemptId, "attemptId", "ATTEMPT_INVALID");
   requireText(reason, "reason", "FAILURE_INVALID");
-  return withMutation(workspaceRoot, now, async (paths, clock) => {
-    sanitizeEvidence(evidence);
-    let state = assertMonotonicClock(await requireState(paths.workspaceRoot), clock);
+  return withMutation(workspaceRoot, now, async (paths, clock, guard) => {
+    frozenEvidence(evidence);
+    await assertMutationGuard(guard);
+    let state = assertMonotonicClock(await requireState(paths.workspaceRoot, guard), clock);
     if (state.status !== "running") fail("WORKFLOW_STATE", "fail requires a running workflow");
     const attempt = assertAttempt(state, step, attemptId);
     if (attempt.failure_recorded) {
@@ -740,7 +893,7 @@ export async function failStep({
       updated_at: clock.iso
     });
     if (!blocked) state = issueContinuation(state, { now: clock.iso });
-    state = await writeStateAtomic(paths.workspaceRoot, state);
+    state = await guardedWriteState(paths.workspaceRoot, state, guard);
     const events = [{
       kind: "step_failed",
       workflow_id: state.workflow_id,
@@ -766,7 +919,7 @@ export async function failStep({
         baseline_receipt_count: state.completed_steps.length
       });
     }
-    await appendEvents(paths.workspaceRoot, events, clock);
+    await appendEvents(paths.workspaceRoot, events, clock, guard);
     return state;
   });
 }
@@ -777,8 +930,8 @@ export async function pauseWorkflow({
   now = () => new Date()
 } = {}) {
   requireText(reason, "reason", "PAUSE_INVALID");
-  return withMutation(workspaceRoot, now, async (paths, clock) => {
-    let state = assertMonotonicClock(await requireState(paths.workspaceRoot), clock);
+  return withMutation(workspaceRoot, now, async (paths, clock, guard) => {
+    let state = assertMonotonicClock(await requireState(paths.workspaceRoot, guard), clock);
     if (state.status === "paused") return state;
     if (state.status !== "running") fail("WORKFLOW_STATE", "only a running workflow can be paused");
     if (state.owner !== null) {
@@ -793,14 +946,14 @@ export async function pauseWorkflow({
       continuation: null,
       updated_at: clock.iso
     });
-    state = await writeStateAtomic(paths.workspaceRoot, state);
+    state = await guardedWriteState(paths.workspaceRoot, state, guard);
     await appendEvents(paths.workspaceRoot, [{
       kind: "workflow_paused",
       workflow_id: state.workflow_id,
       step: state.current_step,
       status: "paused",
       reason_code: "USER_REQUEST"
-    }], clock);
+    }], clock, guard);
     return state;
   });
 }
@@ -813,10 +966,10 @@ export async function resumeWorkflow({
 } = {}) {
   const requestedSession = normalizeSessionId(sessionId);
   requireFactory(idFactory);
-  return withMutation(workspaceRoot, now, async (paths, clock) => {
-    let state = assertMonotonicClock(await requireState(paths.workspaceRoot), clock);
+  return withMutation(workspaceRoot, now, async (paths, clock, guard) => {
+    let state = assertMonotonicClock(await requireState(paths.workspaceRoot, guard), clock);
     if (state.status === "completed") fail("WORKFLOW_STATE", "a completed workflow cannot resume");
-    const nonce = nextId(idFactory, "continuation nonce");
+    const nonce = await guardedId(idFactory, "continuation nonce", guard);
     state = validateState({
       ...state,
       status: "running",
@@ -830,7 +983,7 @@ export async function resumeWorkflow({
       now: clock.iso,
       nonce
     });
-    state = await writeStateAtomic(paths.workspaceRoot, state);
+    state = await guardedWriteState(paths.workspaceRoot, state, guard);
     await appendEvents(paths.workspaceRoot, [
       {
         kind: "workflow_resumed",
@@ -845,17 +998,72 @@ export async function resumeWorkflow({
         step: state.current_step,
         baseline_receipt_count: state.completed_steps.length
       }
-    ], clock);
+    ], clock, guard);
     return state;
   });
 }
 
-async function trustedReceiptPrefix(workspaceRoot, workflowId) {
+function receiptValidationError(error) {
+  return typeof error?.code === "string" && RECEIPT_VALIDATION_CODES.has(error.code);
+}
+
+function receiptAuthorityCode(state, receipt) {
+  const importedPrefix = state.imported_from?.prefix_length ?? 0;
+  if (state.imported_from === null) {
+    if (receipt.provenance !== "codex-verified") return "RECEIPT_PROVENANCE_MISMATCH";
+  } else if (receipt.step <= importedPrefix) {
+    if (receipt.provenance !== "claude-progress-import") {
+      return "RECEIPT_IMPORT_PREFIX_MISMATCH";
+    }
+    if (receipt.source_sha256 !== state.imported_from.source_sha256) {
+      return "RECEIPT_IMPORT_SOURCE_MISMATCH";
+    }
+  } else if (receipt.provenance !== "codex-verified") {
+    return "RECEIPT_IMPORT_PREFIX_MISMATCH";
+  }
+
+  const forwardStep = state.completed_steps.length + 1;
+  if (receipt.step >= forwardStep) {
+    if (
+      receipt.step !== forwardStep ||
+      receipt.provenance !== "codex-verified" ||
+      state.current_attempt === null ||
+      state.current_attempt.step !== forwardStep ||
+      state.current_attempt.failure_recorded ||
+      receipt.attempt_id !== state.current_attempt.id
+    ) {
+      return "RECEIPT_ATTEMPT_MISMATCH";
+    }
+  }
+  return null;
+}
+
+function authoritativeReceiptPrefix(state, receipts) {
+  const prefix = [];
+  for (const receipt of receipts) {
+    const expectedStep = prefix.length + 1;
+    if (receipt.step !== expectedStep || receipt.workflow_id !== state.workflow_id) break;
+    const code = receiptAuthorityCode(state, receipt);
+    if (code !== null) {
+      return {
+        prefix,
+        code,
+        preserveAttempt: receipt.step === state.current_step && state.current_attempt !== null
+      };
+    }
+    prefix.push(receipt);
+  }
+  return { prefix, code: null, preserveAttempt: false };
+}
+
+async function trustedReceiptPrefix(workspaceRoot, state, guard) {
   const { receiptsDir } = pathsFor(workspaceRoot);
-  const entries = await readdir(receiptsDir, { withFileTypes: true }).catch(error => {
-    if (error?.code === "ENOENT") return [];
-    throw error;
-  });
+  const entries = await guardedOperation(guard, [receiptsDir], () => (
+    readdir(receiptsDir, { withFileTypes: true }).catch(error => {
+      if (error?.code === "ENOENT") return [];
+      throw error;
+    })
+  ));
   const names = new Set(entries.filter(entry => entry.isFile()).map(entry => entry.name));
   const prefix = [];
   for (let step = 1; step <= STEP_COUNT; step += 1) {
@@ -863,17 +1071,24 @@ async function trustedReceiptPrefix(workspaceRoot, workflowId) {
     if (!names.has(name)) break;
     let receipt;
     try {
-      receipt = parseReceipt(await readFile(receiptPath(workspaceRoot, step), "utf8"));
-    } catch {
+      const path = receiptPath(workspaceRoot, step);
+      receipt = parseReceipt(await guardedOperation(
+        guard,
+        [receiptsDir, path],
+        () => readFile(path, "utf8")
+      ));
+    } catch (error) {
+      if (!receiptValidationError(error)) throw error;
       break;
     }
-    if (receipt.step !== step || receipt.workflow_id !== workflowId) break;
+    if (receipt.step !== step || receipt.workflow_id !== state.workflow_id) break;
+    if (receiptAuthorityCode(state, receipt) !== null) break;
     prefix.push(receipt);
   }
   return prefix;
 }
 
-function blockForReceiptError(state, code, prefixReceipts = []) {
+function blockForReceiptError(state, code, prefixReceipts = [], { preserveAttempt = false } = {}) {
   const trustworthyPrefix = prefixReceipts.slice(0, STEP_COUNT - 1);
   const completedSteps = trustworthyPrefix.map(receipt => receipt.step);
   let importedPrefix = 0;
@@ -884,12 +1099,15 @@ function blockForReceiptError(state, code, prefixReceipts = []) {
   const importedFrom = state.imported_from === null
     ? null
     : { ...state.imported_from, prefix_length: importedPrefix };
+  const canPreserveAttempt = preserveAttempt &&
+    state.current_attempt !== null &&
+    state.current_attempt.step === completedSteps.length + 1;
   return validateState({
     ...state,
     status: "blocked",
     current_step: completedSteps.length + 1,
     completed_steps: completedSteps,
-    current_attempt: null,
+    current_attempt: canPreserveAttempt ? state.current_attempt : null,
     continuation: null,
     blocked_reason: code,
     imported_from: importedFrom,
@@ -901,15 +1119,35 @@ export async function reconcileWorkflow({
   workspaceRoot,
   now = () => new Date()
 } = {}) {
-  return withMutation(workspaceRoot, now, async (paths, clock) => {
-    const before = assertMonotonicClock(await requireState(paths.workspaceRoot), clock);
+  return withMutation(workspaceRoot, now, async (paths, clock, guard) => {
+    const before = assertMonotonicClock(await requireState(paths.workspaceRoot, guard), clock);
     let result;
     try {
-      const receipts = assertReceiptClock(await readReceipts(paths.workspaceRoot), clock);
-      result = reconcileReceipts(before, receipts);
+      const receipts = assertReceiptClock(
+        await guardedReadReceipts(paths.workspaceRoot, guard),
+        clock
+      );
+      const authority = authoritativeReceiptPrefix(before, receipts);
+      if (authority.code !== null) {
+        result = {
+          state: blockForReceiptError(before, authority.code, authority.prefix, {
+            preserveAttempt: authority.preserveAttempt
+          }),
+          diagnostics: [{ code: authority.code }]
+        };
+      } else {
+        result = reconcileReceipts(before, receipts);
+        const recoveredForward = result.state.completed_steps.length > before.completed_steps.length;
+        if (recoveredForward && before.owner !== null && ownerLeaseExpired(before.owner, clock.iso)) {
+          result = {
+            ...result,
+            state: validateState({ ...result.state, owner: null })
+          };
+        }
+      }
     } catch (error) {
-      if (typeof error?.code !== "string" || !error.code.startsWith("RECEIPT_")) throw error;
-      const prefixReceipts = await trustedReceiptPrefix(paths.workspaceRoot, before.workflow_id);
+      if (!receiptValidationError(error)) throw error;
+      const prefixReceipts = await trustedReceiptPrefix(paths.workspaceRoot, before, guard);
       assertReceiptClock(prefixReceipts, clock);
       result = {
         state: blockForReceiptError(before, error.code, prefixReceipts),
@@ -920,7 +1158,7 @@ export async function reconcileWorkflow({
     const changed = !sameJson(state, before);
     if (changed) {
       state = validateState({ ...state, updated_at: clock.iso });
-      state = await writeStateAtomic(paths.workspaceRoot, state);
+      state = await guardedWriteState(paths.workspaceRoot, state, guard);
       if (state.status === "blocked") {
         await appendEvents(paths.workspaceRoot, [{
           kind: "workflow_blocked",
@@ -928,7 +1166,7 @@ export async function reconcileWorkflow({
           step: state.current_step,
           status: "blocked",
           reason_code: state.blocked_reason
-        }], clock);
+        }], clock, guard);
       }
     }
     return state;
@@ -1019,22 +1257,32 @@ export async function resetWorkflow({
   workspaceRoot,
   now = () => new Date()
 } = {}) {
-  return withMutation(workspaceRoot, now, async (paths, clock) => {
+  return withMutation(workspaceRoot, now, async (paths, clock, guard) => {
     const codexIdentity = await assertPhysicalDirectory(paths.workspaceRoot, paths.codexDir);
     if (codexIdentity === null) fail("WORKFLOW_NOT_FOUND", "no Codex workflow metadata exists to reset");
     let backupsIdentity = await assertPhysicalDirectory(paths.workspaceRoot, paths.backupsDir);
     if (backupsIdentity === null) {
-      backupsIdentity = await ensureDurableDirectory(paths.workspaceRoot, paths.backupsDir);
+      backupsIdentity = await guardedOperation(
+        guard,
+        [paths.backupsDir],
+        () => ensureDurableDirectory(paths.workspaceRoot, paths.backupsDir)
+      );
     }
-    const entries = await readdir(paths.codexDir).catch(error => {
-      if (error?.code === "ENOENT") return [];
-      throw error;
-    });
+    const entries = await guardedOperation(guard, [paths.codexDir], () => (
+      readdir(paths.codexDir).catch(error => {
+        if (error?.code === "ENOENT") return [];
+        throw error;
+      })
+    ));
     if (!entries.some(name => ACTIVE_METADATA.has(name))) {
       fail("WORKFLOW_NOT_FOUND", "no Codex workflow metadata exists to reset");
     }
     try {
-      const state = await readState(paths.workspaceRoot);
+      const state = await guardedOperation(
+        guard,
+        [paths.statePath],
+        () => readState(paths.workspaceRoot)
+      );
       if (state !== null) assertMonotonicClock(state, clock);
     } catch (error) {
       if (!new Set(["STATE_INVALID", "STATE_PARSE_ERROR"]).has(error?.code)) throw error;
@@ -1044,10 +1292,17 @@ export async function resetWorkflow({
       paths.backupsDir,
       ...entries.filter(name => ACTIVE_METADATA.has(name)).map(name => join(paths.codexDir, name))
     ]);
-    const backupPath = await archiveActiveState(paths.workspaceRoot, {
-      reason: "manual-reset",
-      now: clock.now
-    });
+    const archiveCandidates = [
+      paths.codexDir,
+      paths.backupsDir,
+      ...entries.filter(name => ACTIVE_METADATA.has(name)).map(name => join(paths.codexDir, name))
+    ];
+    const backupPath = await guardedOperation(guard, archiveCandidates, () => (
+      archiveActiveState(paths.workspaceRoot, {
+        reason: "manual-reset",
+        now: clock.now
+      })
+    ));
     const currentCodex = await assertPhysicalDirectory(paths.workspaceRoot, paths.codexDir);
     const currentBackups = await assertPhysicalDirectory(paths.workspaceRoot, paths.backupsDir);
     if (
