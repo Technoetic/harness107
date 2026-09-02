@@ -1,24 +1,18 @@
-import { readState, writeStateAtomic } from "../scripts/lib/state-store.mjs";
+import { readState } from "../scripts/lib/state-store.mjs";
 import { failStep, reconcileWorkflow } from "../scripts/lib/workflow.mjs";
 import {
   appendPreparedPinnedHookEvent,
   assertHookStorageGuard,
   captureHookStorageGuard,
   continuationMarker,
+  currentContinuationLedgerGeneration,
   guardedHookOperation,
   isDirectEntrypoint,
-  preflightPinnedHookEventTarget,
   preparePinnedHookEvent,
   readLifecycleEvents,
   runHookDirect,
-  stopTurnWasAccepted,
-  stopTurnWasRequested,
   withHookStorageLock
 } from "../scripts/lib/hook-io.mjs";
-
-function mutationTime(state) {
-  return new Date(Math.max(Date.now(), Date.parse(state.updated_at))).toISOString();
-}
 
 function safelyReleasable(error) {
   if (error?.code === "WORKSPACE_PATH_UNSAFE" || error?.code === "HOOK_WORKSPACE_UNSAFE") return false;
@@ -38,26 +32,12 @@ async function readUsableState(workspaceRoot) {
   }
 }
 
-function currentGenerationRequest(lifecycleEvents, state) {
-  if (state.last_stop_turn_id === null || state.continuation === null) return null;
-  return lifecycleEvents.findLast(item =>
-    item.kind === "stop_continuation_requested" &&
-    item.workflow_id === state.workflow_id &&
-    item.turn_id === state.last_stop_turn_id &&
-    item.step === state.current_step &&
-    item.baseline_receipt_count === state.completed_steps.length
-  ) ?? null;
-}
-
-function durableProgressSinceRequest(lifecycleEvents, state) {
-  const latest = lifecycleEvents.findLast(item =>
+function durableProgressSinceRequest(lifecycleEvents, state, generation) {
+  const latestRequestIndex = lifecycleEvents.findLastIndex(item =>
     item.kind === "stop_continuation_requested" &&
     item.workflow_id === state.workflow_id
   );
-  return latest !== undefined && (
-    state.completed_steps.length > latest.baseline_receipt_count ||
-    state.current_step !== latest.step
-  );
+  return latestRequestIndex >= 0 && generation.boundaryIndex > latestRequestIndex;
 }
 
 async function claimContinuation(workspaceRoot, turnId, eventNow) {
@@ -85,22 +65,16 @@ async function claimContinuation(workspaceRoot, turnId, eventNow) {
       if (!safelyReleasable(error)) throw error;
       return null;
     }
-    if (stopTurnWasRequested(lifecycleEvents, state.workflow_id, turnId)) return null;
-    const priorRequestPending = state.last_stop_turn_id !== null &&
-      stopTurnWasRequested(lifecycleEvents, state.workflow_id, state.last_stop_turn_id) &&
-      !stopTurnWasAccepted(lifecycleEvents, state);
+    const generation = currentContinuationLedgerGeneration(lifecycleEvents, state);
     if (
       state.status !== "running" ||
       state.current_step === null ||
       state.continuation === null ||
-      priorRequestPending ||
-      state.continuation.workflow_id !== state.workflow_id ||
-      state.continuation.step !== state.current_step ||
-      state.continuation.baseline_receipt_count !== state.completed_steps.length
+      generation === null ||
+      generation.request !== null
     ) {
       return null;
     }
-    const updatedAt = mutationTime(state);
     const preparedRequest = preparePinnedHookEvent({
       kind: "stop_continuation_requested",
       workflow_id: state.workflow_id,
@@ -108,17 +82,6 @@ async function claimContinuation(workspaceRoot, turnId, eventNow) {
       turn_id: turnId,
       baseline_receipt_count: state.completed_steps.length
     }, { now: eventNow });
-    await preflightPinnedHookEventTarget(guard, preparedRequest);
-    state = await guardedHookOperation(
-      guard,
-      [guard.paths.statePath],
-      () => writeStateAtomic(workspaceRoot, {
-        ...state,
-        last_stop_turn_id: turnId,
-        updated_at: updatedAt
-      }),
-      { allowReplacement: true }
-    );
     await guardedHookOperation(
       guard,
       [guard.paths.eventsPath],
@@ -163,9 +126,10 @@ export async function handleStop(event, { workspaceRoot, eventNow }) {
     if (!safelyReleasable(error)) throw error;
     return {};
   }
-  const generationRequest = currentGenerationRequest(lifecycleEvents, state);
-  const generationAccepted = generationRequest !== null &&
-    stopTurnWasAccepted(lifecycleEvents, state, generationRequest.turn_id);
+  const generation = currentContinuationLedgerGeneration(lifecycleEvents, state);
+  if (generation === null) return {};
+  const generationRequest = generation.request;
+  const generationAccepted = generation.accepted;
   if (generationRequest !== null && !generationAccepted) {
     if (observedEvent.stopHookActive) return {};
     return {
@@ -179,11 +143,11 @@ export async function handleStop(event, { workspaceRoot, eventNow }) {
   ) {
     return {};
   }
-  if (stopTurnWasRequested(lifecycleEvents, state.workflow_id, observedEvent.turnId)) return {};
+  if (generationRequest?.turn_id === observedEvent.turnId) return {};
 
   if (
     observedEvent.stopHookActive &&
-    !durableProgressSinceRequest(lifecycleEvents, state) &&
+    !durableProgressSinceRequest(lifecycleEvents, state, generation) &&
     (state.current_attempt === null || state.current_attempt.failure_recorded)
   ) {
     return {};

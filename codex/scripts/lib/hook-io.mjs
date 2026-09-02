@@ -524,6 +524,88 @@ export async function readLifecycleEvents(workspaceRoot) {
   }
 }
 
+function matchesCurrentContinuation(event, state) {
+  return event.workflow_id === state.workflow_id &&
+    event.step === state.current_step &&
+    event.baseline_receipt_count === state.completed_steps.length;
+}
+
+export function currentContinuationLedgerGeneration(events, state) {
+  if (!Array.isArray(events) || state === null || typeof state !== "object") return null;
+  let latestWorkflowBoundary = -1;
+  let matchingBoundary = -1;
+  if (state.continuation !== null && state.continuation !== undefined) {
+    if (
+      state.continuation.workflow_id !== state.workflow_id ||
+      state.continuation.step !== state.current_step ||
+      state.continuation.baseline_receipt_count !== state.completed_steps.length
+    ) {
+      return null;
+    }
+    for (let index = 0; index < events.length; index += 1) {
+      const event = events[index];
+      if (event.kind !== "continuation_issued" || event.workflow_id !== state.workflow_id) continue;
+      latestWorkflowBoundary = index;
+      if (
+        matchesCurrentContinuation(event, state) &&
+        event.timestamp === state.continuation.issued_at
+      ) {
+        matchingBoundary = index;
+      }
+    }
+  } else if (state.current_attempt !== null && state.current_attempt !== undefined) {
+    const consumed = [];
+    for (let index = 0; index < events.length; index += 1) {
+      const event = events[index];
+      if (
+        event.kind === "continuation_consumed" &&
+        event.workflow_id === state.workflow_id &&
+        event.step === state.current_step &&
+        event.baseline_receipt_count === state.completed_steps.length &&
+        event.attempt_id === state.current_attempt.id
+      ) {
+        consumed.push(index);
+      }
+    }
+    if (consumed.length !== 1) return null;
+    const consumedIndex = consumed[0];
+    for (let index = 0; index < events.length; index += 1) {
+      const event = events[index];
+      if (event.kind !== "continuation_issued" || event.workflow_id !== state.workflow_id) continue;
+      latestWorkflowBoundary = index;
+      if (index < consumedIndex && matchesCurrentContinuation(event, state)) {
+        matchingBoundary = index;
+      }
+    }
+  } else {
+    return null;
+  }
+  if (matchingBoundary < 0 || matchingBoundary !== latestWorkflowBoundary) return null;
+
+  const requests = [];
+  for (let index = matchingBoundary + 1; index < events.length; index += 1) {
+    const event = events[index];
+    if (event.kind !== "stop_continuation_requested" || event.workflow_id !== state.workflow_id) {
+      continue;
+    }
+    if (!matchesCurrentContinuation(event, state) || typeof event.turn_id !== "string") return null;
+    requests.push({ event, index });
+  }
+  if (requests.length > 1) return null;
+  const requestRecord = requests[0] ?? null;
+  const accepted = requestRecord !== null && events.slice(requestRecord.index + 1).some(event =>
+    event.kind === "continuation_prompt_accepted" &&
+    matchesCurrentContinuation(event, state) &&
+    event.turn_id === requestRecord.event.turn_id
+  );
+  return Object.freeze({
+    boundaryIndex: matchingBoundary,
+    request: requestRecord?.event ?? null,
+    requestIndex: requestRecord?.index ?? null,
+    accepted
+  });
+}
+
 export function stopTurnWasRequested(events, workflowId, turnId) {
   return events.some(event =>
     event.kind === "stop_continuation_requested" &&

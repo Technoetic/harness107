@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { linkSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { link, lstat, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -70,6 +72,91 @@ async function receiptSnapshot(root) {
     snapshot[name] = (await readFile(join(paths.receiptsDir, name))).toString("base64");
   }
   return snapshot;
+}
+
+async function appendRawLifecycleEvent(root, event) {
+  await writeFile(pathsFor(root).eventsPath, `${JSON.stringify(event)}\n`, { flag: "a" });
+}
+
+async function startStateReplacementEventSwapper(paths, stateBefore, replacement) {
+  const backupPath = `${paths.eventsPath}.post-state-original`;
+  const source = String.raw`
+    const { watch } = require("node:fs");
+    const { readFile, rename, writeFile } = require("node:fs/promises");
+    const { basename, dirname } = require("node:path");
+    const [statePath, eventsPath, backupPath, originalState, replacement] = process.argv.slice(1);
+    let finished = false;
+    let reading = false;
+    const watcher = watch(dirname(statePath), async (_eventType, filename) => {
+      if (finished || reading || String(filename) !== basename(statePath)) return;
+      reading = true;
+      try {
+        const current = await readFile(statePath);
+        if (current.toString("base64") === originalState) return;
+        finished = true;
+        watcher.close();
+        await rename(eventsPath, backupPath);
+        await writeFile(eventsPath, Buffer.from(replacement, "base64"));
+        process.send?.({ type: "swapped" });
+      } catch (error) {
+        process.send?.({ type: "error", code: error?.code ?? "ERROR" });
+      } finally {
+        reading = false;
+      }
+    });
+    process.on("message", message => {
+      if (message?.type !== "stop") return;
+      finished = true;
+      watcher.close();
+      process.exit(0);
+    });
+    process.send?.({ type: "ready" });
+  `;
+  const child = spawn(process.execPath, [
+    "-e",
+    source,
+    paths.statePath,
+    paths.eventsPath,
+    backupPath,
+    stateBefore.toString("base64"),
+    replacement.toString("base64")
+  ], {
+    stdio: ["ignore", "ignore", "pipe", "ipc"],
+    windowsHide: true
+  });
+  let resolveReady;
+  let rejectReady;
+  const ready = new Promise((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  let resolveSwap;
+  const swap = new Promise(resolve => {
+    resolveSwap = resolve;
+  });
+  child.on("message", message => {
+    if (message?.type === "ready") resolveReady();
+    if (message?.type === "swapped" || message?.type === "error") resolveSwap(message);
+  });
+  child.once("error", error => {
+    rejectReady(error);
+    resolveSwap({ type: "error", code: error?.code ?? "ERROR" });
+  });
+  child.once("exit", code => {
+    if (code !== 0) rejectReady(new Error(`event swapper exited with ${code}`));
+    resolveSwap(null);
+  });
+  await ready;
+  return {
+    backupPath,
+    swap,
+    async stop() {
+      if (child.exitCode !== null) return;
+      const exited = once(child, "exit");
+      child.send({ type: "stop" });
+      await exited;
+    }
+  };
 }
 
 function markerFor(continuation) {
@@ -430,7 +517,7 @@ test("Stop emits exactly one marked follow-up for a progressing workflow", async
     reason: markerFor(progressed.continuation)
   });
   assert.equal((result.output.reason.match(/\[HARNESS50_CONTINUE /g) ?? []).length, 1);
-  assert.equal((await readState(root)).last_stop_turn_id, "turn-1");
+  assert.equal((await readState(root)).last_stop_turn_id, null);
 });
 
 test("stop_hook_active releases bounded recursive entries until durable work advances", async () => {
@@ -513,14 +600,14 @@ test("a lost Stop output is re-delivered idempotently until its marker is accept
   const requestsAfterLoss = (await events(root)).filter(event =>
     event.kind === "stop_continuation_requested"
   );
-  assert.equal(stateAfterLoss.last_stop_turn_id, firstEvent.turn_id);
+  assert.equal(stateAfterLoss.last_stop_turn_id, null);
   assert.equal(requestsAfterLoss.length, 1);
 
   const sameTurn = await runHook("stop", firstEvent);
   assert.deepEqual(sameTurn.output, { decision: "block", reason: expectedMarker });
   const newTurn = await runHook("stop", { ...firstEvent, turn_id: "turn-lost-output-retry" });
   assert.deepEqual(newTurn.output, { decision: "block", reason: expectedMarker });
-  assert.equal((await readState(root)).last_stop_turn_id, firstEvent.turn_id);
+  assert.equal((await readState(root)).last_stop_turn_id, null);
   assert.equal((await events(root)).filter(event =>
     event.kind === "stop_continuation_requested"
   ).length, 1);
@@ -536,6 +623,216 @@ test("a lost Stop output is re-delivered idempotently until its marker is accept
     turn_id: "turn-after-acceptance",
     stop_hook_active: true
   }));
+  assert.equal((await events(root)).filter(event =>
+    event.kind === "stop_continuation_requested"
+  ).length, 1);
+});
+
+test("event-first Stop requests replay and accept with null or stale legacy state turn IDs", async t => {
+  for (const legacyTurnId of [null, "legacy-stale-turn"]) {
+    await t.test(String(legacyTurnId), async () => {
+      const root = await makeWorkspace();
+      const initialized = await init(root, `event-first-${legacyTurnId ?? "null"}`);
+      const first = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: "turn-event-first-request",
+        stop_hook_active: false,
+        last_assistant_message: null
+      });
+      assert.deepEqual(first.output, {
+        decision: "block",
+        reason: markerFor(initialized.continuation)
+      });
+      const state = await readState(root);
+      await writeStateAtomic(root, { ...state, last_stop_turn_id: legacyTurnId });
+      const stateBeforeRetry = await readFile(pathsFor(root).statePath);
+
+      const retry = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: "turn-event-first-retry",
+        stop_hook_active: false,
+        last_assistant_message: null
+      });
+      assert.deepEqual(retry.output, first.output);
+      assert.ok(Buffer.from(await readFile(pathsFor(root).statePath)).equals(stateBeforeRetry));
+      const requests = (await events(root)).filter(event =>
+        event.kind === "stop_continuation_requested"
+      );
+      assert.equal(requests.length, 1);
+
+      assertEmptySuccess(await runHook("user-prompt-submit", {
+        hook_event_name: "UserPromptSubmit",
+        cwd: root,
+        turn_id: "turn-event-first-accept",
+        prompt: first.output.reason
+      }));
+      const acceptedState = await readState(root);
+      assert.equal(acceptedState.status, "running");
+      assert.equal(acceptedState.last_stop_turn_id, legacyTurnId);
+      const acceptances = (await events(root)).filter(event =>
+        event.kind === "continuation_prompt_accepted"
+      );
+      assert.equal(acceptances.length, 1);
+      assert.equal(acceptances[0].turn_id, "turn-event-first-request");
+    });
+  }
+});
+
+test("the latest equal-shape continuation boundary excludes stale requests and acceptances", async t => {
+  for (const acceptOldRequest of [false, true]) {
+    await t.test(acceptOldRequest ? "accepted stale request" : "pending stale request", async () => {
+      const root = await makeWorkspace();
+      const initialized = await init(root, `same-shape-${acceptOldRequest}`);
+      const oldStop = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: "turn-old-generation",
+        stop_hook_active: false,
+        last_assistant_message: null
+      });
+      if (acceptOldRequest) {
+        assertEmptySuccess(await runHook("user-prompt-submit", {
+          hook_event_name: "UserPromptSubmit",
+          cwd: root,
+          turn_id: "turn-old-generation-accept",
+          prompt: oldStop.output.reason
+        }));
+      }
+
+      const prior = await readState(root);
+      const continuation = {
+        ...prior.continuation,
+        nonce: `new-generation-${acceptOldRequest}`
+      };
+      await writeStateAtomic(root, {
+        ...prior,
+        continuation,
+        last_stop_turn_id: "turn-old-generation"
+      });
+      await appendRawLifecycleEvent(root, {
+        kind: "continuation_issued",
+        timestamp: continuation.issued_at,
+        workflow_id: prior.workflow_id,
+        step: prior.current_step,
+        baseline_receipt_count: prior.completed_steps.length
+      });
+      const stateBeforeStop = await readFile(pathsFor(root).statePath);
+
+      const current = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: "turn-new-generation",
+        stop_hook_active: true,
+        last_assistant_message: null
+      });
+      assert.deepEqual(current.output, {
+        decision: "block",
+        reason: markerFor(continuation)
+      });
+      assert.ok(Buffer.from(await readFile(pathsFor(root).statePath)).equals(stateBeforeStop));
+      const requests = (await events(root)).filter(event =>
+        event.kind === "stop_continuation_requested"
+      );
+      assert.equal(requests.length, 2);
+      assert.equal(requests.at(-1).turn_id, "turn-new-generation");
+
+      assertEmptySuccess(await runHook("user-prompt-submit", {
+        hook_event_name: "UserPromptSubmit",
+        cwd: root,
+        turn_id: "turn-new-generation-accept",
+        prompt: acceptOldRequest ? current.output.reason : oldStop.output.reason
+      }));
+      const acceptances = (await events(root)).filter(event =>
+        event.kind === "continuation_prompt_accepted"
+      );
+      if (acceptOldRequest) {
+        assert.equal(acceptances.at(-1).turn_id, "turn-new-generation");
+        assert.equal((await readState(root)).status, "running");
+      } else {
+        assert.equal(acceptances.length, 0);
+        assert.equal((await readState(root)).status, "paused");
+      }
+      assert.equal((await readState(root)).last_stop_turn_id, "turn-old-generation");
+      assert.notEqual(oldStop.output.reason, current.output.reason);
+      assert.equal(initialized.continuation.issued_at, continuation.issued_at);
+    });
+  }
+});
+
+test("Stop fails safe when the current continuation boundary is absent or request identity is ambiguous", async t => {
+  for (const mode of ["absent-boundary", "ambiguous-request"]) {
+    await t.test(mode, async () => {
+      const root = await makeWorkspace();
+      const initialized = await init(root, `ledger-${mode}`);
+      if (mode === "absent-boundary") {
+        await writeFile(pathsFor(root).eventsPath, "");
+      } else {
+        const request = {
+          kind: "stop_continuation_requested",
+          workflow_id: initialized.workflow_id,
+          step: initialized.current_step,
+          baseline_receipt_count: initialized.completed_steps.length
+        };
+        await appendRawLifecycleEvent(root, {
+          ...request,
+          timestamp: "2026-09-02T00:00:01.000Z",
+          turn_id: "turn-ambiguous-one"
+        });
+        await appendRawLifecycleEvent(root, {
+          ...request,
+          timestamp: "2026-09-02T00:00:02.000Z",
+          turn_id: "turn-ambiguous-two"
+        });
+      }
+      const stateBefore = await readFile(pathsFor(root).statePath);
+      const eventsBefore = await readFile(pathsFor(root).eventsPath);
+      assertEmptySuccess(await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: "turn-ledger-invalid",
+        stop_hook_active: false,
+        last_assistant_message: null
+      }));
+      assert.ok(Buffer.from(await readFile(pathsFor(root).statePath)).equals(stateBefore));
+      assert.ok(Buffer.from(await readFile(pathsFor(root).eventsPath)).equals(eventsBefore));
+    });
+  }
+});
+
+test("an independent post-state watcher cannot split Stop continuation publication", async () => {
+  const root = await makeWorkspace();
+  const initialized = await init(root, "post-state-watcher");
+  const paths = pathsFor(root);
+  const stateBefore = await readFile(paths.statePath);
+  const eventsBefore = await readFile(paths.eventsPath);
+  const receiptsBefore = await receiptSnapshot(root);
+  const replacement = Buffer.from("post-state replacement\n");
+  const swapper = await startStateReplacementEventSwapper(paths, stateBefore, replacement);
+  let result;
+  try {
+    result = await handleStop({
+      turn_id: "turn-post-state-watcher",
+      stop_hook_active: false
+    }, { workspaceRoot: root });
+  } catch (error) {
+    result = { error_code: error?.code ?? "ERROR" };
+  }
+  const stateAfter = await readFile(paths.statePath);
+  const swap = stateAfter.equals(stateBefore) ? null : await swapper.swap;
+  await swapper.stop();
+
+  assert.equal(swap, null);
+  assert.ok(Buffer.from(stateAfter).equals(stateBefore));
+  assert.deepEqual(result, {
+    decision: "block",
+    reason: markerFor(initialized.continuation)
+  });
+  assert.deepEqual(await receiptSnapshot(root), receiptsBefore);
+  await assert.rejects(readFile(swapper.backupPath), error => error?.code === "ENOENT");
+  const currentEvents = await readFile(paths.eventsPath);
+  assert.ok(!Buffer.from(currentEvents).equals(eventsBefore));
   assert.equal((await events(root)).filter(event =>
     event.kind === "stop_continuation_requested"
   ).length, 1);

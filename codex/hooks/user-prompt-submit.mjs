@@ -4,12 +4,11 @@ import {
   assertHookStorageGuard,
   captureHookStorageGuard,
   continuationMarker,
+  currentContinuationLedgerGeneration,
   guardedHookOperation,
   isDirectEntrypoint,
   readLifecycleEvents,
   runHookDirect,
-  stopTurnWasAccepted,
-  stopTurnWasRequested,
   withHookStorageLock
 } from "../scripts/lib/hook-io.mjs";
 
@@ -19,12 +18,15 @@ function mutationTime(state) {
   return new Date(Math.max(Date.now(), Date.parse(state.updated_at))).toISOString();
 }
 
-function currentMarkerPrompt(state, prompt, lifecycleEvents) {
-  return state.continuation !== null &&
-    state.last_stop_turn_id !== null &&
-    prompt === continuationMarker(state.continuation) &&
-    stopTurnWasRequested(lifecycleEvents, state.workflow_id, state.last_stop_turn_id) &&
-    !stopTurnWasAccepted(lifecycleEvents, state);
+function currentMarkerRequest(state, prompt, lifecycleEvents) {
+  if (state.continuation === null) return null;
+  const generation = currentContinuationLedgerGeneration(lifecycleEvents, state);
+  return generation !== null &&
+    generation.request !== null &&
+    !generation.accepted &&
+    prompt === continuationMarker(state.continuation)
+    ? generation.request
+    : null;
 }
 
 export async function handleUserPromptSubmit(event, { workspaceRoot, eventNow }) {
@@ -62,9 +64,9 @@ export async function handleUserPromptSubmit(event, { workspaceRoot, eventNow })
         if (error?.code === "HOOK_WORKSPACE_UNSAFE") throw error;
         lifecycleEvents = [];
       }
-      const acceptedMarker = currentMarkerPrompt(state, prompt, lifecycleEvents);
+      const acceptedRequest = currentMarkerRequest(state, prompt, lifecycleEvents);
       const updatedAt = mutationTime(state);
-      if (acceptedMarker) {
+      if (acceptedRequest !== null) {
         try {
           await guardedHookOperation(
             guard,
@@ -73,7 +75,7 @@ export async function handleUserPromptSubmit(event, { workspaceRoot, eventNow })
               kind: "continuation_prompt_accepted",
               workflow_id: state.workflow_id,
               step: state.current_step,
-              turn_id: state.last_stop_turn_id,
+              turn_id: acceptedRequest.turn_id,
               baseline_receipt_count: state.completed_steps.length
             }, { now: eventNow })
           );
