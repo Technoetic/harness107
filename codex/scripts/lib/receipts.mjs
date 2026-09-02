@@ -1,5 +1,6 @@
-import { open, mkdir, readFile, readdir, unlink } from "node:fs/promises";
-import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { link, open, mkdir, readFile, readdir, unlink } from "node:fs/promises";
+import { basename, join } from "node:path";
 
 import { HarnessError } from "./errors.mjs";
 import { pathsFor } from "./paths.mjs";
@@ -51,8 +52,11 @@ const SENSITIVE_PATTERNS = [
   /\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}\b/,
   /\bAKIA[0-9A-Z]{16}\b/,
   /\b(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|password|passwd|secret[_-]?key)\b\s*[:=]\s*\S+/i,
-  /(?:^|[\r\n])\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*\S+/
+  /(?:^|[\s;&|])(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=\s*(?:"[^"]*"|'[^']*'|\S+)/i,
+  /(?:^|[\s;&|])\$env:[A-Za-z_][A-Za-z0-9_]*\s*=\s*(?:"[^"]*"|'[^']*'|\S+)/i,
+  /(?:^|[\s;&|])set\s+(?:"[A-Za-z_][A-Za-z0-9_]*\s*=|[A-Za-z_][A-Za-z0-9_]*\s*=)\S*/i
 ];
+const SENSITIVE_FIELD_NAME = /(?:password|passwd|api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|secret[_-]?key|private[_-]?key)/i;
 
 function isPlainObject(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
@@ -83,7 +87,7 @@ function requireTimestamp(value, field) {
 
 function requireExactFields(value, allowed, required, label, invalid) {
   for (const field of Object.keys(value)) {
-    if (!allowed.has(field)) invalid(`${label} contains an unknown field: ${field}`, { field: `${label}.${field}` });
+    if (!allowed.has(field)) invalid(`${label} contains an unknown field`, { field: label });
   }
   for (const field of required) {
     if (!(field in value)) invalid(`${label} is missing required field: ${field}`, { field: `${label}.${field}` });
@@ -94,9 +98,27 @@ function containsSensitiveMaterial(value) {
   return SENSITIVE_PATTERNS.some(pattern => pattern.test(value));
 }
 
+function assertNoSensitiveData(value, seen = new WeakSet()) {
+  if (typeof value === "string") {
+    if (containsSensitiveMaterial(value)) {
+      throw new HarnessError("SENSITIVE_EVIDENCE", "receipt contains sensitive material");
+    }
+    return;
+  }
+  if (value === null || typeof value !== "object" || seen.has(value)) return;
+  seen.add(value);
+  for (const [field, nested] of Object.entries(value)) {
+    if (SENSITIVE_FIELD_NAME.test(field) || containsSensitiveMaterial(field)) {
+      throw new HarnessError("SENSITIVE_EVIDENCE", "receipt contains sensitive material");
+    }
+    assertNoSensitiveData(nested, seen);
+  }
+}
+
 function validateEvidenceItem(raw, index) {
   const label = `evidence[${index}]`;
   if (!isPlainObject(raw)) invalidEvidence(`${label} must be an object`, { field: label });
+  assertNoSensitiveData(raw);
   requireExactFields(raw, EVIDENCE_FIELDS, REQUIRED_EVIDENCE_FIELDS, label, invalidEvidence);
 
   if (raw.acceptance_id !== null) {
@@ -120,14 +142,6 @@ function validateEvidenceItem(raw, index) {
     invalidEvidence(`${label}.exit_code must be an integer`, { field: `${label}.exit_code` });
   }
 
-  for (const [field, value] of Object.entries(raw)) {
-    if (typeof value === "string" && containsSensitiveMaterial(value)) {
-      throw new HarnessError("SENSITIVE_EVIDENCE", "receipt evidence contains sensitive material", {
-        field: `${label}.${field}`
-      });
-    }
-  }
-
   const item = {};
   for (const field of EVIDENCE_FIELDS) {
     if (field in raw) item[field] = raw[field];
@@ -137,6 +151,7 @@ function validateEvidenceItem(raw, index) {
 
 export function sanitizeEvidence(evidence) {
   if (!Array.isArray(evidence)) invalidEvidence("evidence must be an array", { field: "evidence" });
+  assertNoSensitiveData(evidence);
   return evidence.map(validateEvidenceItem);
 }
 
@@ -145,13 +160,12 @@ export function parseReceipt(raw) {
   if (typeof raw === "string") {
     try {
       value = JSON.parse(raw);
-    } catch (error) {
-      throw new HarnessError("RECEIPT_PARSE_ERROR", "receipt JSON is invalid", {
-        cause: error.message
-      });
+    } catch {
+      throw new HarnessError("RECEIPT_PARSE_ERROR", "receipt JSON is invalid");
     }
   }
   if (!isPlainObject(value)) invalidReceipt("receipt must be an object");
+  assertNoSensitiveData(value);
   requireExactFields(value, RECEIPT_FIELDS, REQUIRED_RECEIPT_FIELDS, "receipt", invalidReceipt);
 
   if (value.schema_version !== 1) invalidReceipt("receipt schema_version must be 1", { field: "schema_version" });
@@ -252,53 +266,128 @@ export async function readReceipts(workspaceRoot) {
   return receipts;
 }
 
-export async function writeReceiptExclusive(workspaceRoot, rawReceipt) {
+async function flushDirectory(directoryPath) {
+  if (process.platform === "win32") return;
+  let handle;
+  try {
+    handle = await open(directoryPath, "r");
+    await handle.sync();
+  } catch (error) {
+    if (!["EINVAL", "ENOTSUP", "EISDIR"].includes(error?.code)) throw error;
+  } finally {
+    await handle?.close();
+  }
+}
+
+async function writeBytesDefault(handle, bytes) {
+  await handle.writeFile(bytes, "utf8");
+}
+
+async function syncFileDefault(handle) {
+  await handle.sync();
+}
+
+export async function writeReceiptExclusive(workspaceRoot, rawReceipt, {
+  writeBytes = writeBytesDefault,
+  syncFile = syncFileDefault,
+  beforePublish,
+  publishFile = link,
+  syncDirectory = flushDirectory,
+  removeFile = unlink,
+  idFactory = randomUUID
+} = {}) {
   const receipt = parseReceipt(rawReceipt);
   const { receiptsDir } = pathsFor(workspaceRoot);
   const path = receiptPath(workspaceRoot, receipt.step);
   const serialized = `${JSON.stringify(receipt, null, 2)}\n`;
+  for (const [name, value] of Object.entries({ writeBytes, syncFile, publishFile, syncDirectory, removeFile, idFactory })) {
+    if (typeof value !== "function") {
+      throw new HarnessError("RECEIPT_WRITE_OPTIONS_INVALID", `${name} must be a function`);
+    }
+  }
+  if (beforePublish !== undefined && typeof beforePublish !== "function") {
+    throw new HarnessError("RECEIPT_WRITE_OPTIONS_INVALID", "beforePublish must be a function");
+  }
   await mkdir(receiptsDir, { recursive: true });
 
-  let handle;
-  try {
-    handle = await open(path, "wx", 0o600);
-  } catch (error) {
-    if (error?.code !== "EEXIST") throw error;
-    let identical = false;
-    try {
-      const existing = parseReceipt(await readFile(path, "utf8"));
-      identical = canonicalJson(existing) === canonicalJson(receipt);
-    } catch {
-      identical = false;
-    }
-    if (identical) return receipt;
-    throw new HarnessError("RECEIPT_CONFLICT", "a different receipt already exists for this step", {
-      step: receipt.step
-    });
-  }
+  const temporaryPath = join(receiptsDir, `.${basename(path)}.${process.pid}.${idFactory()}.tmp`);
 
-  let completed = false;
+  let handle;
+  let temporaryExists = false;
   try {
-    await handle.writeFile(serialized, "utf8");
-    await handle.sync();
-    completed = true;
+    handle = await open(temporaryPath, "wx", 0o600);
+    temporaryExists = true;
+    await writeBytes(handle, serialized);
+    await syncFile(handle);
+    await handle.close();
+    handle = undefined;
+    await beforePublish?.({ temporaryPath, receiptPath: path });
+
+    try {
+      await publishFile(temporaryPath, path);
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      await removeFile(temporaryPath);
+      temporaryExists = false;
+      await syncDirectory(receiptsDir);
+
+      let identical = false;
+      try {
+        const existing = parseReceipt(await readFile(path, "utf8"));
+        identical = canonicalJson(existing) === canonicalJson(receipt);
+      } catch {
+        identical = false;
+      }
+      if (identical) return receipt;
+      throw new HarnessError("RECEIPT_CONFLICT", "a different receipt already exists for this step", {
+        step: receipt.step
+      });
+    }
+
+    await removeFile(temporaryPath);
+    temporaryExists = false;
+    await syncDirectory(receiptsDir);
+    return receipt;
   } finally {
-    await handle.close().catch(() => {});
-    if (!completed) await unlink(path).catch(error => {
+    await handle?.close().catch(() => {});
+    if (temporaryExists) await removeFile(temporaryPath).catch(error => {
       if (error?.code !== "ENOENT") throw error;
     });
   }
-  return receipt;
+}
+
+function importedPrefixLength(receipts) {
+  let length = 0;
+  for (const receipt of receipts) {
+    if (receipt.provenance !== "claude-progress-import") break;
+    length += 1;
+  }
+  return length;
 }
 
 function blockedReconciliation(state, reason, prefixReceipts = []) {
+  const normalizedPrefix = prefixReceipts.slice(0, STEP_COUNT - 1);
+  const completedSteps = normalizedPrefix.map(receipt => receipt.step);
+  const importedFrom = state.imported_from === null
+    ? null
+    : {
+        ...state.imported_from,
+        prefix_length: importedPrefixLength(normalizedPrefix)
+      };
   return {
-    state: {
+    state: validateState({
       ...state,
       status: "blocked",
-      blocked_reason: reason
-    },
-    prefix_receipts: prefixReceipts,
+      current_step: completedSteps.length + 1,
+      completed_steps: completedSteps,
+      current_attempt: null,
+      consecutive_failures: 0,
+      blocked_reason: reason,
+      continuation: null,
+      imported_from: importedFrom,
+      completed_at: null
+    }),
+    prefix_receipts: normalizedPrefix,
     diagnostics: [{ code: reason }]
   };
 }
@@ -318,6 +407,7 @@ function reconciledState(state, prefixReceipts) {
     completed_steps: completedSteps,
     current_step: completed ? null : completedSteps.length + 1,
     current_attempt: recoveredForward ? null : state.current_attempt,
+    consecutive_failures: recoveredForward ? 0 : state.consecutive_failures,
     continuation: recoveredForward ? null : state.continuation,
     status,
     blocked_reason: clearsBlockedReason ? null : state.blocked_reason,
@@ -330,14 +420,20 @@ export function reconcileReceipts(rawState, receipts) {
   if (!Array.isArray(receipts)) invalidReceipt("receipts must be an array", { field: "receipts" });
 
   const byStep = new Map();
+  const conflictingSteps = new Set();
+  let workflowMismatch = false;
   for (const raw of receipts) {
     const receipt = parseReceipt(raw);
     if (receipt.workflow_id !== state.workflow_id) {
-      return blockedReconciliation(state, "RECEIPT_WORKFLOW_MISMATCH");
+      workflowMismatch = true;
+      continue;
     }
+    if (conflictingSteps.has(receipt.step)) continue;
     const existing = byStep.get(receipt.step);
     if (existing && canonicalJson(existing) !== canonicalJson(receipt)) {
-      return blockedReconciliation(state, "RECEIPT_CONFLICT");
+      conflictingSteps.add(receipt.step);
+      byStep.delete(receipt.step);
+      continue;
     }
     byStep.set(receipt.step, receipt);
   }
@@ -346,12 +442,19 @@ export function reconcileReceipts(rawState, receipts) {
   for (let step = 1; step <= STEP_COUNT && byStep.has(step); step += 1) {
     prefixReceipts.push(byStep.get(step));
   }
-  if ([...byStep.keys()].some(step => step > prefixReceipts.length + 1)) {
-    const recovered = reconciledState(state, prefixReceipts);
-    return blockedReconciliation(recovered, "RECEIPT_GAP", prefixReceipts);
+  const stateAhead = state.completed_steps.length > prefixReceipts.length;
+  const gap = [...byStep.keys()].some(step => step > prefixReceipts.length + 1);
+  if (workflowMismatch) {
+    return blockedReconciliation(state, "RECEIPT_WORKFLOW_MISMATCH", prefixReceipts);
   }
-  if (state.completed_steps.some(step => step > prefixReceipts.length)) {
+  if (conflictingSteps.size > 0) {
+    return blockedReconciliation(state, "RECEIPT_CONFLICT", prefixReceipts);
+  }
+  if (stateAhead) {
     return blockedReconciliation(state, "STATE_AHEAD_OF_RECEIPTS", prefixReceipts);
+  }
+  if (gap) {
+    return blockedReconciliation(state, "RECEIPT_GAP", prefixReceipts);
   }
 
   return {
