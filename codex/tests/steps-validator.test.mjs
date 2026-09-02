@@ -873,6 +873,524 @@ test("step015 preserves the recommended MX note severity without making it accep
   assert.ok(index.steps[14].acceptance.every((item) => !/mx|note/i.test(item.id)));
 });
 
+test("research batch declares the exact Codex-native evidence contracts", async () => {
+  const report = await validateStepBatch(repoRoot, [16, 17, 18, 19, 20, 21, 22, 23, 24]);
+  const projected = report.steps.map((step) => ({
+    number: step.number,
+    id: step.id,
+    title: step.title,
+    phase: step.phase,
+    source: step.source,
+    target: step.target,
+    source_sha256: step.source_sha256,
+    inputs: step.inputs,
+    outputs: step.outputs,
+    requires: step.requires,
+    optional_requires: step.optional_requires,
+    network: step.network,
+    visual_review: step.visual_review,
+    acceptance: step.acceptance.map((item) => ({
+      id: item.id,
+      kind: item.kind,
+      required: item.required,
+      ...(item.path === undefined ? {} : { path: item.path })
+    })),
+    ported: step.ported,
+    next: step.next
+  }));
+
+  assert.deepEqual(projected, [
+    {
+      number: 16,
+      id: "step016",
+      title: "전체 조사",
+      phase: "research",
+      source: "assets/steps/step016.md",
+      target: "codex/assets/steps/step016.md",
+      source_sha256: "3c27c6e77a062a5ae9134d87bcb24d237a4d0d3aa315fc2f113111b20e2ad4bb",
+      inputs: [
+        "step_archive/TOPIC/TOPIC.md",
+        "step_archive/step001_preflight.md",
+        "step_archive/step002_context전략_chunk1.md"
+      ],
+      outputs: [
+        "step_archive/step016_조사결과_chunk1.md",
+        "step_archive/research-raw-step016-primary.txt",
+        "step_archive/screenshots/research/step016-primary.png"
+      ],
+      requires: ["step001", "step002"],
+      optional_requires: ["step011"],
+      network: true,
+      visual_review: false,
+      acceptance: [
+        { id: "research-chunk-1", kind: "artifact", required: true, path: "step_archive/step016_조사결과_chunk1.md" },
+        { id: "research-raw-primary", kind: "artifact", required: true, path: "step_archive/research-raw-step016-primary.txt" },
+        { id: "research-screenshot-primary", kind: "artifact", required: true, path: "step_archive/screenshots/research/step016-primary.png" },
+        { id: "research-attribution", kind: "check", required: true },
+        { id: "research-chunks-bounded", kind: "check", required: true },
+        { id: "code-baseline-disposition", kind: "check", required: true },
+        { id: "tokei-baseline", kind: "artifact", required: false, path: "step_archive/tokei-baseline.json" }
+      ],
+      ported: true,
+      next: "step017"
+    },
+    {
+      number: 17,
+      id: "step017",
+      title: "GitHub 조사",
+      phase: "research",
+      source: "assets/steps/step017.md",
+      target: "codex/assets/steps/step017.md",
+      source_sha256: "34b3d7400582a87c8c98bb288ca20d5921ecb2ba832030be34079bd319dc3fe2",
+      inputs: [
+        "step_archive/TOPIC/TOPIC.md",
+        "step_archive/step016_조사결과_chunk1.md"
+      ],
+      outputs: [
+        "step_archive/step017_조사결과_chunk1.md",
+        "step_archive/research-raw-step017-github-api.json"
+      ],
+      requires: ["step016"],
+      optional_requires: [],
+      network: true,
+      visual_review: false,
+      acceptance: [
+        { id: "github-research-chunk-1", kind: "artifact", required: true, path: "step_archive/step017_조사결과_chunk1.md" },
+        { id: "github-api-raw", kind: "artifact", required: true, path: "step_archive/research-raw-step017-github-api.json" },
+        { id: "github-api-response", kind: "check", required: true },
+        { id: "github-attribution", kind: "check", required: true },
+        { id: "github-chunks-bounded", kind: "check", required: true }
+      ],
+      ported: true,
+      next: "step018"
+    },
+    {
+      number: 18,
+      id: "step018",
+      title: "API 계약 문서 조사",
+      phase: "research",
+      source: "assets/steps/step018.md",
+      target: "codex/assets/steps/step018.md",
+      source_sha256: "d9f419671463c41d66e4261352d56743a053b13436f82ca9966697b118650014",
+      inputs: [
+        "step_archive/TOPIC/TOPIC.md",
+        "step_archive/step016_조사결과_chunk1.md"
+      ],
+      outputs: [
+        "step_archive/step018_조사결과_chunk1.md",
+        "step_archive/research-raw-step018-api-contract.txt"
+      ],
+      requires: ["step016"],
+      optional_requires: [],
+      network: true,
+      visual_review: false,
+      acceptance: [
+        { id: "api-contract-chunk-1", kind: "artifact", required: true, path: "step_archive/step018_조사결과_chunk1.md" },
+        { id: "api-contract-raw", kind: "artifact", required: true, path: "step_archive/research-raw-step018-api-contract.txt" },
+        { id: "concrete-contract-subject", kind: "check", required: true },
+        { id: "api-contract-attribution", kind: "check", required: true },
+        { id: "api-contract-chunks-bounded", kind: "check", required: true }
+      ],
+      ported: true,
+      next: "step019"
+    },
+    {
+      number: 19,
+      id: "step019",
+      title: "참고 레포지토리 클론 및 코드 분석",
+      phase: "research",
+      source: "assets/steps/step019.md",
+      target: "codex/assets/steps/step019.md",
+      source_sha256: "4e4d86c80ddc68d368f06da37d6be6e90e71abc4c31684fe5b7c73623df5536f",
+      inputs: [
+        "step_archive/step017_조사결과_chunk1.md",
+        "step_archive/research-raw-step017-github-api.json"
+      ],
+      outputs: [
+        "step_archive/step019_조사결과_chunk1.md",
+        "step_archive/references/clone-manifest.md"
+      ],
+      requires: ["step017"],
+      optional_requires: [],
+      network: true,
+      visual_review: false,
+      acceptance: [
+        { id: "repository-analysis-chunk-1", kind: "artifact", required: true, path: "step_archive/step019_조사결과_chunk1.md" },
+        { id: "clone-manifest", kind: "artifact", required: true, path: "step_archive/references/clone-manifest.md" },
+        { id: "bounded-shallow-clones", kind: "check", required: true },
+        { id: "cloned-code-quarantine", kind: "check", required: true },
+        { id: "repository-analysis-chunks-bounded", kind: "check", required: true }
+      ],
+      ported: true,
+      next: "step020"
+    },
+    {
+      number: 20,
+      id: "step020",
+      title: "Awwwards 사이트 선정",
+      phase: "research",
+      source: "assets/steps/step020.md",
+      target: "codex/assets/steps/step020.md",
+      source_sha256: "eb729885309aaa07e489bc2a1a2987606161fba43e3b6a996a552e15298d425b",
+      inputs: [
+        "step_archive/TOPIC/TOPIC.md",
+        "step_archive/step016_조사결과_chunk1.md"
+      ],
+      outputs: [
+        "step_archive/step020_선정URL.md",
+        "step_archive/research-raw-step020-awwwards.txt"
+      ],
+      requires: ["step016"],
+      optional_requires: [],
+      network: true,
+      visual_review: false,
+      acceptance: [
+        { id: "selected-awwwards-urls", kind: "artifact", required: true, path: "step_archive/step020_선정URL.md" },
+        { id: "awwwards-listing-raw", kind: "artifact", required: true, path: "step_archive/research-raw-step020-awwwards.txt" },
+        { id: "evidence-derived-selection", kind: "check", required: true },
+        { id: "selected-url-attribution", kind: "check", required: true },
+        { id: "bounded-site-set", kind: "check", required: true }
+      ],
+      ported: true,
+      next: "step021"
+    },
+    {
+      number: 21,
+      id: "step021",
+      title: "의존성 게이트 검증",
+      phase: "research",
+      source: "assets/steps/step021.md",
+      target: "codex/assets/steps/step021.md",
+      source_sha256: "c36004a40bd93ed6bc79043cd7120629f2f71e6582feb89ca3e3a6d20cc7da54",
+      inputs: ["step_archive/step001_preflight.md"],
+      outputs: ["step_archive/step021_gate_status.md"],
+      requires: ["step001"],
+      optional_requires: [],
+      network: false,
+      visual_review: false,
+      acceptance: [
+        { id: "step001-preflight-artifact", kind: "artifact", required: true, path: "step_archive/step001_preflight.md" },
+        { id: "dependency-gate-status", kind: "artifact", required: true, path: "step_archive/step021_gate_status.md" },
+        { id: "step001-receipt-and-artifact", kind: "check", required: true },
+        { id: "project-conditional-prerequisites", kind: "check", required: true },
+        { id: "optional-step-deps", kind: "check", required: true }
+      ],
+      ported: true,
+      next: "step022"
+    },
+    {
+      number: 22,
+      id: "step022",
+      title: "Awwwards 데이터 수집",
+      phase: "research",
+      source: "assets/steps/step022.md",
+      target: "codex/assets/steps/step022.md",
+      source_sha256: "d385a1cb3bd07e10d5dacf9fb47fc2a8c00399e4b8489228f75173e7558c2410",
+      inputs: [
+        "step_archive/step020_선정URL.md",
+        "step_archive/research-raw-step020-awwwards.txt"
+      ],
+      outputs: [
+        "step_archive/step022_수집결과_chunk1.md",
+        "step_archive/awwwards-step022-primary.txt",
+        "step_archive/screenshots/research/step022-primary-desktop.png"
+      ],
+      requires: ["step020"],
+      optional_requires: [],
+      network: true,
+      visual_review: true,
+      acceptance: [
+        { id: "awwwards-collection-chunk-1", kind: "artifact", required: true, path: "step_archive/step022_수집결과_chunk1.md" },
+        { id: "awwwards-raw-primary", kind: "artifact", required: true, path: "step_archive/awwwards-step022-primary.txt" },
+        { id: "awwwards-screenshot-primary", kind: "artifact", required: true, path: "step_archive/screenshots/research/step022-primary-desktop.png" },
+        { id: "selected-url-input", kind: "check", required: true },
+        { id: "capture-attribution", kind: "check", required: true },
+        { id: "visual-capture-inspection", kind: "check", required: true },
+        { id: "bounded-capture-scope", kind: "check", required: true }
+      ],
+      ported: true,
+      next: "step023"
+    },
+    {
+      number: 23,
+      id: "step023",
+      title: "Awwwards 디자인 패턴 분석",
+      phase: "research",
+      source: "assets/steps/step023.md",
+      target: "codex/assets/steps/step023.md",
+      source_sha256: "6efdd52549990ea26e16968a6da65c576edcf46e5e914f8a6708292c81b8c461",
+      inputs: [
+        "step_archive/step016_조사결과_chunk1.md",
+        "step_archive/step022_수집결과_chunk1.md",
+        "step_archive/awwwards-step022-primary.txt",
+        "step_archive/screenshots/research/step022-primary-desktop.png"
+      ],
+      outputs: ["step_archive/step023_조사결과_chunk1.md"],
+      requires: ["step016", "step022"],
+      optional_requires: [],
+      network: false,
+      visual_review: true,
+      acceptance: [
+        { id: "design-pattern-chunk-1", kind: "artifact", required: true, path: "step_archive/step023_조사결과_chunk1.md" },
+        { id: "research-screenshot-input", kind: "artifact", required: true, path: "step_archive/screenshots/research/step022-primary-desktop.png" },
+        { id: "all-captures-traced", kind: "check", required: true },
+        { id: "named-aesthetic-axes", kind: "check", required: true },
+        { id: "visual-pattern-inspection", kind: "check", required: true },
+        { id: "design-analysis-chunks-bounded", kind: "check", required: true }
+      ],
+      ported: true,
+      next: "step024"
+    },
+    {
+      number: 24,
+      id: "step024",
+      title: "Awwwards 조사 충분성 검증",
+      phase: "research",
+      source: "assets/steps/step024.md",
+      target: "codex/assets/steps/step024.md",
+      source_sha256: "e7946951a1cbeecc506ec7954a30f6b366e438b7a305e4bab51b187e7c348ff1",
+      inputs: [
+        "step_archive/step016_조사결과_chunk1.md",
+        "step_archive/step022_수집결과_chunk1.md",
+        "step_archive/awwwards-step022-primary.txt",
+        "step_archive/screenshots/research/step022-primary-desktop.png",
+        "step_archive/step023_조사결과_chunk1.md"
+      ],
+      outputs: ["step_archive/outputs/step024_검증_r1.md"],
+      requires: ["step016", "step022", "step023"],
+      optional_requires: [],
+      network: false,
+      visual_review: true,
+      acceptance: [
+        { id: "sufficiency-verification-round-1", kind: "artifact", required: true, path: "step_archive/outputs/step024_검증_r1.md" },
+        { id: "verification-screenshot-input", kind: "artifact", required: true, path: "step_archive/screenshots/research/step022-primary-desktop.png" },
+        { id: "independent-verifier", kind: "check", required: true },
+        { id: "bounded-verification-rounds", kind: "check", required: true },
+        { id: "pass-verdict", kind: "check", required: true },
+        { id: "visual-sufficiency-inspection", kind: "check", required: true }
+      ],
+      ported: true,
+      next: "step025"
+    }
+  ]);
+});
+
+test("research source hashes bind the untouched Claude steps 016 through 024", async () => {
+  const index = await loadIndex(repoRoot);
+  const hashes = await recordSourceHashes(repoRoot, index.steps.slice(15, 24));
+
+  assert.deepEqual(hashes, {
+    step016: "3c27c6e77a062a5ae9134d87bcb24d237a4d0d3aa315fc2f113111b20e2ad4bb",
+    step017: "34b3d7400582a87c8c98bb288ca20d5921ecb2ba832030be34079bd319dc3fe2",
+    step018: "d9f419671463c41d66e4261352d56743a053b13436f82ca9966697b118650014",
+    step019: "4e4d86c80ddc68d368f06da37d6be6e90e71abc4c31684fe5b7c73623df5536f",
+    step020: "eb729885309aaa07e489bc2a1a2987606161fba43e3b6a996a552e15298d425b",
+    step021: "c36004a40bd93ed6bc79043cd7120629f2f71e6582feb89ca3e3a6d20cc7da54",
+    step022: "d385a1cb3bd07e10d5dacf9fb47fc2a8c00399e4b8489228f75173e7558c2410",
+    step023: "6efdd52549990ea26e16968a6da65c576edcf46e5e914f8a6708292c81b8c461",
+    step024: "e7946951a1cbeecc506ec7954a30f6b366e438b7a305e4bab51b187e7c348ff1"
+  });
+});
+
+test("research documents bind exact frontmatter titles and current-step references", async () => {
+  const expected = [
+    { name: "step016", number: 16, title: "전체 조사" },
+    { name: "step017", number: 17, title: "GitHub 조사" },
+    { name: "step018", number: 18, title: "API 계약 문서 조사" },
+    { name: "step019", number: 19, title: "참고 레포지토리 클론 및 코드 분석" },
+    { name: "step020", number: 20, title: "Awwwards 사이트 선정" },
+    { name: "step021", number: 21, title: "의존성 게이트 검증" },
+    { name: "step022", number: 22, title: "Awwwards 데이터 수집" },
+    { name: "step023", number: 23, title: "Awwwards 디자인 패턴 분석" },
+    { name: "step024", number: 24, title: "Awwwards 조사 충분성 검증" }
+  ];
+
+  for (const item of expected) {
+    const content = await readFile(
+      join(repoRoot, "codex", "assets", "steps", `${item.name}.md`),
+      "utf8"
+    );
+    assert.deepEqual(parseStepDocument(content), {
+      frontmatter: { name: item.name, phase: "research" },
+      titles: [{ number: item.number, title: item.title }],
+      referencedSteps: [item.number]
+    });
+  }
+});
+
+test("research outputs have required artifacts and an upstream dependency graph", async () => {
+  const report = await validateStepBatch(repoRoot, [16, 17, 18, 19, 20, 21, 22, 23, 24]);
+  const byId = new Map((await loadIndex(repoRoot)).steps.map((step) => [step.id, step]));
+
+  for (const step of report.steps) {
+    for (const output of step.outputs) {
+      assert.ok(step.acceptance.some((item) => (
+        item.kind === "artifact" && item.required && item.path === output
+      )), `${step.id} output lacks required artifact evidence: ${output}`);
+    }
+    for (const dependency of step.requires) {
+      assert.ok(byId.get(dependency).number < step.number, `${step.id} has a non-upstream dependency`);
+    }
+  }
+
+  assert.deepEqual(report.steps.map((step) => ({
+    id: step.id,
+    requires: step.requires,
+    optional_requires: step.optional_requires
+  })), [
+    { id: "step016", requires: ["step001", "step002"], optional_requires: ["step011"] },
+    { id: "step017", requires: ["step016"], optional_requires: [] },
+    { id: "step018", requires: ["step016"], optional_requires: [] },
+    { id: "step019", requires: ["step017"], optional_requires: [] },
+    { id: "step020", requires: ["step016"], optional_requires: [] },
+    { id: "step021", requires: ["step001"], optional_requires: [] },
+    { id: "step022", requires: ["step020"], optional_requires: [] },
+    { id: "step023", requires: ["step016", "step022"], optional_requires: [] },
+    { id: "step024", requires: ["step016", "step022", "step023"], optional_requires: [] }
+  ]);
+});
+
+test("research instructions block missing mandatory evidence and trace every factual claim", async () => {
+  const networkSteps = [16, 17, 18, 19, 20, 22];
+
+  for (const number of networkSteps) {
+    const id = `step${String(number).padStart(3, "0")}`;
+    const content = await readFile(join(repoRoot, "codex", "assets", "steps", `${id}.md`), "utf8");
+    assert.match(content, /네트워크 기능[^]*사용할 수 없으면[^]*완료하지 않는다/);
+    assert.match(content, /최대 세 번/);
+    assert.match(content, /(?:URL|요청 URL)[^]*(?:출처|원본)[^]*(?:수집 시각|응답 시각)/);
+    assert.match(content, /사실 주장[^]*(?:URL|출처)[^]*(?:원본|캡처)/);
+    assert.match(content, /증거를 (?:발명|꾸며)/);
+  }
+
+  const step18 = await readFile(join(repoRoot, "codex", "assets", "steps", "step018.md"), "utf8");
+  assert.match(step18, /주제 입력과 프로젝트 증거[^]*계약 대상을 도출/);
+  assert.match(step18, /구체적인 계약 출처[^]*식별할 수 없으면[^]*완료하지 않는다/);
+  assert.doesNotMatch(step18, /임의(?:의|로)[^]*(?:API|계약)/);
+});
+
+test("research instructions use safe one-step provider-neutral role contracts", async () => {
+  const report = await validateStepBatch(repoRoot, [16, 17, 18, 19, 20, 21, 22, 23, 24]);
+
+  for (const step of report.steps) {
+    const content = await readFile(join(repoRoot, step.target), "utf8");
+    assert.deepEqual(scanForbiddenTokens(content), []);
+    assert.doesNotMatch(content, /(?:progress|state)\.json|\.harness50-codex/i);
+    assert.doesNotMatch(content, /\b(?:SessionStart|UserPromptSubmit|PreToolUse|Stop)\b|\bhooks?\b/i);
+    assert.doesNotMatch(content, /(?:다음|후속)\s*(?:Step|단계)|\bnext\s+step\b/i);
+    assert.doesNotMatch(content, /별도 (?:작업자|검증자)를 사용했다고 (?:기록|주장)/);
+  }
+
+  for (const number of [16, 17, 18, 19, 20, 22, 23, 24]) {
+    const id = `step${String(number).padStart(3, "0")}`;
+    const content = await readFile(join(repoRoot, "codex", "assets", "steps", `${id}.md`), "utf8");
+    const roleSection = /## 실행 역할\n([^]*?)(?=\n## )/.exec(content)?.[1];
+    assert.ok(roleSection, `${id} is missing its provider-neutral role contract`);
+    assert.match(roleSection, /수집[^]*독립 검토/);
+    assert.match(roleSection, /위임 기능을 사용할 수 없으면[^]*순서대로 수행/);
+    assert.match(roleSection, /별도 역할을 위임했다고 기록하지 않는다/);
+    assert.match(roleSection, /정상 권한 확인/);
+  }
+});
+
+test("visual research requires screenshots and actual inspection for steps 022 through 024", async () => {
+  const report = await validateStepBatch(repoRoot, [22, 23, 24]);
+
+  for (const step of report.steps) {
+    assert.equal(step.visual_review, true);
+    assert.ok(step.acceptance.some((item) => (
+      item.kind === "artifact" && item.required && /screenshot/i.test(`${item.id} ${item.path}`)
+    )));
+    assert.ok(step.acceptance.some((item) => item.kind === "check" && item.required));
+
+    const content = await readFile(join(repoRoot, step.target), "utf8");
+    assert.match(content, /시각 검사 기능[^]*사용할 수 없으면[^]*완료하지 않는다/);
+    assert.match(content, /실제로[^]*(?:열어|검사)/);
+  }
+});
+
+test("step019 confines untrusted clones and never executes their code", async () => {
+  const content = await readFile(join(repoRoot, "codex", "assets", "steps", "step019.md"), "utf8");
+
+  assert.match(content, /최대 5개/);
+  assert.match(content, /`git clone --depth 1`/);
+  assert.match(content, /검증된 `step_archive\/references\/[a-z0-9][a-z0-9._-]*`/);
+  assert.match(content, /실패[^]*manifest[^]*기록/);
+  assert.match(content, /클론한 코드[^]*(?:실행|설치|빌드|스크립트)[^]*금지/);
+  assert.match(content, /심볼릭 링크[^]*경계 밖[^]*완료하지 않는다/);
+});
+
+test("step021 is a local deterministic gate over the step001 receipt and artifact", async () => {
+  const content = await readFile(join(repoRoot, "codex", "assets", "steps", "step021.md"), "utf8");
+
+  assert.match(content, /1단계 완료 영수증[^]*`step_archive\/step001_preflight\.md`/);
+  assert.match(content, /로컬[^]*결정적/);
+  assert.match(content, /네트워크[^]*사용하지 않는다/);
+  assert.match(content, /설치[^]*수행하지 않는다/);
+  assert.match(content, /`step_archive\/step-deps\.json`[^]*선택 입력/);
+  assert.match(content, /`package\.json`[^]*`node_modules`[^]*프로젝트 조건부/);
+  assert.match(content, /선언된[^]*선행 파일[^]*누락[^]*완료하지 않는다/);
+  assert.match(content, /`step_archive\/step021_gate_status\.md`[^]*기록/);
+});
+
+test("step022 consumes the selected URLs and blocks incomplete visual collection", async () => {
+  const report = await validateStepBatch(repoRoot, [20, 22]);
+  const [selection, collection] = report.steps;
+  const content = await readFile(join(repoRoot, "codex", "assets", "steps", "step022.md"), "utf8");
+
+  assert.ok(selection.outputs.includes("step_archive/research-raw-step020-awwwards.txt"));
+  assert.ok(collection.inputs.includes("step_archive/research-raw-step020-awwwards.txt"));
+  assert.match(content, /`step_archive\/step020_선정URL\.md`[^]*URL만/);
+  assert.match(content, /선정 목록 밖의 URL[^]*수집하지 않는다/);
+  assert.match(content, /원본 텍스트[^]*스크린샷[^]*둘 다/);
+  assert.match(content, /URL별 최대 10개 페이지/);
+  assert.match(content, /반응형[^]*1920×1080[^]*768×1024[^]*390×844/);
+  assert.match(content, /시각 검사 기능[^]*사용할 수 없으면[^]*완료하지 않는다/);
+});
+
+test("step023 preserves every named source axis without inventing the numeric mismatch", async () => {
+  const content = await readFile(join(repoRoot, "codex", "assets", "steps", "step023.md"), "utf8");
+
+  for (const axis of [
+    "Brutalism", "Glassmorphism", "Minimalism", "Dark OLED Luxury", "Neumorphism", "Cyberpunk"
+  ]) {
+    assert.match(content, new RegExp(axis));
+  }
+  assert.match(content, /원본에 이름이 명시된 여섯 미학 축/);
+  assert.doesNotMatch(content, /11가지 미학 축/);
+  assert.match(content, /레이아웃[^]*색상[^]*간격[^]*타이포그래피[^]*인터랙션/);
+  assert.match(content, /각 대안[^]*최소 2개[^]*장단점/);
+});
+
+test("step024 keeps every bounded verification round inside its declared artifact", async () => {
+  const report = await validateStepBatch(repoRoot, [24]);
+  const step = report.steps[0];
+  const content = await readFile(join(repoRoot, step.target), "utf8");
+  const mentionedRoundArtifacts = [...new Set(
+    [...content.matchAll(/`(step_archive\/outputs\/step024_검증_r\d+\.md)`/g)]
+      .map((match) => match[1])
+  )];
+
+  assert.deepEqual(step.outputs, ["step_archive/outputs/step024_검증_r1.md"]);
+  assert.ok(step.inputs.includes("step_archive/awwwards-step022-primary.txt"));
+  assert.deepEqual(mentionedRoundArtifacts, step.outputs);
+  assert.doesNotMatch(content, /step024_검증_r[2-5]\.md/);
+  assert.match(content, /모든 라운드[^]*동일한 선언 산출물[^]*라운드별 섹션/);
+  assert.match(content, /라운드 1[^]*라운드 5/);
+});
+
+test("step024 requires a bounded independent PASS and never auto-routes a FAIL", async () => {
+  const content = await readFile(join(repoRoot, "codex", "assets", "steps", "step024.md"), "utf8");
+
+  assert.match(content, /독립 검증자 역할/);
+  assert.match(content, /최대 5라운드/);
+  assert.match(content, /`PASS`[^]*경우에만[^]*완료/);
+  assert.match(content, /`FAIL`[^]*완료 증거[^]*될 수 없다/);
+  assert.match(content, /`FAIL`[^]*자동으로[^]*(?:이동|실행|전환)[^]*않는다/);
+  assert.match(content, /5라운드[^]*`PASS`[^]*없으면[^]*차단/);
+  assert.doesNotMatch(content, /스킵 처리[^]*(?:완료|종료)/);
+});
+
 test("preflight documents bind exact frontmatter and titles to only their current step", async () => {
   const expected = [
     { name: "step001", phase: "preflight", number: 1, title: "하네스 프리플라이트 체크" },
