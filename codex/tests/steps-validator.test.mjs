@@ -1475,6 +1475,448 @@ test("step024 requires a bounded independent PASS and never auto-routes a FAIL",
   assert.doesNotMatch(content, /스킵 처리[^]*(?:완료|종료)/);
 });
 
+test("planning batch declares the exact Codex-native artifact contracts", async () => {
+  const report = await validateStepBatch(repoRoot, [25, 26, 27, 28, 29, 30]);
+  const projected = report.steps.map((step) => ({
+    number: step.number,
+    id: step.id,
+    title: step.title,
+    phase: step.phase,
+    source: step.source,
+    target: step.target,
+    source_sha256: step.source_sha256,
+    inputs: step.inputs,
+    outputs: step.outputs,
+    requires: step.requires,
+    optional_requires: step.optional_requires,
+    network: step.network,
+    visual_review: step.visual_review,
+    acceptance: step.acceptance.map((item) => ({
+      id: item.id,
+      kind: item.kind,
+      required: item.required,
+      ...(item.path === undefined ? {} : { path: item.path })
+    })),
+    ported: step.ported,
+    next: step.next
+  }));
+
+  assert.deepEqual(projected, [
+    {
+      number: 25,
+      id: "step025",
+      title: "기획: 전체 조사결과 기반 (독립 검증 루프)",
+      phase: "planning",
+      source: "assets/steps/step025.md",
+      target: "codex/assets/steps/step025.md",
+      source_sha256: "18cce8b074c319963e1467c1680658f261dda92db9289ad62b5e3d3f855b47fd",
+      inputs: [
+        "step_archive/TOPIC/TOPIC.md",
+        "step_archive/step016_조사결과_chunk1.md",
+        "step_archive/research-raw-step016-primary.txt",
+        "step_archive/screenshots/research/step016-primary.png",
+        "step_archive/outputs/step024_검증_r1.md"
+      ],
+      outputs: [
+        "step_archive/step025_planning_chunk1.md",
+        "step_archive/outputs/step025_검증.md"
+      ],
+      requires: ["step016", "step024"],
+      optional_requires: [],
+      network: false,
+      visual_review: false,
+      acceptance: [
+        { id: "base-planning-snapshot", kind: "artifact", required: true, path: "step_archive/step025_planning_chunk1.md" },
+        { id: "planning-verification-report", kind: "artifact", required: true, path: "step_archive/outputs/step025_검증.md" },
+        { id: "topic-fidelity", kind: "check", required: true },
+        { id: "general-research-provenance", kind: "check", required: true },
+        { id: "planning-chunks-bounded", kind: "check", required: true },
+        { id: "bounded-independent-review", kind: "check", required: true },
+        { id: "pass-verdict", kind: "check", required: true }
+      ],
+      ported: true,
+      next: "step026"
+    },
+    {
+      number: 26,
+      id: "step026",
+      title: "기획 보강: GitHub 조사결과",
+      phase: "planning",
+      source: "assets/steps/step026.md",
+      target: "codex/assets/steps/step026.md",
+      source_sha256: "d926b3c2829ecbd7b8db282f4c8dcc6da4be9312066a0cf6ee33577f1ce3617c",
+      inputs: [
+        "step_archive/step025_planning_chunk1.md",
+        "step_archive/outputs/step025_검증.md",
+        "step_archive/step017_조사결과_chunk1.md",
+        "step_archive/research-raw-step017-github-api.json"
+      ],
+      outputs: [
+        "step_archive/step026_planning_chunk1.md",
+        "step_archive/outputs/step026_검증.md"
+      ],
+      requires: ["step017", "step025"],
+      optional_requires: [],
+      network: false,
+      visual_review: false,
+      acceptance: [
+        { id: "github-planning-snapshot", kind: "artifact", required: true, path: "step_archive/step026_planning_chunk1.md" },
+        { id: "github-planning-verification", kind: "artifact", required: true, path: "step_archive/outputs/step026_검증.md" },
+        { id: "persisted-github-response-only", kind: "check", required: true },
+        { id: "decision-provenance", kind: "check", required: true },
+        { id: "planning-chunks-bounded", kind: "check", required: true },
+        { id: "bounded-independent-review", kind: "check", required: true },
+        { id: "pass-verdict", kind: "check", required: true }
+      ],
+      ported: true,
+      next: "step027"
+    },
+    {
+      number: 27,
+      id: "step027",
+      title: "기획 보강: API 계약 문서 조사결과",
+      phase: "planning",
+      source: "assets/steps/step027.md",
+      target: "codex/assets/steps/step027.md",
+      source_sha256: "d992b464654670c3e42d53c5faf1df062f7d2afb2563cd1449ac9631757b2b76",
+      inputs: [
+        "step_archive/step026_planning_chunk1.md",
+        "step_archive/outputs/step026_검증.md",
+        "step_archive/step018_조사결과_chunk1.md",
+        "step_archive/research-raw-step018-api-contract.txt"
+      ],
+      outputs: [
+        "step_archive/step027_planning_chunk1.md",
+        "step_archive/outputs/step027_검증.md"
+      ],
+      requires: ["step018", "step026"],
+      optional_requires: [],
+      network: false,
+      visual_review: false,
+      acceptance: [
+        { id: "api-contract-planning-snapshot", kind: "artifact", required: true, path: "step_archive/step027_planning_chunk1.md" },
+        { id: "api-contract-planning-verification", kind: "artifact", required: true, path: "step_archive/outputs/step027_검증.md" },
+        { id: "concrete-contract-provenance", kind: "check", required: true },
+        { id: "schema-contract-completeness", kind: "check", required: true },
+        { id: "planning-chunks-bounded", kind: "check", required: true },
+        { id: "bounded-independent-review", kind: "check", required: true },
+        { id: "pass-verdict", kind: "check", required: true }
+      ],
+      ported: true,
+      next: "step028"
+    },
+    {
+      number: 28,
+      id: "step028",
+      title: "기획 보강: 참고 레포 코드 분석",
+      phase: "planning",
+      source: "assets/steps/step028.md",
+      target: "codex/assets/steps/step028.md",
+      source_sha256: "458b2d51af051b4cd608895c6a8c6e435fcab45b37ee5c1bbccb34b93733ae09",
+      inputs: [
+        "step_archive/step027_planning_chunk1.md",
+        "step_archive/outputs/step027_검증.md",
+        "step_archive/step019_조사결과_chunk1.md",
+        "step_archive/references/clone-manifest.md"
+      ],
+      outputs: [
+        "step_archive/step028_planning_chunk1.md",
+        "step_archive/outputs/step028_검증.md"
+      ],
+      requires: ["step019", "step027"],
+      optional_requires: [],
+      network: false,
+      visual_review: false,
+      acceptance: [
+        { id: "repository-planning-snapshot", kind: "artifact", required: true, path: "step_archive/step028_planning_chunk1.md" },
+        { id: "repository-planning-verification", kind: "artifact", required: true, path: "step_archive/outputs/step028_검증.md" },
+        { id: "static-analysis-only", kind: "check", required: true },
+        { id: "decision-provenance", kind: "check", required: true },
+        { id: "planning-chunks-bounded", kind: "check", required: true },
+        { id: "bounded-independent-review", kind: "check", required: true },
+        { id: "pass-verdict", kind: "check", required: true }
+      ],
+      ported: true,
+      next: "step029"
+    },
+    {
+      number: 29,
+      id: "step029",
+      title: "기획 보강: Awwwards UX/UI·레이아웃 조사결과",
+      phase: "planning",
+      source: "assets/steps/step029.md",
+      target: "codex/assets/steps/step029.md",
+      source_sha256: "6c4955cfc3cdce6473c667d56b9f1e9b7bc0a019ef5ec3c843958428d38a83e2",
+      inputs: [
+        "step_archive/step028_planning_chunk1.md",
+        "step_archive/outputs/step028_검증.md",
+        "step_archive/step022_수집결과_chunk1.md",
+        "step_archive/awwwards-step022-primary.txt",
+        "step_archive/screenshots/research/step022-primary-desktop.png",
+        "step_archive/step023_조사결과_chunk1.md",
+        "step_archive/outputs/step024_검증_r1.md"
+      ],
+      outputs: [
+        "step_archive/step029_planning_chunk1.md",
+        "step_archive/outputs/step029_검증.md"
+      ],
+      requires: ["step022", "step023", "step024", "step028"],
+      optional_requires: [],
+      network: false,
+      visual_review: true,
+      acceptance: [
+        { id: "visual-planning-snapshot", kind: "artifact", required: true, path: "step_archive/step029_planning_chunk1.md" },
+        { id: "visual-planning-verification", kind: "artifact", required: true, path: "step_archive/outputs/step029_검증.md" },
+        { id: "planning-screenshot-input", kind: "artifact", required: true, path: "step_archive/screenshots/research/step022-primary-desktop.png" },
+        { id: "evidence-axis-fidelity", kind: "check", required: true },
+        { id: "interaction-accessibility-contracts", kind: "check", required: true },
+        { id: "visual-evidence-inspection", kind: "check", required: true },
+        { id: "planning-chunks-bounded", kind: "check", required: true },
+        { id: "bounded-independent-review", kind: "check", required: true },
+        { id: "pass-verdict", kind: "check", required: true }
+      ],
+      ported: true,
+      next: "step030"
+    },
+    {
+      number: 30,
+      id: "step030",
+      title: "통합 설계 (레이아웃 + 전체)",
+      phase: "planning",
+      source: "assets/steps/step030.md",
+      target: "codex/assets/steps/step030.md",
+      source_sha256: "0a94d262268fca28ea8cfaa808244910267ab2be03a587ca973aeedf1220dec5",
+      inputs: [
+        "step_archive/TOPIC/TOPIC.md",
+        "step_archive/step029_planning_chunk1.md",
+        "step_archive/outputs/step029_검증.md"
+      ],
+      outputs: [
+        "step_archive/outputs/step030_설계대안.md",
+        "step_archive/outputs/step030_설계선택.md",
+        "step_archive/step030_레이아웃설계_chunk1.md",
+        "step_archive/step030_전체설계_chunk1.md",
+        "step_archive/outputs/step030_최종검증.md"
+      ],
+      requires: ["step029"],
+      optional_requires: [],
+      network: false,
+      visual_review: false,
+      acceptance: [
+        { id: "design-alternatives", kind: "artifact", required: true, path: "step_archive/outputs/step030_설계대안.md" },
+        { id: "design-selection", kind: "artifact", required: true, path: "step_archive/outputs/step030_설계선택.md" },
+        { id: "layout-design-chunk-1", kind: "artifact", required: true, path: "step_archive/step030_레이아웃설계_chunk1.md" },
+        { id: "overall-design-chunk-1", kind: "artifact", required: true, path: "step_archive/step030_전체설계_chunk1.md" },
+        { id: "final-design-verification", kind: "artifact", required: true, path: "step_archive/outputs/step030_최종검증.md" },
+        { id: "structured-brainstorming-first", kind: "check", required: true },
+        { id: "independent-selector", kind: "check", required: true },
+        { id: "class-architecture-contract", kind: "check", required: true },
+        { id: "async-lifecycle-contract", kind: "check", required: true },
+        { id: "responsive-accessibility-contract", kind: "check", required: true },
+        { id: "design-chunks-bounded", kind: "check", required: true },
+        { id: "pass-verdict", kind: "check", required: true }
+      ],
+      ported: true,
+      next: "step031"
+    }
+  ]);
+});
+
+test("planning source hashes bind the untouched source steps 025 through 030", async () => {
+  const index = await loadIndex(repoRoot);
+  const hashes = await recordSourceHashes(repoRoot, index.steps.slice(24, 30));
+
+  assert.deepEqual(hashes, {
+    step025: "18cce8b074c319963e1467c1680658f261dda92db9289ad62b5e3d3f855b47fd",
+    step026: "d926b3c2829ecbd7b8db282f4c8dcc6da4be9312066a0cf6ee33577f1ce3617c",
+    step027: "d992b464654670c3e42d53c5faf1df062f7d2afb2563cd1449ac9631757b2b76",
+    step028: "458b2d51af051b4cd608895c6a8c6e435fcab45b37ee5c1bbccb34b93733ae09",
+    step029: "6c4955cfc3cdce6473c667d56b9f1e9b7bc0a019ef5ec3c843958428d38a83e2",
+    step030: "0a94d262268fca28ea8cfaa808244910267ab2be03a587ca973aeedf1220dec5"
+  });
+});
+
+test("planning documents bind exact frontmatter titles and only their current Step heading", async () => {
+  const expected = [
+    { name: "step025", number: 25, title: "기획: 전체 조사결과 기반 (독립 검증 루프)" },
+    { name: "step026", number: 26, title: "기획 보강: GitHub 조사결과" },
+    { name: "step027", number: 27, title: "기획 보강: API 계약 문서 조사결과" },
+    { name: "step028", number: 28, title: "기획 보강: 참고 레포 코드 분석" },
+    { name: "step029", number: 29, title: "기획 보강: Awwwards UX/UI·레이아웃 조사결과" },
+    { name: "step030", number: 30, title: "통합 설계 (레이아웃 + 전체)" }
+  ];
+
+  for (const item of expected) {
+    const content = await readFile(join(repoRoot, "codex", "assets", "steps", `${item.name}.md`), "utf8");
+    assert.deepEqual(parseStepDocument(content), {
+      frontmatter: { name: item.name, phase: "planning" },
+      titles: [{ number: item.number, title: item.title }],
+      referencedSteps: [item.number]
+    });
+  }
+});
+
+test("planning outputs are immutable snapshots with required evidence and closed direct dependencies", async () => {
+  const index = await loadIndex(repoRoot);
+  const planning = (await validateStepBatch(repoRoot, [25, 26, 27, 28, 29, 30])).steps;
+  const ownerByOutput = new Map(index.steps.flatMap((step) => (
+    (step.outputs ?? []).map((output) => [output, step.id])
+  )));
+  const allOutputs = planning.flatMap((step) => step.outputs);
+
+  assert.equal(new Set(allOutputs).size, allOutputs.length, "planning snapshots must never overwrite one another");
+  for (const step of planning) {
+    for (const output of step.outputs) {
+      assert.ok(step.acceptance.some((item) => (
+        item.kind === "artifact" && item.required && item.path === output
+      )), `${step.id} output lacks required artifact evidence: ${output}`);
+    }
+    for (const input of step.inputs) {
+      const owner = ownerByOutput.get(input);
+      if (owner) assert.ok(step.requires.includes(owner), `${step.id} does not require the owner of ${input}`);
+    }
+    for (const dependency of step.requires) {
+      assert.ok(step.inputs.some((input) => ownerByOutput.get(input) === dependency), `${step.id} has an unbound dependency ${dependency}`);
+    }
+  }
+
+  assert.ok(planning.slice(1, 5).every((step) => !step.outputs.includes("step_archive/step025_planning_chunk1.md")));
+});
+
+test("planning instructions stay local, provider-neutral, permission-preserving, and receipt-owned", async () => {
+  const planning = (await validateStepBatch(repoRoot, [25, 26, 27, 28, 29, 30])).steps;
+
+  for (const step of planning) {
+    assert.equal(step.network, false);
+    const content = await readFile(join(repoRoot, step.target), "utf8");
+    assert.deepEqual(scanForbiddenTokens(content), []);
+    assert.doesNotMatch(content, /(?:progress|state)\.json|\.harness50-codex|transcript/i);
+    assert.doesNotMatch(content, /\b(?:SessionStart|UserPromptSubmit|PreToolUse|Stop)\b|\bhooks?\b/i);
+    assert.doesNotMatch(content, /(?:다음|후속)\s*(?:Step|단계)|\bnext\s+step\b/i);
+    assert.match(content, /정상 권한 확인[^]*(?:자동 승인|권한 우회)[^]*금지/);
+    assert.match(content, /수락 증거[^]*현재 단계에서 멈춘다/);
+    assert.match(content, /workflow 상태와 영수증[^]*진행을 소유/);
+  }
+});
+
+test("every planning step separates a concrete author from an independent verifier honestly", async () => {
+  const roleContracts = [
+    { number: 25, author: /기초 기획 스냅샷 작성자 역할/, verifier: /조사 반영 독립 검증자 역할/ },
+    { number: 26, author: /GitHub 근거 보강 작성자 역할/, verifier: /GitHub 근거 독립 검증자 역할/ },
+    { number: 27, author: /API 계약 보강 작성자 역할/, verifier: /API 계약 독립 검증자 역할/ },
+    { number: 28, author: /정적 구조 보강 작성자 역할/, verifier: /참고 코드 근거 독립 검증자 역할/ },
+    { number: 29, author: /시각 기획 보강 작성자 역할/, verifier: /시각 근거 독립 검증자 역할/ },
+    { number: 30, author: /설계 작성자 역할/, verifier: /최종 독립 검증자 역할/ }
+  ];
+
+  for (const { number, author, verifier } of roleContracts) {
+    const id = `step${String(number).padStart(3, "0")}`;
+    const content = await readFile(join(repoRoot, "codex", "assets", "steps", `${id}.md`), "utf8");
+    const roleSection = /## 실행 역할\n([^]*?)(?=\n## )/.exec(content)?.[1];
+    assert.ok(roleSection, `${id} is missing its role contract`);
+    const normalized = roleSection.replace(/\s+/g, " ").trim();
+    assert.match(normalized, author);
+    assert.match(normalized, verifier);
+    assert.match(normalized, /독립 검증자[^]*작성 산출물을 수정하지 않는다/);
+    assert.match(normalized, /위임 기능을 사용할 수 없으면[^]*현재 실행자가[^]*역할을 명확히 분리[^]*순서대로 수행/);
+    assert.match(normalized, /별도 역할을 위임했다고 기록하지 않는다/);
+  }
+});
+
+test("steps 025 through 029 keep bounded PASS-only review rounds in one declared report each", async () => {
+  const planning = (await validateStepBatch(repoRoot, [25, 26, 27, 28, 29])).steps;
+
+  for (const step of planning) {
+    const content = await readFile(join(repoRoot, step.target), "utf8");
+    const report = `step_archive/outputs/${step.id}_검증.md`;
+    const mentionedReports = [...new Set(
+      [...content.matchAll(/`(step_archive\/outputs\/step0(?:25|26|27|28|29)_검증(?:_r\d+)?\.md)`/g)]
+        .map((match) => match[1])
+    )].filter((path) => path.includes(`/outputs/${step.id}_검증`));
+    assert.deepEqual(mentionedReports, [report]);
+    assert.match(content, /모든 라운드[^]*동일한 선언 보고서[^]*라운드별 섹션/);
+    assert.match(content, /최대 5라운드/);
+    assert.match(content, /`PASS`[^]*경우에만[^]*완료/);
+    assert.match(content, /`FAIL`[^]*완료 증거[^]*될 수 없다/);
+    assert.match(content, /5라운드[^]*`PASS`[^]*없으면[^]*차단/);
+    assert.doesNotMatch(content, /_검증_r[2-5]\.md/);
+  }
+});
+
+test("step025 bases a bounded, topic-complete snapshot on persisted general research", async () => {
+  const content = await readFile(join(repoRoot, "codex", "assets", "steps", "step025.md"), "utf8");
+
+  assert.match(content, /가장 먼저[^]*`step_archive\/TOPIC\/TOPIC\.md`/);
+  assert.match(content, /`topic`[^]*`audience`[^]*`interactive`[^]*`real_world_apps`[^]*`constraints`/);
+  assert.match(content, /step016_조사결과_chunk1\.md[^]*research-raw-step016-primary\.txt[^]*step016-primary\.png[^]*step024_검증_r1\.md/);
+  assert.match(content, /데이터 반영[^]*누락[^]*왜곡[^]*출처 추적/);
+  assert.match(content, /주제 일치[^]*타깃 적합성[^]*인터랙티브 충족[^]*사례 반영/);
+  assert.match(content, /첫 청크 manifest[^]*500줄 이하/);
+  assert.match(content, /실패와 해결[^]*`step_archive\/outputs\/step025_검증\.md`에만/);
+  assert.doesNotMatch(content, /failure_patterns|스킵[^]*(?:완료|종료)/i);
+});
+
+test("steps 026 through 028 preserve source-specific evidence without rerunning untrusted work", async () => {
+  const step26 = await readFile(join(repoRoot, "codex", "assets", "steps", "step026.md"), "utf8");
+  const step27 = await readFile(join(repoRoot, "codex", "assets", "steps", "step027.md"), "utf8");
+  const step28 = await readFile(join(repoRoot, "codex", "assets", "steps", "step028.md"), "utf8");
+
+  assert.match(step26, /보존된 단일 성공 API 응답[^]*후보와 사실만/);
+  assert.match(step26, /새 API 요청[^]*금지/);
+  assert.match(step26, /아키텍처[^]*패턴 결정[^]*출처 경로[^]*응답 항목/);
+
+  assert.match(step27, /구체적인 계약 대상[^]*버전[^]*(?:endpoint|message)[^]*data schema/i);
+  assert.match(step27, /필수 필드[^]*선택 필드[^]*인증[^]*rate limit[^]*오류[^]*재시도[^]*제한/);
+  assert.match(step27, /원본에 없는 필드[^]*발명하지 않는다/);
+
+  assert.match(step28, /격리 복제[^]*정적 분석/);
+  assert.match(step28, /코드[^]*(?:실행|설치|빌드|테스트|자동화)[^]*금지/);
+  assert.match(step28, /구조[^]*패턴[^]*제약[^]*복제 파일 경로[^]*줄 범위/);
+});
+
+test("step029 turns only inspected visual evidence into responsive accessible planning", async () => {
+  const step = (await validateStepBatch(repoRoot, [29])).steps[0];
+  const content = await readFile(join(repoRoot, step.target), "utf8");
+
+  assert.equal(step.visual_review, true);
+  assert.ok(step.acceptance.some((item) => (
+    item.kind === "artifact" && item.required && item.path === "step_archive/screenshots/research/step022-primary-desktop.png"
+  )));
+  assert.ok(step.acceptance.some((item) => item.id === "visual-evidence-inspection" && item.required));
+  assert.match(content, /실제로 열어[^]*manifest[^]*비교/);
+  assert.match(content, /시각 검사 기능[^]*사용할 수 없으면[^]*완료하지 않는다/);
+  assert.match(content, /실제로 이름이 붙은 조사 축[^]*근거 있는 대안만/);
+  assert.match(content, /레이아웃[^]*UX\/UI[^]*인터랙션[^]*반응형[^]*텍스트 와이어프레임/);
+  assert.match(content, /키보드[^]*포커스[^]*터치[^]*reduced-motion[^]*명암/);
+});
+
+test("step030 separates three alternatives, independent selection, final design, and verification", async () => {
+  const content = await readFile(join(repoRoot, "codex", "assets", "steps", "step030.md"), "utf8");
+
+  assert.match(content, /가장 먼저[^]*`step_archive\/TOPIC\/TOPIC\.md`/);
+  assert.match(content, /첫 설계 활동[^]*구조화된 브레인스토밍[^]*대안 탐색/);
+  assert.match(content, /외부 기능의 특정 이름[^]*의존하지 않는다/);
+  assert.match(content, /사용자에게 옵션을 질문하지 않고[^]*주제 제약 안에서[^]*결정/);
+  assert.match(content, /설계안 A[^]*설계안 B[^]*설계안 C/);
+  assert.match(content, /레이아웃 구조[^]*아키텍처[^]*반응형 전략[^]*실질적으로 달라야/);
+  assert.match(content, /독립 선택자[^]*대안을 수정하지 않고[^]*하나만 선택/);
+  assert.match(content, /유지보수성[^]*반응형 구현 난이도[^]*조사 적합성[^]*접근성/);
+  assert.match(content, /선택된 안만[^]*최종[^]*설계/);
+  assert.match(content, /최종 독립 검증자[^]*`PASS`[^]*경우에만[^]*완료/);
+});
+
+test("step030 preserves class, async lifecycle, performance, and accessibility contracts", async () => {
+  const content = await readFile(join(repoRoot, "codex", "assets", "steps", "step030.md"), "utf8");
+
+  assert.match(content, /단일 책임[^]*합성[^]*생성자 주입[^]*전역 상태[^]*public[^]*private/i);
+  assert.match(content, /`async init\(\)`[^]*`async start\(\)`/);
+  assert.match(content, /I\/O[^]*DOM[^]*애니메이션[^]*취소[^]*오류[^]*병렬[^]*성능/);
+  assert.match(content, /클래스 다이어그램[^]*의존 관계도[^]*public async 시그니처[^]*시퀀스 다이어그램[^]*라이프사이클/);
+  assert.match(content, /반응형 breakpoint[^]*상태[^]*키보드[^]*포커스[^]*reduced-motion[^]*터치/i);
+  assert.match(content, /모든 라운드[^]*`step_archive\/outputs\/step030_최종검증\.md`[^]*라운드별 섹션/);
+  assert.match(content, /최대 5라운드[^]*5라운드[^]*`PASS`[^]*없으면[^]*차단/);
+});
+
 test("preflight documents bind exact frontmatter and titles to only their current step", async () => {
   const expected = [
     { name: "step001", phase: "preflight", number: 1, title: "하네스 프리플라이트 체크" },
