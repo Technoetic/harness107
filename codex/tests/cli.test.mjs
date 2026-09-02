@@ -101,14 +101,18 @@ async function inspectOutputQuarantine(mode) {
     const secret = "late output secret";
     const uncaught = [];
     const unhandled = [];
+    const warnings = [];
     process.on("uncaughtException", error => uncaught.push(error.message));
     process.on("unhandledRejection", error => unhandled.push(error?.message ?? String(error)));
+    process.on("warning", warning => warnings.push(warning.message));
 
     class HostileWritable extends EventEmitter {
-      constructor({ backpressure = false, destroyMode = "close" } = {}) {
+      constructor({ backpressure = false, destroyMode = "close", listenerMode = "normal" } = {}) {
         super();
         this.backpressure = backpressure;
         this.destroyMode = destroyMode;
+        this.listenerMode = listenerMode;
+        this.destroyCalls = 0;
         this.destroyed = false;
         this.closed = false;
         this.writable = true;
@@ -124,9 +128,29 @@ async function inspectOutputQuarantine(mode) {
         return !this.backpressure;
       }
 
+      on(...args) {
+        if (this.listenerMode === "throw-add") throw new Error(secret);
+        return super.on(...args);
+      }
+
+      addListener(...args) {
+        if (this.listenerMode === "throw-add") throw new Error(secret);
+        return super.addListener(...args);
+      }
+
+      removeListener(...args) {
+        if (this.listenerMode === "throw-remove") throw new Error(secret);
+        return super.removeListener(...args);
+      }
+
       destroy() {
+        this.destroyCalls += 1;
         if (this.destroyMode === "throw") throw new Error(secret);
         if (this.destroyMode === "noop") return this;
+        if (this.destroyMode === "clear-errors") {
+          EventEmitter.prototype.removeAllListeners.call(this, "error");
+          return this;
+        }
         this.destroyed = true;
         this.closed = true;
         this.emit("close");
@@ -137,22 +161,28 @@ async function inspectOutputQuarantine(mode) {
     const terminalEvents = [];
     const output = new HostileWritable({
       backpressure: mode === "backpressure",
-      destroyMode: ["close-then-error", "destroy-noop", "double-error", "never", "repeated"].includes(mode)
+      destroyMode: ["close-then-error", "destroy-noop", "double-error", "never", "repeated", "guard-reinstall", "concurrent"].includes(mode)
         ? "noop"
-        : mode === "destroy-throw" ? "throw" : "close"
+        : ["destroy-throw", "direct-destroy-throw"].includes(mode) ? "throw"
+          : ["destroy-clears", "direct-destroy-clears"].includes(mode) ? "clear-errors" : "close",
+      listenerMode: ["remove-throws", "direct-remove-throws"].includes(mode)
+        ? "throw-remove"
+        : ["add-throws", "direct-add-throws"].includes(mode) ? "throw-add" : "normal"
     });
-    output.on("close", () => terminalEvents.push("close"));
+    EventEmitter.prototype.on.call(output, "close", () => terminalEvents.push("close"));
     const baseline = {
       error: output.listenerCount("error"),
       close: output.listenerCount("close"),
       drain: output.listenerCount("drain")
     };
-    const timeoutMs = mode === "direct-stderr" ? 1000 : 5;
+    const isDirect = mode.startsWith("direct-");
+    const timeoutMs = isDirect ? 1000 : 5;
     const rejections = [];
     const startedAt = Date.now();
     const attempts = mode === "repeated" ? 3 : 1;
     let directExitCode = null;
-    if (mode === "direct-stderr") {
+    let afterGuardRemoval = null;
+    if (isDirect) {
       const { runDirect } = await import(${JSON.stringify(harnessStateUrl)});
       await runDirect([], {
         stderr: output,
@@ -161,6 +191,27 @@ async function inspectOutputQuarantine(mode) {
         }
       });
       directExitCode = process.exitCode;
+    } else if (mode === "concurrent") {
+      const results = await Promise.allSettled(Array.from(
+        { length: 20 },
+        () => writeOutput(output, "fixture", { timeoutMs })
+      ));
+      for (const result of results) {
+        const error = result.reason;
+        rejections.push({ code: error?.code, message: error?.message });
+      }
+    } else if (mode === "guard-reinstall") {
+      for (let index = 0; index < 2; index += 1) {
+        try {
+          await writeOutput(output, "fixture", { timeoutMs });
+        } catch (error) {
+          rejections.push({ code: error.code, message: error.message });
+        }
+        if (index === 0) {
+          EventEmitter.prototype.removeAllListeners.call(output, "error");
+          afterGuardRemoval = output.listenerCount("error");
+        }
+      }
     } else {
       for (let index = 0; index < attempts; index += 1) {
         try {
@@ -178,9 +229,9 @@ async function inspectOutputQuarantine(mode) {
     };
     setTimeout(() => {
       if (mode === "delayed-callback-error") output.callbacks[0](new Error(secret));
-      else if (mode === "delayed-emitted-error" || mode === "backpressure" || mode === "direct-stderr") {
+      else if (mode === "delayed-emitted-error" || mode === "backpressure" || isDirect) {
         output.emit("error", new Error(secret));
-      } else if (mode === "double-error" || mode === "destroy-noop" || mode === "destroy-throw" || mode === "repeated") {
+      } else if (["double-error", "destroy-noop", "destroy-throw", "destroy-clears", "remove-throws", "add-throws", "repeated", "guard-reinstall", "concurrent"].includes(mode)) {
         output.emit("error", new Error(secret));
         output.emit("error", new Error(secret));
       } else if (mode === "callback-success-then-error") {
@@ -201,14 +252,17 @@ async function inspectOutputQuarantine(mode) {
     process.stdout.write(JSON.stringify({
       rejections,
       directExitCode,
+      afterGuardRemoval,
       rejectedAfterMs,
       baseline,
       during,
       final,
+      destroyCalls: output.destroyCalls,
       destroyed: output.destroyed,
       terminalEvents,
       uncaught,
-      unhandled
+      unhandled,
+      warnings
     }) + "\\n");
     process.exitCode = 0;
   `;
@@ -566,6 +620,30 @@ test("main rejects an output close before completion and removes its temporary l
   }, baseline);
 });
 
+test("main rejects a non-EventEmitter output shape before invoking its methods", async () => {
+  const root = await makeWorkspace();
+  let methodCalled = false;
+  const output = {
+    destroyed: false,
+    writable: true,
+    writableEnded: false,
+    write(_value, callback) {
+      methodCalled = true;
+      callback();
+      return true;
+    },
+    on() { return this; },
+    once() { return this; },
+    removeListener() { return this; },
+    destroy() { return this; }
+  };
+  await assert.rejects(
+    () => main(["show", "--workspace", root], { stdout: output }),
+    error => error.code === "OUTPUT_STREAM" && error.message === "output stream failed"
+  );
+  assert.equal(methodCalled, false);
+});
+
 for (const fixture of [
   { mode: "delayed-callback-error", label: "a callback error beyond the old cleanup window" },
   { mode: "delayed-emitted-error", label: "an emitted error beyond the old cleanup window" },
@@ -575,6 +653,9 @@ for (const fixture of [
   { mode: "close-then-error", label: "an error after close" },
   { mode: "destroy-noop", label: "late errors when destroy is a no-op" },
   { mode: "destroy-throw", label: "late errors when destroy throws" },
+  { mode: "destroy-clears", label: "late errors when destroy clears error listeners" },
+  { mode: "remove-throws", label: "a throwing removeListener override" },
+  { mode: "add-throws", label: "throwing on and addListener overrides" },
   { mode: "never", label: "a non-terminating stream" }
 ]) {
   test(`writeOutput quarantines ${fixture.label} without retaining temporary listeners`, async () => {
@@ -593,6 +674,8 @@ for (const fixture of [
     assert.equal(inspection.during.drain, inspection.baseline.drain);
     assert.deepEqual(inspection.uncaught, []);
     assert.deepEqual(inspection.unhandled, []);
+    assert.deepEqual(inspection.warnings, []);
+    assert.equal(inspection.destroyCalls, 0);
     assert.equal(inspection.final.error, inspection.baseline.error + 1);
     assert.equal(inspection.final.close, inspection.baseline.close);
     assert.equal(inspection.final.drain, inspection.baseline.drain);
@@ -616,22 +699,72 @@ test("repeated writeOutput timeouts share exactly one quarantine guard", async (
   assert.deepEqual(inspection.unhandled, []);
 });
 
-test("the direct error-path stderr timeout retains its one guard for later errors", async () => {
-  const result = await inspectOutputQuarantine("direct-stderr");
+test("a later writeOutput call reinstalls one externally removed quarantine guard", async () => {
+  const result = await inspectOutputQuarantine("guard-reinstall");
   assert.equal(result.code, 0, result.stderr);
   assert.equal(result.stderr, "");
-  assert.doesNotMatch(result.stderr, /late output secret|Error:|node:internal|json-io\.mjs/i);
   const inspection = JSON.parse(result.stdout);
-  assert.deepEqual(inspection.rejections, []);
-  assert.equal(inspection.directExitCode, 1);
-  assert.ok(inspection.rejectedAfterMs >= 900);
-  assert.ok(inspection.rejectedAfterMs < 1300, `stderr timeout settled after ${inspection.rejectedAfterMs} ms`);
-  assert.equal(inspection.final.error, inspection.baseline.error + 1);
-  assert.equal(inspection.final.close, inspection.baseline.close);
-  assert.equal(inspection.final.drain, inspection.baseline.drain);
+  assert.deepEqual(inspection.rejections, Array.from({ length: 2 }, () => ({
+    code: "OUTPUT_STREAM",
+    message: "output stream failed"
+  })));
+  assert.equal(inspection.afterGuardRemoval, 0);
+  assert.equal(inspection.during.error, inspection.baseline.error + 1);
+  assert.equal(inspection.during.close, inspection.baseline.close);
+  assert.equal(inspection.during.drain, inspection.baseline.drain);
+  assert.deepEqual(inspection.final, inspection.during);
+  assert.equal(inspection.destroyCalls, 0);
   assert.deepEqual(inspection.uncaught, []);
   assert.deepEqual(inspection.unhandled, []);
+  assert.deepEqual(inspection.warnings, []);
 });
+
+test("concurrent writeOutput timeouts share listeners without process warnings", async () => {
+  const result = await inspectOutputQuarantine("concurrent");
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  assert.doesNotMatch(result.stderr, /MaxListenersExceededWarning|late output secret|node:internal|json-io\.mjs/i);
+  const inspection = JSON.parse(result.stdout);
+  assert.deepEqual(inspection.rejections, Array.from({ length: 20 }, () => ({
+    code: "OUTPUT_STREAM",
+    message: "output stream failed"
+  })));
+  assert.equal(inspection.during.error, inspection.baseline.error + 1);
+  assert.equal(inspection.during.close, inspection.baseline.close);
+  assert.equal(inspection.during.drain, inspection.baseline.drain);
+  assert.deepEqual(inspection.final, inspection.during);
+  assert.equal(inspection.destroyCalls, 0);
+  assert.deepEqual(inspection.uncaught, []);
+  assert.deepEqual(inspection.unhandled, []);
+  assert.deepEqual(inspection.warnings, []);
+});
+
+for (const fixture of [
+  { mode: "direct-stderr", label: "ordinary hostile stderr" },
+  { mode: "direct-destroy-clears", label: "stderr whose destroy clears listeners" },
+  { mode: "direct-destroy-throw", label: "stderr whose destroy throws" },
+  { mode: "direct-remove-throws", label: "stderr with a throwing removeListener override" },
+  { mode: "direct-add-throws", label: "stderr with throwing listener-add overrides" }
+]) {
+  test(`the direct error path quarantines ${fixture.label}`, async () => {
+    const result = await inspectOutputQuarantine(fixture.mode);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.stderr, "");
+    assert.doesNotMatch(result.stderr, /MaxListenersExceededWarning|late output secret|Error:|node:internal|json-io\.mjs/i);
+    const inspection = JSON.parse(result.stdout);
+    assert.deepEqual(inspection.rejections, []);
+    assert.equal(inspection.directExitCode, 1);
+    assert.ok(inspection.rejectedAfterMs >= 900);
+    assert.ok(inspection.rejectedAfterMs < 1300, `stderr timeout settled after ${inspection.rejectedAfterMs} ms`);
+    assert.equal(inspection.final.error, inspection.baseline.error + 1);
+    assert.equal(inspection.final.close, inspection.baseline.close);
+    assert.equal(inspection.final.drain, inspection.baseline.drain);
+    assert.equal(inspection.destroyCalls, 0);
+    assert.deepEqual(inspection.uncaught, []);
+    assert.deepEqual(inspection.unhandled, []);
+    assert.deepEqual(inspection.warnings, []);
+  });
+}
 
 test("main supports injected streams and importing the module does not execute the entrypoint", async () => {
   const root = await makeWorkspace();

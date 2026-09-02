@@ -1,24 +1,99 @@
+import { EventEmitter } from "node:events";
 import { TextDecoder } from "node:util";
 
 import { HarnessError } from "./errors.mjs";
 
 const DEFAULT_TIMEOUT_MS = 10000;
 const DEFAULT_OUTPUT_TIMEOUT_MS = 1000;
-const quarantinedOutputStreams = new WeakSet();
-const quarantineOutputError = () => {};
+const outputControllers = new WeakMap();
 
 function fail(code, message) {
   throw new HarnessError(code, message);
 }
 
-function quarantineOutput(stream) {
-  if (quarantinedOutputStreams.has(stream)) return;
-  quarantinedOutputStreams.add(stream);
+function hasOutputListener(stream, event, listener) {
   try {
-    stream.on("error", quarantineOutputError);
+    return EventEmitter.prototype.listeners.call(stream, event).includes(listener);
   } catch {
-    // A nonconforming stream must not turn sanitized failure handling into a throw.
+    return false;
   }
+}
+
+function addOutputListener(stream, event, listener) {
+  if (hasOutputListener(stream, event, listener)) return true;
+  try {
+    EventEmitter.prototype.on.call(stream, event, listener);
+  } catch {
+    // Verification below detects partial or rejected registration.
+  }
+  return hasOutputListener(stream, event, listener);
+}
+
+function removeOutputListener(stream, event, listener) {
+  if (!hasOutputListener(stream, event, listener)) return true;
+  try {
+    EventEmitter.prototype.removeListener.call(stream, event, listener);
+  } catch {
+    // Verification below detects removal that did not complete.
+  }
+  return !hasOutputListener(stream, event, listener);
+}
+
+function getOutputController(stream) {
+  let controller = outputControllers.get(stream);
+  if (controller !== undefined) return controller;
+
+  controller = {
+    stream,
+    requests: new Set(),
+    quarantined: false,
+    onError: null,
+    onClose: null,
+    onDrain: null
+  };
+  const notify = method => {
+    for (const request of [...controller.requests]) {
+      try {
+        request[method]();
+      } catch {
+        // Event delivery must never surface a caller or cleanup exception.
+      }
+    }
+  };
+  controller.onError = () => notify("onError");
+  controller.onClose = () => notify("onClose");
+  controller.onDrain = () => notify("onDrain");
+  outputControllers.set(stream, controller);
+  return controller;
+}
+
+function ensureQuarantine(controller) {
+  controller.quarantined = true;
+  return addOutputListener(controller.stream, "error", controller.onError);
+}
+
+function ensureControllerListeners(controller) {
+  return (
+    addOutputListener(controller.stream, "error", controller.onError) &&
+    addOutputListener(controller.stream, "close", controller.onClose) &&
+    addOutputListener(controller.stream, "drain", controller.onDrain)
+  );
+}
+
+function releaseOutputRequest(controller, request) {
+  if (request.released) return;
+  request.released = true;
+  controller.requests.delete(request);
+  if (controller.requests.size !== 0) return;
+
+  const closeRemoved = removeOutputListener(controller.stream, "close", controller.onClose);
+  const drainRemoved = removeOutputListener(controller.stream, "drain", controller.onDrain);
+  if (controller.quarantined) {
+    ensureQuarantine(controller);
+    return;
+  }
+  const errorRemoved = removeOutputListener(controller.stream, "error", controller.onError);
+  if (!closeRemoved || !drainRemoved || !errorRemoved) ensureQuarantine(controller);
 }
 
 function decodeJson(chunks) {
@@ -112,71 +187,73 @@ export async function readJsonInput(stream, maxBytes, {
 export async function writeOutput(stream, value, {
   timeoutMs = DEFAULT_OUTPUT_TIMEOUT_MS
 } = {}) {
-  if (
-    stream === null || typeof stream !== "object" ||
-    typeof stream.write !== "function" ||
-    typeof stream.on !== "function" ||
-    typeof stream.once !== "function" ||
-    typeof stream.removeListener !== "function" ||
-    typeof stream.destroy !== "function"
-  ) {
+  let invalidStream = false;
+  try {
+    invalidStream = !(stream instanceof EventEmitter) || typeof stream.write !== "function";
+  } catch {
+    invalidStream = true;
+  }
+  if (invalidStream) {
     fail("OUTPUT_STREAM", "output stream failed");
   }
   if (typeof value !== "string") fail("OUTPUT_STREAM", "output stream failed");
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
     fail("OUTPUT_STREAM", "output stream failed");
   }
-  if (stream.destroyed || stream.writableEnded || stream.writable === false) {
+  let unavailable = false;
+  try {
+    unavailable = stream.destroyed || stream.writableEnded || stream.writable === false;
+  } catch {
+    unavailable = true;
+  }
+  if (unavailable) {
     fail("OUTPUT_STREAM", "output stream failed");
   }
 
   await new Promise((resolve, reject) => {
+    const controller = getOutputController(stream);
     let callerSettled = false;
     let writeReturned = false;
     let callbackComplete = false;
     let needsDrain = false;
     let drained = false;
     let callbackFailure = null;
+    let timeoutTimer = null;
 
+    const request = {
+      released: false,
+      onError: () => {
+        settleCaller(new Error("output error"));
+        cleanup();
+      },
+      onClose: () => {
+        settleCaller(new Error("output closed"));
+        cleanup();
+      },
+      onDrain: () => {
+        drained = true;
+        maybeFinish();
+      }
+    };
     const cleanup = () => {
       if (callbackFailure !== null) clearImmediate(callbackFailure);
       callbackFailure = null;
-      clearTimeout(timeoutTimer);
-      stream.removeListener("error", onError);
-      stream.removeListener("close", onClose);
-      stream.removeListener("drain", onDrain);
+      if (timeoutTimer !== null) clearTimeout(timeoutTimer);
+      timeoutTimer = null;
+      releaseOutputRequest(controller, request);
     };
     const settleCaller = error => {
       if (callerSettled) return;
       callerSettled = true;
-      clearTimeout(timeoutTimer);
+      if (timeoutTimer !== null) clearTimeout(timeoutTimer);
       if (error === null) resolve();
       else reject(new HarnessError("OUTPUT_STREAM", "output stream failed"));
     };
-    const destroyTransport = () => {
-      try {
-        if (!stream.destroyed) stream.destroy();
-      } catch {
-        // The caller receives only the stable OUTPUT_STREAM failure.
-      }
-    };
     const maybeFinish = () => {
+      if (callerSettled) return;
       if (!writeReturned || !callbackComplete || (needsDrain && !drained)) return;
       settleCaller(null);
       cleanup();
-    };
-    const onError = () => {
-      settleCaller(new Error("output error"));
-      cleanup();
-      destroyTransport();
-    };
-    const onClose = () => {
-      settleCaller(new Error("output closed"));
-      cleanup();
-    };
-    const onDrain = () => {
-      drained = true;
-      maybeFinish();
     };
     const onWrite = error => {
       if (callerSettled) return;
@@ -185,23 +262,29 @@ export async function writeOutput(stream, value, {
         callbackFailure = setImmediate(() => {
           callbackFailure = null;
           cleanup();
-          destroyTransport();
         });
         return;
       }
       callbackComplete = true;
       maybeFinish();
     };
-    const timeoutTimer = setTimeout(() => {
-      quarantineOutput(stream);
+
+    controller.requests.add(request);
+    if (controller.quarantined) ensureQuarantine(controller);
+    if (!ensureControllerListeners(controller)) {
+      ensureQuarantine(controller);
+      settleCaller(new Error("output listener registration"));
+      cleanup();
+      return;
+    }
+
+    timeoutTimer = setTimeout(() => {
+      if (callerSettled) return;
+      ensureQuarantine(controller);
       settleCaller(new Error("output timeout"));
       cleanup();
-      destroyTransport();
     }, timeoutMs);
 
-    stream.once("error", onError);
-    stream.once("close", onClose);
-    stream.once("drain", onDrain);
     try {
       needsDrain = stream.write(value, onWrite) === false;
       writeReturned = true;
