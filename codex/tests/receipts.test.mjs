@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 
 import { pathsFor } from "../scripts/lib/paths.mjs";
 import {
@@ -348,8 +349,81 @@ test("receipt publication exposes no final file before complete bytes are file-s
     }
   });
 
-  assert.deepEqual(stages, ["write", "file-sync", "before-publish", "publish", "directory-sync"]);
+  assert.deepEqual(stages.slice(-5), ["write", "file-sync", "before-publish", "publish", "directory-sync"]);
   assert.deepEqual(JSON.parse(await readFile(path, "utf8")), receiptFor(1));
+});
+
+test("production directory flush syncs and closes a real directory handle on this host", async () => {
+  const root = await makeWorkspace();
+  const { syncDirectoryDurable } = await import("../scripts/lib/receipts.mjs");
+
+  await assert.doesNotReject(() => syncDirectoryDurable(root));
+});
+
+test("directory flush uses writable Windows handles readable POSIX handles and fails closed", async t => {
+  const { syncDirectoryDurable } = await import("../scripts/lib/receipts.mjs");
+  for (const fixture of [
+    { platform: "win32", expectedFlag: "r+", failureCode: "EIO" },
+    { platform: "linux", expectedFlag: "r", failureCode: "EINVAL" }
+  ]) {
+    await t.test(fixture.platform, async () => {
+      const calls = [];
+      await assert.rejects(() => syncDirectoryDurable("fixture-directory", {
+        platform: fixture.platform,
+        openDirectory: async (_path, flag) => {
+          calls.push(["open", flag]);
+          return {
+            async sync() {
+              calls.push(["sync"]);
+              throw Object.assign(new Error("injected directory fsync failure"), { code: fixture.failureCode });
+            },
+            async close() {
+              calls.push(["close"]);
+            }
+          };
+        }
+      }), error => {
+        assert.equal(error.code, "RECEIPT_DURABILITY_ERROR");
+        assert.equal(error.details.cause_code, fixture.failureCode);
+        return true;
+      });
+      assert.deepEqual(calls, [["open", fixture.expectedFlag], ["sync"], ["close"]]);
+    });
+  }
+
+  await assert.rejects(() => syncDirectoryDurable("fixture-directory", {
+    platform: "win32",
+    openDirectory: async () => {
+      throw Object.assign(new Error("injected directory open failure"), { code: "EPERM" });
+    }
+  }), error => {
+    assert.equal(error.code, "RECEIPT_DURABILITY_ERROR");
+    assert.equal(error.details.cause_code, "EPERM");
+    return true;
+  });
+});
+
+test("first-use storage creation durably orders each new directory with its parent", async () => {
+  const root = await makeWorkspace();
+  const paths = pathsFor(root);
+  const synchronized = [];
+
+  await writeReceiptExclusive(root, receiptFor(1), {
+    syncDirectory: async directoryPath => {
+      synchronized.push(directoryPath);
+    }
+  });
+
+  assert.deepEqual(synchronized, [
+    join(root, "step_archive"),
+    root,
+    paths.codexDir,
+    join(root, "step_archive"),
+    paths.receiptsDir,
+    paths.codexDir,
+    paths.receiptsDir
+  ]);
+  assert.deepEqual(await readReceipts(root), [receiptFor(1)]);
 });
 
 test("concurrent identical receipt writers publish once and both become idempotent", async () => {
@@ -424,11 +498,11 @@ test("directory-sync failure keeps the complete winner and identical retry finis
   await assert.rejects(() => writeReceiptExclusive(root, receiptFor(1), {
     syncDirectory: async () => {
       syncAttempts += 1;
-      throw new Error("injected directory-sync failure");
+      if (syncAttempts === 7) throw new Error("injected directory-sync failure");
     }
   }), /injected directory-sync failure/);
 
-  assert.equal(syncAttempts, 1);
+  assert.equal(syncAttempts, 7);
   assert.deepEqual(await readReceipts(root), [receiptFor(1)]);
   await assert.doesNotReject(() => writeReceiptExclusive(root, receiptFor(1)));
   await assert.rejects(

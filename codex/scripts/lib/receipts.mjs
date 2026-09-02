@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { link, open, mkdir, readFile, readdir, unlink } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import { HarnessError } from "./errors.mjs";
 import { pathsFor } from "./paths.mjs";
@@ -266,16 +266,47 @@ export async function readReceipts(workspaceRoot) {
   return receipts;
 }
 
-async function flushDirectory(directoryPath) {
-  if (process.platform === "win32") return;
+export async function syncDirectoryDurable(directoryPath, {
+  platform = process.platform,
+  openDirectory = open
+} = {}) {
+  if (typeof openDirectory !== "function") {
+    throw new HarnessError("RECEIPT_WRITE_OPTIONS_INVALID", "openDirectory must be a function");
+  }
   let handle;
+  let failure;
   try {
-    handle = await open(directoryPath, "r");
+    handle = await openDirectory(directoryPath, platform === "win32" ? "r+" : "r");
     await handle.sync();
   } catch (error) {
-    if (!["EINVAL", "ENOTSUP", "EISDIR"].includes(error?.code)) throw error;
-  } finally {
+    failure = error;
+  }
+  try {
     await handle?.close();
+  } catch (error) {
+    if (failure === undefined) failure = error;
+  }
+  if (failure !== undefined) {
+    throw new HarnessError("RECEIPT_DURABILITY_ERROR", "receipt storage directory could not be synchronized", {
+      cause_code: typeof failure?.code === "string" ? failure.code : "UNKNOWN"
+    });
+  }
+}
+
+async function ensureReceiptStorage(workspaceRoot, codexDir, receiptsDir, syncDirectory) {
+  const directories = [
+    join(workspaceRoot, "step_archive"),
+    codexDir,
+    receiptsDir
+  ];
+  for (const directoryPath of directories) {
+    try {
+      await mkdir(directoryPath, { mode: 0o700 });
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
+    await syncDirectory(directoryPath);
+    await syncDirectory(dirname(directoryPath));
   }
 }
 
@@ -292,12 +323,13 @@ export async function writeReceiptExclusive(workspaceRoot, rawReceipt, {
   syncFile = syncFileDefault,
   beforePublish,
   publishFile = link,
-  syncDirectory = flushDirectory,
+  syncDirectory = syncDirectoryDurable,
   removeFile = unlink,
   idFactory = randomUUID
 } = {}) {
   const receipt = parseReceipt(rawReceipt);
-  const { receiptsDir } = pathsFor(workspaceRoot);
+  const paths = pathsFor(workspaceRoot);
+  const { codexDir, receiptsDir } = paths;
   const path = receiptPath(workspaceRoot, receipt.step);
   const serialized = `${JSON.stringify(receipt, null, 2)}\n`;
   for (const [name, value] of Object.entries({ writeBytes, syncFile, publishFile, syncDirectory, removeFile, idFactory })) {
@@ -308,7 +340,7 @@ export async function writeReceiptExclusive(workspaceRoot, rawReceipt, {
   if (beforePublish !== undefined && typeof beforePublish !== "function") {
     throw new HarnessError("RECEIPT_WRITE_OPTIONS_INVALID", "beforePublish must be a function");
   }
-  await mkdir(receiptsDir, { recursive: true });
+  await ensureReceiptStorage(paths.workspaceRoot, codexDir, receiptsDir, syncDirectory);
 
   const temporaryPath = join(receiptsDir, `.${basename(path)}.${process.pid}.${idFactory()}.tmp`);
 
