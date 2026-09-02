@@ -2579,270 +2579,324 @@ function assertStep35RoleContract(content) {
   assertPlanningPermissionContract(content);
 }
 
-function optionalRemoteToolContradictionRules(tool) {
-  return [
-    {
-      label: `${tool} remote download when the local tool is absent (Korean)`,
-      pattern: new RegExp(
-        String.raw`(?:로컬|local)[^.!?]{0,40}\b${tool}\b[^.!?]{0,70}(?:없(?:으면|어도)|부재|찾지 못(?:하면)?|미설치)[^.!?]{0,140}(?:(?:원격|네트워크|registry|remote|network)[^.!?]{0,80}(?:다운로드해|다운로드하여|다운로드한다|받아|설치해|설치하여|설치한다|가져와)|(?:다운로드해|다운로드하여|다운로드한다|받아|설치해|설치하여|설치한다|가져와)[^.!?]{0,80}(?:원격|네트워크|registry|remote|network))`,
-        "i"
-      )
-    },
-    {
-      label: `${tool} remote download when the local tool is absent (English)`,
-      pattern: new RegExp(
-        String.raw`\blocal\b[^.!?]{0,30}\b${tool}\b[^.!?]{0,70}\b(?:is\s+)?(?:absent|missing|unavailable|not (?:found|installed|available))\b[^.!?]{0,160}(?:(?:\bdownload\b|\bfetch\b|\binstall\b)[^.!?]{0,80}\b(?:network|internet|remote|registry)\b|\b(?:network|internet|remote|registry)\b[^.!?]{0,80}\b(?:download|fetch|install)\b)`,
-        "i"
-      ),
-      unless: /\b(?:do not|don't|never|must not|cannot|can't|may not)\s+(?:download|fetch|install)\b/i
-    }
-  ];
-}
+const IMPLEMENTATION_SEMANTIC_CONCEPTS = Object.freeze({
+  dependency_probe: [
+    String.raw`\b(?:dependency\s+)?(?:resolve|resolution|version|smoke)(?:\s+(?:check|probe|test))?\b`,
+    String.raw`(?:의존성\s*)?(?:해석|버전|스모크)(?:\s*(?:검사|확인|테스트))?`
+  ],
+  invalid_state: [
+    String.raw`\b(?:fail(?:s|ed|ing|ure)?|unresolved|unverified|missing|nonzero|broken)\b`,
+    String.raw`\b(?:cannot|can't|could\s+not|is\s+not|was\s+not)\s+(?:be\s+)?(?:verified|resolved|completed|passed)\b`,
+    String.raw`(?:실패|누락|미확인|미검증|검증되지|해석되지|통과하지\s*못|0개가\s*아니|남아\s*있)`
+  ],
+  completion_result: [
+    String.raw`\b(?:pass(?:es|ed|ing)?|success(?:ful|fully)?|complet(?:e|ed|es|ely|ion)|milestone)\b`,
+    String.raw`(?:패스|성공|완료|마일스톤|milestone)`
+  ],
+  permission_result: [
+    String.raw`\b(?:allow(?:s|ed|ing)?|permit(?:s|ted|ting)?|accept(?:s|ed|ing|able)?|tolerat(?:e|ed|es|ing)|okay|optional)\b`,
+    String.raw`(?:허용|용인|괜찮|선택\s*사항)`
+  ],
+  ownership_scope: [
+    String.raw`\b(?:file|module)\s+ownership\b`,
+    String.raw`(?:파일|모듈)\s*소유권`
+  ],
+  overlap_state: [
+    String.raw`\b(?:overlap(?:s|ped|ping)?|conflict(?:s|ed|ing)?|duplicate\s+ownership)\b`,
+    String.raw`(?:겹치|중복|충돌)`
+  ],
+  dependency_order: [
+    String.raw`\bdependency\s+order\b`,
+    String.raw`의존성\s*순서`
+  ],
+  unclosed_state: [
+    String.raw`\b(?:unclosed|incomplete|open|not\s+closed)\b`,
+    String.raw`(?:닫히지|미완성|열려|폐쇄되지)`
+  ],
+  jscpd_tool: [String.raw`\bjscpd\b`],
+  knip_tool: [String.raw`\bknip\b`],
+  local_scope: [
+    String.raw`\b(?:local|locally|on[- ]disk|project[- ]installed)\b`,
+    String.raw`(?:로컬|프로젝트\s*내부|이미\s*설치)`
+  ],
+  unavailable_state: [
+    String.raw`\b(?:absent|missing|unavailable|not\s+(?:found|installed|available)|cannot\s+be\s+found|can't\s+be\s+found|no\s+local\s+executable)\b`,
+    String.raw`(?:없(?:으면|어도|다)?|부재|찾(?:을|지)\s*수\s*없|미설치)`
+  ],
+  remote_source: [
+    String.raw`\b(?:npm'?s?\s+(?:package\s+)?registry|package\s+registry|remote|online|network|internet|registry)\b`,
+    String.raw`(?:원격|온라인|네트워크|인터넷|레지스트리|registry)`
+  ],
+  retrieval_action: [
+    String.raw`\b(?:retrieve(?:s|d|ing)?|fetch(?:es|ed|ing)?|download(?:s|ed|ing)?|install(?:s|ed|ing)?|acquire(?:s|d|ing)?|pull(?:s|ed|ing)?)\b`,
+    String.raw`(?:다운로드|내려받|가져오|받아오|받아|설치|취득)`
+  ],
+  hidden_scope: [
+    String.raw`\b(?:hidden|private|internal|unobservable|inaccessible|undisclosed)\b`,
+    String.raw`(?:숨겨진|비공개|내부의|관찰할\s*수\s*없는|접근할\s*수\s*없는)`
+  ],
+  token_balance: [
+    String.raw`\b(?:token|context[- ]?token)[- ]*(?:balance|budget|quota|remainder|remaining)\b`,
+    String.raw`\b(?:remaining|available|left)[- ]*token(?:[- ]*(?:balance|budget|quota))?\b`,
+    String.raw`(?:토큰|컨텍스트)[^,;:.!?]{0,20}(?:잔량|한도|예산|쿼터|남은)`
+  ],
+  observation_claim: [
+    String.raw`\b(?:claim(?:s|ed|ing)?|report(?:s|ed|ing)?|stat(?:e|ed|ing)|assert(?:s|ed|ing)?|pretend(?:s|ed|ing)?|observ(?:e|ed|able|ing)|measur(?:e|ed|able|ing)|know|known|knew|see|visible)\b`,
+    String.raw`(?:주장|보고|공언|관찰|측정|확인|파악|알고\s*있)`
+  ],
+  encoding_target: [
+    String.raw`\b(?:bom|crlf|byte\s+order\s+mark|carriage[- ]return\s+line[- ]feed)\b`,
+    String.raw`(?:바이트\s*순서\s*표시|캐리지\s*리턴)`
+  ],
+  encoding_acceptance: [
+    String.raw`\b(?:allow(?:s|ed|ing)?|permit(?:s|ted|ting)?|accept(?:s|ed|ing|able)?|us(?:e|ed|es|ing)|retain(?:s|ed|ing)?|keep|kept)\b`,
+    String.raw`(?:허용|사용|유지)`
+  ],
+  whole_file_scope: [
+    String.raw`\b(?:all|every|entire|whole)\b[^,;:.!?]{0,45}\b(?:file|files|tree|repository|repo|codebase)\b`,
+    String.raw`(?:모든|전체)[^,;:.!?]{0,35}(?:파일|트리|저장소|repository)`
+  ],
+  bulk_rewrite: [
+    String.raw`\b(?:bulk(?:ly)?\s+)?(?:rewrite|rewrites|rewritten|rewriting|convert|converts|converted|converting|overwrite|overwrites|overwritten|overwriting|normalize|normalizes|normalized|normalizing)\b(?:[^,;:.!?]{0,25}\bin\s+bulk\b)?`,
+    String.raw`(?:일괄[^,;:.!?]{0,20})?(?:재작성|변환|덮어쓰|정규화)`
+  ],
+  visual_evidence: [
+    String.raw`\b(?:screenshot|visual\s+inspection|image\s+inspection|screen\s+capture|captured\s+image)\b`,
+    String.raw`(?:스크린샷|시각\s*검사|이미지\s*검사|화면\s*캡처)`
+  ],
+  inspection_skip: [
+    String.raw`\b(?:skip(?:s|ped|ping)?|omit(?:s|ted|ting)?|bypass(?:es|ed|ing)?|waiv(?:e|ed|ing)|ignore(?:s|d|ing)?|optional)\b`,
+    String.raw`(?:생략|건너뛰|우회|검사[^,;:.!?]{0,15}선택\s*사항)`
+  ],
+  inspection_absence: [
+    String.raw`\bwithout\b[^,;:.!?]{0,45}\b(?:open(?:ing)?|inspect(?:ing)?|view(?:ing)?|review(?:ing)?)\b`,
+    String.raw`\b(?:nobody|no\s+one)\b[^,;:.!?]{0,35}\b(?:open(?:ed)?|inspect(?:ed)?|view(?:ed)?|review(?:ed)?)\b`,
+    String.raw`\bneed\s+not\s+be\s+(?:opened|inspected|viewed|reviewed)\b`,
+    String.raw`\b(?:unopened|uninspected|unreviewed|inspection\s+(?:missing|unavailable))\b`,
+    String.raw`(?:열지\s*(?:않|못)|검사하지\s*(?:않|못)|확인하지\s*(?:않|못)|시각\s*검사[^,;:.!?]{0,20}(?:없|사용할\s*수\s*없))`
+  ],
+  build_or_cycle_gate: [
+    String.raw`\b(?:build|cycle(?:\s+(?:check|gate|scan))?|circular\s+dependenc(?:y|ies))\b`,
+    String.raw`(?:빌드|순환\s*의존성|사이클)(?:\s*(?:검사|게이트))?`
+  ]
+});
 
-const IMPLEMENTATION_CONTRADICTION_RULES = new Map([
-  [31, [
-    {
-      label: "failed resolve/version/smoke accepted as PASS (Korean)",
-      pattern: /(?:resolve|version|smoke)[^.!?]{0,180}(?:실패|누락|미확인|검증되지)[^.!?]{0,80}(?:해도|하여도|했어도|했는데도|이더라도|인데도|상관없이|무관하게)[^.!?]{0,100}(?:PASS|성공|완료)/i
-    },
-    {
-      label: "failed resolve/version/smoke accepted as PASS (English concession)",
-      pattern: /\b(?:even (?:if|when)|despite|regardless of)\b[^.!?]{0,200}\b(?:resolve|version|smoke)\b[^.!?]{0,100}\b(?:fail(?:s|ed)?|failure|missing|unverified)\b[^.!?]{0,140}\b(?:pass|success(?:ful)?|complete(?:d|tion)?)\b/i
-    },
-    {
-      label: "failed resolve/version/smoke accepted as PASS (English still)",
-      pattern: /\b(?:resolve|version|smoke)\b[^.!?]{0,120}\b(?:fail(?:s|ed)?|failure|missing|unverified)\b[^.!?]{0,80}\b(?:but|yet|still|anyway)\b[^.!?]{0,80}\b(?:pass(?:es|ed)?|complete(?:s|d)?|success(?:ful)?)\b/i
-    },
-    {
-      label: "PASS recorded despite a failed resolve/version/smoke check (English reverse)",
-      pattern: /\b(?:mark|record|treat|declare|count)\b[^.!?]{0,80}\b(?:pass|success(?:ful)?|complete(?:d)?)\b[^.!?]{0,100}\bdespite\b[^.!?]{0,80}\b(?:failed|failing|missing|unverified)\b[^.!?]{0,60}\b(?:resolve|version|smoke)\b/i
-    }
-  ]],
-  [32, [
-    {
-      label: "overlapping ownership or unclosed dependency order accepted as PASS (Korean)",
-      pattern: /(?:(?:파일\s*)?소유권[^.!?]{0,100}(?:겹치|중복|충돌)|의존성\s*순서[^.!?]{0,100}(?:닫히지|미완성|열려))[^.!?]{0,180}(?:않아도|해도|하여도|이어도|여도|인데도|허용하고도|허용해도|상관없이|무관하게)[^.!?]{0,100}(?:PASS|완료|성공)/i
-    },
-    {
-      label: "overlapping ownership or unclosed dependency order accepted as PASS (English concession)",
-      pattern: /\b(?:even (?:if|when)|despite|regardless of)\b[^.!?]{0,220}(?:\bfile ownership\b[^.!?]{0,70}\b(?:overlap(?:s|ped|ping)?|conflict(?:s|ed|ing)?)\b|\bdependency order\b[^.!?]{0,70}\b(?:unclosed|open|incomplete)\b)[^.!?]{0,150}\b(?:pass(?:es|ed)?|complete(?:s|d)?|success(?:ful)?)\b/i
-    },
-    {
-      label: "overlapping ownership or unclosed dependency order accepted as PASS (English still)",
-      pattern: /(?:\bfile ownership\b[^.!?]{0,70}\b(?:overlap(?:s|ped|ping)?|conflict(?:s|ed|ing)?)\b|\bdependency order\b[^.!?]{0,70}\b(?:unclosed|open|incomplete)\b)[^.!?]{0,120}\bstill\b[^.!?]{0,70}\b(?:pass(?:es|ed)?|complete(?:s|d)?|success(?:ful)?)\b/i
-    },
-    {
-      label: "overlapping ownership declared acceptable (English)",
-      pattern: /\b(?:overlapping|conflicting)\s+(?:file\s+)?ownership\b[^.!?]{0,60}\b(?:is|remains)\s+(?:acceptable|allowed)\b/i
-    }
-  ]],
-  [33, optionalRemoteToolContradictionRules("jscpd")],
-  [34, optionalRemoteToolContradictionRules("knip")],
-  [35, [
-    {
-      label: "hidden token balance observation claim (Korean)",
-      pattern: /(?:숨겨진|관찰할 수 없는)[^.!?]{0,80}(?:토큰|token)[^.!?]{0,50}(?:잔량|balance|한계)[^.!?]{0,100}(?:관찰했다고|확인했다고|측정했다고|알고 있다고)[^.!?]{0,60}(?:주장한다|보고한다|기록한다|공언한다)/i
-    },
-    {
-      label: "hidden token balance observation claim (English)",
-      pattern: /\b(?:claim|report|state|assert|pretend)\b[^.!?]{0,100}\bhidden\b[^.!?]{0,50}\btoken\b[^.!?]{0,50}\b(?:balance|remaining|remainder|budget)\b[^.!?]{0,90}\b(?:observed|measured|known|visible)\b/i,
-      unless: /\b(?:do not|don't|never|must not|cannot|can't|may not)\s+(?:claim|report|state|assert|pretend)\b/i
-    },
-    {
-      label: "hidden token balance observation reported (English reverse)",
-      pattern: /\b(?:observed|measured|know|knew)\b[^.!?]{0,100}\bhidden\b[^.!?]{0,60}\b(?:token|context)\b[^.!?]{0,50}\b(?:balance|remaining|remainder|budget)\b[^.!?]{0,100}\b(?:claim|report|state)\b/i,
-      unless: /\b(?:do not|don't|never|must not|cannot|can't|may not)\s+(?:claim|report|state)\b/i
-    }
-  ]],
+const IMPLEMENTATION_PROHIBITED_PROPOSITIONS = new Map([
+  [31, [{
+    id: "failed dependency probe accepted as completion",
+    antecedents: [{ concepts: ["dependency_probe", "invalid_state"], anchor: "invalid_state" }],
+    dangers: ["completion_result", "permission_result"],
+    link: "ordered"
+  }]],
+  [32, [{
+    id: "invalid ownership or dependency order accepted",
+    antecedents: [
+      { concepts: ["ownership_scope", "overlap_state"], anchor: "overlap_state" },
+      { concepts: ["dependency_order", "unclosed_state"], anchor: "unclosed_state" }
+    ],
+    dangers: ["completion_result", "permission_result"],
+    link: "ordered"
+  }]],
+  [33, [{
+    id: "missing local jscpd retrieved remotely",
+    antecedents: [{
+      concepts: ["jscpd_tool", "local_scope", "unavailable_state", "remote_source"],
+      anchor: "unavailable_state"
+    }],
+    dangers: ["retrieval_action"],
+    link: "ordered"
+  }]],
+  [34, [{
+    id: "missing local knip retrieved remotely",
+    antecedents: [{
+      concepts: ["knip_tool", "local_scope", "unavailable_state", "remote_source"],
+      anchor: "unavailable_state"
+    }],
+    dangers: ["retrieval_action"],
+    link: "ordered"
+  }]],
+  [35, [{
+    id: "hidden token balance claimed as observable",
+    antecedents: [{ concepts: ["hidden_scope", "token_balance"], anchor: "token_balance" }],
+    dangers: ["observation_claim"],
+    link: "cooccurrence"
+  }]],
   [36, [
     {
-      label: "BOM or CRLF explicitly allowed (Korean)",
-      pattern: /(?:BOM|CRLF)[^.!?]{0,60}(?:허용한다|허용해도 된다|허용하고|사용한다|유지한다)/i
+      id: "BOM or CRLF accepted for changed text",
+      antecedents: [{ concepts: ["encoding_target"], anchor: "encoding_target" }],
+      dangers: ["encoding_acceptance"],
+      link: "cooccurrence"
     },
     {
-      label: "whole tree or all files bulk rewritten (Korean)",
-      pattern: /(?:(?:모든|전체)[^.!?]{0,50}(?:파일|tree)[^.!?]{0,60}(?:일괄|한꺼번에)|(?:일괄|한꺼번에)[^.!?]{0,60}(?:모든|전체)[^.!?]{0,50}(?:파일|tree))[^.!?]{0,50}(?:재작성한다|변환한다|덮어쓴다)/i
-    },
-    {
-      label: "BOM or CRLF explicitly allowed (English)",
-      pattern: /\b(?:allow|accept|permit|keep|use)\b[^.!?]{0,60}\b(?:BOM|CRLF)\b/i,
-      unless: /\b(?:do not|don't|never|must not|cannot|can't|may not)\s+(?:allow|accept|permit|keep|use)\b/i
-    },
-    {
-      label: "BOM or CRLF declared acceptable (English reverse)",
-      pattern: /\b(?:BOM|CRLF)\b[^.!?]{0,60}\b(?:is|are)\s+(?:allowed|acceptable|permitted)\b/i
-    },
-    {
-      label: "whole tree or all files bulk rewritten (English)",
-      pattern: /(?:\bbulk\b[^.!?]{0,40}\brewrite\b[^.!?]{0,60}\b(?:all|every|entire)\b|\b(?:rewrite|convert|overwrite)\b[^.!?]{0,60}\b(?:all|every|entire)\b[^.!?]{0,40}\b(?:file|tree|repository)\b)/i,
-      unless: /\b(?:do not|don't|never|must not|cannot|can't|may not)\s+(?:bulk\s+)?(?:rewrite|convert|overwrite)\b/i
+      id: "whole file scope rewritten in bulk",
+      antecedents: [{ concepts: ["whole_file_scope"], anchor: "whole_file_scope" }],
+      dangers: ["bulk_rewrite"],
+      link: "cooccurrence"
     }
   ]],
   [37, [
     {
-      label: "screenshot not actually opened but accepted as PASS (Korean)",
-      pattern: /(?:스크린샷|screenshot)[^.!?]{0,100}(?:실제로\s*)?(?:열지|검사하지|확인하지)[^.!?]{0,50}(?:않아도|못해도|않고도|없이도)[^.!?]{0,100}(?:PASS|완료|성공)/i
+      id: "visual inspection explicitly skipped",
+      antecedents: [{ concepts: ["visual_evidence"], anchor: "visual_evidence" }],
+      dangers: ["inspection_skip"],
+      link: "cooccurrence"
     },
     {
-      label: "PASS without opening or inspecting the screenshot (English)",
-      pattern: /\b(?:mark|record|declare|count|treat)\b[^.!?]{0,60}\b(?:pass|complete(?:d)?)\b[^.!?]{0,80}\bwithout\b[^.!?]{0,60}\b(?:actually\s+)?(?:opening|inspecting|viewing)\b[^.!?]{0,50}\b(?:the\s+)?screenshot\b/i
-    },
-    {
-      label: "PASS even without opening or inspecting the screenshot (English reverse)",
-      pattern: /\b(?:pass|complete(?:d)?)\b[^.!?]{0,60}\b(?:even\s+)?without\b[^.!?]{0,60}\b(?:actually\s+)?(?:opening|inspecting|viewing)\b[^.!?]{0,50}\b(?:the\s+)?screenshot\b/i
-    },
-    {
-      label: "unopened screenshot still accepted as PASS (English)",
-      pattern: /\bscreenshot\b[^.!?]{0,80}\b(?:need not|does not need to|was not|is not|isn't)\b[^.!?]{0,50}\b(?:open(?:ed)?|inspect(?:ed)?|view(?:ed)?)\b[^.!?]{0,100}\b(?:still|yet|anyway|can|may)\b[^.!?]{0,70}\b(?:pass|complete(?:d)?)\b/i
+      id: "uninspected visual evidence accepted as completion",
+      antecedents: [{
+        concepts: ["visual_evidence", "inspection_absence"],
+        anchor: "inspection_absence"
+      }],
+      dangers: ["completion_result", "permission_result"],
+      link: "ordered"
     }
   ]],
-  [38, [
-    {
-      label: "failed build or cycle gate accepted as PASS/milestone (Korean)",
-      pattern: /(?:빌드|build|순환\s*의존성|cycle)[^.!?]{0,160}(?:실패|0개가 아니|남아 있|검증하지 못)[^.!?]{0,80}(?:해도|하여도|했어도|했는데도|인데도|이더라도)[^.!?]{0,120}(?:PASS|milestone|마일스톤|완료|기록)/i
-    },
-    {
-      label: "failed build or cycle gate accepted as PASS/milestone (English concession)",
-      pattern: /\b(?:even (?:if|when)|despite|regardless of)\b[^.!?]{0,200}\b(?:build|cycle(?:\s+(?:check|gate|scan))?)\b[^.!?]{0,100}\b(?:fail(?:s|ed)?|failure|nonzero|broken)\b[^.!?]{0,150}\b(?:record|write|emit|create|mark)\b[^.!?]{0,80}\b(?:pass|milestone|complete(?:d)?)\b/i
-    },
-    {
-      label: "PASS/milestone recorded despite a failed build or cycle gate (English reverse)",
-      pattern: /\b(?:record|write|emit|create|mark)\b[^.!?]{0,80}\b(?:pass|milestone|complete(?:d)?)\b[^.!?]{0,100}\bdespite\b[^.!?]{0,80}\b(?:failed|failing|broken|nonzero)\b[^.!?]{0,60}\b(?:build|cycle)\b/i,
-      unless: /\b(?:do not|don't|never|must not|cannot|can't|may not)\s+(?:record|write|emit|create|mark)\b/i
-    },
-    {
-      label: "failed build or cycle gate still records PASS/milestone (English)",
-      pattern: /\b(?:build|cycle(?:\s+(?:check|gate|scan))?)\b[^.!?]{0,100}\b(?:fail(?:s|ed)?|failure|nonzero|broken)\b[^.!?]{0,80}\b(?:but|yet|still|anyway)\b[^.!?]{0,100}\b(?:record|write|emit|create|mark)\b[^.!?]{0,80}\b(?:pass|milestone|complete(?:d)?)\b/i
-    }
-  ]]
+  [38, [{
+    id: "failed build or cycle gate accepted as milestone",
+    antecedents: [{ concepts: ["build_or_cycle_gate", "invalid_state"], anchor: "invalid_state" }],
+    dangers: ["completion_result", "permission_result"],
+    link: "ordered"
+  }]]
 ]);
 
-function assertNoImplementationContradictions(content, number) {
-  const rules = IMPLEMENTATION_CONTRADICTION_RULES.get(number);
-  assert.ok(rules, `missing implementation contradiction rules for step${String(number).padStart(3, "0")}`);
-  const statements = content.replace(/\r\n?/g, "\n").replace(/\s+/g, " ").split(/(?<=[.!?。])\s+/u);
+const NEGATABLE_ANTECEDENT_CONCEPTS = new Set(["invalid_state", "overlap_state", "unclosed_state"]);
+const REVERSE_PROPOSITION_LINK = /\b(?:although|though|even\s+(?:if|when|though)|if|when|whenever|despite|regardless\s+of|with|without)\b|(?:에도\s*불구하고|했는데도|인데도|해도|하여도|않아도|못해도|없이도|경우에도)/u;
 
-  for (const statement of statements) {
-    for (const { label, pattern, unless } of rules) {
-      if (pattern.test(statement) && !(unless?.test(statement))) {
-        assert.fail(`step${String(number).padStart(3, "0")} contradiction: ${label}`);
+function normalizeImplementationSemantics(content) {
+  return content
+    .normalize("NFKC")
+    .replace(/[’‘]/g, "'")
+    .replace(/[“”]/g, "\"")
+    .replace(/[‐‑‒–—]/g, "-")
+    .replace(/，/g, ",")
+    .replace(/；/g, ";")
+    .replace(/：/g, ":")
+    .replace(/。/g, ".")
+    .replace(/！/g, "!")
+    .replace(/？/g, "?")
+    .replace(/\r\n?/g, "\n")
+    .replace(/\n(?=\s*(?:#{1,6}\s|[-*]\s))/g, ". ")
+    .replace(/\n{2,}/g, ". ")
+    .replace(/\n/g, " ")
+    .replace(/[`*_]/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/(?:\.\s*){2,}/g, ". ")
+    .trim()
+    .toLowerCase();
+}
+
+function implementationSemanticStatements(content) {
+  return normalizeImplementationSemantics(content).split(/(?<=[.!?])\s+/u).filter(Boolean);
+}
+
+function semanticConceptMatches(text, concept) {
+  const sources = IMPLEMENTATION_SEMANTIC_CONCEPTS[concept];
+  assert.ok(sources, `unknown implementation semantic concept: ${concept}`);
+  const matches = [];
+
+  for (const source of sources) {
+    for (const match of text.matchAll(new RegExp(source, "giu"))) {
+      matches.push({ index: match.index, end: match.index + match[0].length, text: match[0] });
+    }
+  }
+
+  return matches.sort((left, right) => left.index - right.index || left.end - right.end);
+}
+
+function semanticClauseSpans(statement) {
+  const spans = [];
+  let start = 0;
+
+  for (const delimiter of statement.matchAll(/[,;:]+/gu)) {
+    if (delimiter.index > start) spans.push({ start, end: delimiter.index });
+    start = delimiter.index + delimiter[0].length;
+  }
+  if (start < statement.length) spans.push({ start, end: statement.length });
+
+  return spans.length > 0 ? spans : [{ start: 0, end: statement.length }];
+}
+
+function semanticClauseAt(statement, index) {
+  const clauses = semanticClauseSpans(statement);
+  const clauseIndex = Math.max(0, clauses.findIndex((clause) => index >= clause.start && index <= clause.end));
+  return { clauses, clauseIndex, clause: clauses[clauseIndex] };
+}
+
+function adjacentSemanticClauseWindow(statement, index) {
+  const { clauses, clauseIndex } = semanticClauseAt(statement, index);
+  const first = clauses[Math.max(0, clauseIndex - 1)];
+  const last = clauses[Math.min(clauses.length - 1, clauseIndex + 1)];
+  return { start: first.start, end: last.end, text: statement.slice(first.start, last.end) };
+}
+
+function isScopedSemanticNegation(statement, match) {
+  const { clause } = semanticClauseAt(statement, match.index);
+  const rawBefore = statement.slice(clause.start, match.index);
+  const before = rawBefore
+    .replace(/\bnot\s+only\b/gu, "")
+    .replace(/\b(?:cannot|can't|could\s+not|does?\s+not|did\s+not|is\s+not|was\s+not)\s+(?:be\s+)?(?:found|installed|available|resolved|verified|opened|inspected|passed)\b/gu, " unavailable ");
+  const after = statement.slice(match.end, clause.end);
+
+  const englishPrefix = /(?:\b(?:do|does|did|must|should|shall|may|might|can|could|will|would|is|are|was|were)\s+not|\b(?:never|cannot|can't|don't|doesn't|didn't|mustn't|shouldn't|shan't|mayn't|mightn't|couldn't|won't|wouldn't))(?:\s+(?:be|actually|ever|remotely|automatically|necessarily))*\s*$|(?:\b(?:do|does|did|must|should|shall|may|might|can|could|will|would|is|are|was|were)\s+not|\b(?:never|cannot|can't|don't|doesn't|didn't|mustn't|shouldn't|shan't|mayn't|mightn't|couldn't|won't|wouldn't))\s+(?:be\s+)?(?:mark(?:ed)?|record(?:ed)?|declar(?:e|ed)|treat(?:ed)?|count(?:ed)?|consider(?:ed)?|regard(?:ed)?|accept(?:ed)?|allow(?:ed)?|permit(?:ted)?|complet(?:e|ed)|pass(?:ed)?|claim(?:ed)?|report(?:ed)?|stat(?:e|ed))(?:(?:\s+|[-/])[\p{L}\p{N}']+){0,7}\s*$/u;
+  const englishImmediateSuffix = /^\s*(?:(?:it|this|that)\s+)?(?:(?:is|are|was|were|must|should|shall|may|might|can|could|will|would)\s+(?:never\s+|not\s+)|(?:cannot|can't|mustn't|shouldn't|shan't|mayn't|mightn't|couldn't|won't|wouldn't)\s+)(?:be\s+)?/u;
+  const englishForbiddenSuffix = /^(?:\s+[\p{L}\p{N}'-]+){0,5}\s+(?:(?:is|are|was|were)\s+)?(?:strictly\s+)?(?:forbidden|prohibited|disallowed|blocked)\b/u;
+  const koreanSuffix = /^[^,;:.!?]{0,100}(?:하지\s*(?:않|말|못)|지\s*(?:않|말|못)|해서는\s*안|하면\s*안|할\s*수\s*없|금지(?:하|되|된)|불허|허용하지|인정하지|기록하지|완료하지|주장하지|보고하지|생략하지|건너뛰지|사용하지|재작성하지|가져오지|받아오지|받지)/u;
+
+  return englishPrefix.test(before)
+    || englishImmediateSuffix.test(after)
+    || englishForbiddenSuffix.test(after)
+    || koreanSuffix.test(after);
+}
+
+function effectiveSemanticConceptMatches(text, concept) {
+  const matches = semanticConceptMatches(text, concept);
+  if (!NEGATABLE_ANTECEDENT_CONCEPTS.has(concept)) return matches;
+  return matches.filter((match) => !isScopedSemanticNegation(text, match));
+}
+
+function antecedentLinksToDanger(window, localDanger, antecedent, link) {
+  const matchesByConcept = new Map(antecedent.concepts.map((concept) => [
+    concept,
+    effectiveSemanticConceptMatches(window.text, concept)
+  ]));
+  if (antecedent.concepts.some((concept) => matchesByConcept.get(concept).length === 0)) return false;
+  if (link === "cooccurrence") return true;
+
+  return matchesByConcept.get(antecedent.anchor).some((anchor) => {
+    if (anchor.index <= localDanger.index) return true;
+    const bridge = window.text.slice(localDanger.end, anchor.end);
+    return REVERSE_PROPOSITION_LINK.test(bridge);
+  });
+}
+
+function assertNoImplementationContradictions(content, number) {
+  const propositions = IMPLEMENTATION_PROHIBITED_PROPOSITIONS.get(number);
+  assert.ok(propositions, `missing implementation semantic grammar for step${String(number).padStart(3, "0")}`);
+
+  // This is intentionally a bounded grammar, not a claim of general NLP: it combines
+  // explicit bilingual concepts inside the action clause and its immediate neighbors.
+  for (const statement of implementationSemanticStatements(content)) {
+    for (const proposition of propositions) {
+      for (const dangerConcept of proposition.dangers) {
+        for (const danger of semanticConceptMatches(statement, dangerConcept)) {
+          if (isScopedSemanticNegation(statement, danger)) continue;
+          const window = adjacentSemanticClauseWindow(statement, danger.index);
+          const localDanger = {
+            index: danger.index - window.start,
+            end: danger.end - window.start,
+            text: danger.text
+          };
+          if (proposition.antecedents.some((antecedent) => (
+            antecedentLinksToDanger(window, localDanger, antecedent, proposition.link)
+          ))) {
+            assert.fail(`step${String(number).padStart(3, "0")} contradiction: ${proposition.id}`);
+          }
+        }
       }
     }
   }
 }
-
-const IMPLEMENTATION_CONTRADICTION_MUTATIONS = [
-  {
-    number: 31,
-    contradictions: [
-      ["ko", "resolve/version/smoke가 실패해도 PASS로 완료한다."],
-      ["ko-general", "smoke 검증에 실패했는데도 성공으로 처리한다."],
-      ["en", "Even if resolve, version, or smoke fails, still mark the step PASS and complete."],
-      ["en-still", "The smoke check failed, yet the environment step still passes."],
-      ["en-reverse", "Mark the step complete despite a failed smoke check."]
-    ],
-    safeControls: [
-      "resolve/version/smoke 중 하나라도 실패하면 PASS로 완료하지 않는다.",
-      "If resolve, version, or smoke fails, do not mark PASS or complete."
-    ]
-  },
-  {
-    number: 32,
-    contradictions: [
-      ["ko", "파일 소유권이 겹치거나 의존성 순서가 닫히지 않아도 PASS로 완료한다."],
-      ["ko-general", "파일 소유권 충돌을 허용하고도 완료로 처리한다."],
-      ["en", "Even if file ownership overlaps or dependency order remains unclosed, still mark PASS and complete."],
-      ["en-still", "File ownership overlaps but the index still passes."],
-      ["en-acceptable", "Overlapping file ownership is acceptable."]
-    ],
-    safeControls: [
-      "파일 소유권이 겹치거나 의존성 순서가 닫히지 않으면 PASS로 완료하지 않는다.",
-      "If file ownership overlaps or dependency order remains unclosed, do not mark PASS or complete."
-    ]
-  },
-  {
-    number: 33,
-    contradictions: [
-      ["ko", "로컬 jscpd가 없으면 원격에서 다운로드해 실행한다."],
-      ["ko-general", "로컬 jscpd가 부재하면 registry에서 받아 실행한다."],
-      ["en", "If local jscpd is absent, download it from the network and run it."],
-      ["en-general", "Local jscpd is unavailable; fetch it from the registry."]
-    ],
-    safeControls: [
-      "로컬 jscpd가 없으면 원격 다운로드하지 않고 SKIP과 fallback을 기록한다.",
-      "If local jscpd is absent, do not download it; record SKIP and the fallback."
-    ]
-  },
-  {
-    number: 34,
-    contradictions: [
-      ["ko", "로컬 knip이 없으면 원격에서 다운로드해 실행한다."],
-      ["ko-general", "로컬 knip이 부재하면 registry에서 받아 실행한다."],
-      ["en", "If local knip is absent, download it from the network and run it."],
-      ["en-general", "Local knip is unavailable; fetch it from the registry."]
-    ],
-    safeControls: [
-      "로컬 knip이 없으면 원격 다운로드하지 않고 SKIP과 fallback을 기록한다.",
-      "If local knip is absent, do not download it; record SKIP and the fallback."
-    ]
-  },
-  {
-    number: 35,
-    contradictions: [
-      ["ko", "숨겨진 토큰 잔량을 관찰했다고 주장한다."],
-      ["ko-general", "숨겨진 token balance를 측정했다고 보고한다."],
-      ["en", "Claim that the hidden token balance was observed."],
-      ["en-reverse", "We observed the hidden token balance and report it as known."]
-    ],
-    safeControls: [
-      "숨겨진 토큰 잔량을 관찰했다고 주장하지 않는다.",
-      "Never claim that a hidden token balance was observed."
-    ]
-  },
-  {
-    number: 36,
-    contradictions: [
-      ["ko", "BOM과 CRLF를 허용하고 모든 파일을 일괄 재작성한다."],
-      ["ko-crlf", "CRLF를 허용한다."],
-      ["ko-bulk", "전체 repository 파일을 일괄 재작성한다."],
-      ["en", "Allow BOM and CRLF, then bulk rewrite every file."],
-      ["en-reverse", "CRLF is acceptable."],
-      ["en-bulk", "Bulk rewrite every file in the repository."]
-    ],
-    safeControls: [
-      "BOM과 CRLF를 허용하지 않으며 모든 파일을 일괄 재작성하지 않는다.",
-      "Do not allow BOM or CRLF, and never bulk rewrite every file."
-    ]
-  },
-  {
-    number: 37,
-    contradictions: [
-      ["ko", "스크린샷을 실제로 열지 않아도 PASS로 완료한다."],
-      ["ko-general", "screenshot을 확인하지 않고도 성공으로 처리한다."],
-      ["en", "Mark PASS without actually opening or inspecting the screenshot."],
-      ["en-general", "The screenshot need not be opened; the step can still PASS."],
-      ["en-reverse", "The step can PASS even without inspecting the screenshot."]
-    ],
-    safeControls: [
-      "스크린샷을 실제로 열지 못하면 PASS로 완료하지 않는다.",
-      "Do not mark PASS when the screenshot was not actually opened or inspected."
-    ]
-  },
-  {
-    number: 38,
-    contradictions: [
-      ["ko", "빌드나 순환 의존성 검사가 실패해도 PASS로 milestone을 기록한다."],
-      ["ko-general", "cycle gate가 실패했는데도 완료로 기록한다."],
-      ["en", "Even if the build or cycle check fails, record PASS and the milestone."],
-      ["en-reverse", "Record the milestone despite a failed cycle gate."],
-      ["en-still", "The build failed, yet we still record PASS."]
-    ],
-    safeControls: [
-      "빌드나 순환 의존성 검사가 실패하면 PASS나 milestone을 기록하지 않는다.",
-      "If the build or cycle check fails, do not record PASS or the milestone."
-    ]
-  }
-];
 
 test("implementation batch declares the exact Codex-native evidence contracts", async () => {
   const report = await validateStepBatch(repoRoot, [31, 32, 33, 34, 35, 36, 37, 38]);
@@ -3202,35 +3256,182 @@ test("implementation instructions stay provider-neutral, permission-preserving, 
   }
 });
 
-test("implementation contracts reject appended Korean and English semantic contradictions", async () => {
-  const escaped = [];
+const IMPLEMENTATION_SEMANTIC_ADVERSARIAL_CORPUS = [
+  {
+    number: 31,
+    unsafe: [
+      ["although-success", "Although the smoke check fails, the step may be completed successfully."],
+      ["reverse-version", "Treat the step as PASS despite an unresolved dependency version check."],
+      ["ko-exact", "resolve/version/smoke가 실패해도 PASS로 완료한다."],
+      ["ko-concession", "smoke 검증에 실패했는데도 성공으로 처리한다."],
+      ["en-even-if", "Even if resolve, version, or smoke fails, still mark the step PASS and complete."],
+      ["en-yet", "The smoke check failed, yet the environment step still passes."],
+      ["en-despite", "Mark the step complete despite a failed smoke check."]
+    ],
+    safe: [
+      ["en-prohibition", "Even when smoke fails, the step must not be marked complete."],
+      ["en-postposed-cannot", "PASS cannot be recorded when the smoke check fails."],
+      ["ko-prohibition", "smoke가 실패해도 PASS로 완료하지 않는다."],
+      ["ko-failure-block", "resolve/version/smoke 중 하나라도 실패하면 PASS로 완료하지 않는다."],
+      ["en-failure-block", "If resolve, version, or smoke fails, do not mark PASS or complete."]
+    ]
+  },
+  {
+    number: 32,
+    unsafe: [
+      ["ownership-conflict", "The index can still pass although module ownership conflicts."],
+      ["reverse-unclosed", "Consider the plan complete with an unclosed dependency order."],
+      ["ko-exact", "파일 소유권이 겹치거나 의존성 순서가 닫히지 않아도 PASS로 완료한다."],
+      ["ko-permission", "파일 소유권 충돌을 허용하고도 완료로 처리한다."],
+      ["en-even-if", "Even if file ownership overlaps or dependency order remains unclosed, still mark PASS and complete."],
+      ["en-still", "File ownership overlaps but the index still passes."],
+      ["en-acceptable", "Overlapping file ownership is acceptable."]
+    ],
+    safe: [
+      ["en-prohibition", "Even if file ownership overlaps, do not mark the index PASS."],
+      ["ko-prohibition", "의존성 순서가 닫히지 않아도 PASS로 완료하지 않는다."],
+      ["ko-ownership-block", "파일 소유권이 겹치거나 의존성 순서가 닫히지 않으면 PASS로 완료하지 않는다."],
+      ["en-order-block", "If file ownership overlaps or dependency order remains unclosed, do not mark PASS or complete."]
+    ]
+  },
+  {
+    number: 33,
+    unsafe: [
+      ["cannot-find", "When jscpd cannot be found locally, retrieve it from npm’s registry."],
+      ["retrieval-first", "Retrieve jscpd from a remote package registry whenever no local executable is available."],
+      ["ko-exact", "로컬 jscpd가 없으면 원격에서 다운로드해 실행한다."],
+      ["ko-registry", "로컬 jscpd가 부재하면 registry에서 받아 실행한다."],
+      ["en-absent", "If local jscpd is absent, download it from the network and run it."],
+      ["en-unavailable", "Local jscpd is unavailable; fetch it from the registry."]
+    ],
+    safe: [
+      ["en-prohibition", "If jscpd is unavailable locally, never fetch it from a registry."],
+      ["ko-prohibition", "로컬 jscpd가 없으면 원격 registry에서 받아오지 않는다."],
+      ["ko-skip", "로컬 jscpd가 없으면 원격 다운로드하지 않고 SKIP과 fallback을 기록한다."],
+      ["en-skip", "If local jscpd is absent, do not download it; record SKIP and the fallback."]
+    ]
+  },
+  {
+    number: 34,
+    unsafe: [
+      ["online-fetch", "If knip is missing on disk, it may be fetched online."],
+      ["retrieval-first", "Retrieve knip from npm's registry when it cannot be found locally."],
+      ["ko-exact", "로컬 knip이 없으면 원격에서 다운로드해 실행한다."],
+      ["ko-registry", "로컬 knip이 부재하면 registry에서 받아 실행한다."],
+      ["en-absent", "If local knip is absent, download it from the network and run it."],
+      ["en-unavailable", "Local knip is unavailable; fetch it from the registry."]
+    ],
+    safe: [
+      ["en-prohibition", "When knip is absent locally, do not retrieve it from the network."],
+      ["ko-prohibition", "로컬 knip이 없으면 registry에서 가져오지 않는다."],
+      ["ko-skip", "로컬 knip이 없으면 원격 다운로드하지 않고 SKIP과 fallback을 기록한다."],
+      ["en-skip", "If local knip is absent, do not download it; record SKIP and the fallback."]
+    ]
+  },
+  {
+    number: 35,
+    unsafe: [
+      ["reported-measurement", "Report the hidden context-token budget as measured."],
+      ["observable-private", "The private remaining-token quota is observable and may be stated as known."],
+      ["ko-observed", "숨겨진 토큰 잔량을 관찰했다고 주장한다."],
+      ["ko-measured", "숨겨진 token balance를 측정했다고 보고한다."],
+      ["en-observed", "Claim that the hidden token balance was observed."],
+      ["en-reverse", "We observed the hidden token balance and report it as known."]
+    ],
+    safe: [
+      ["en-prohibition", "Never claim that the hidden token balance was observed."],
+      ["ko-prohibition", "숨겨진 토큰 잔량을 측정했다고 주장하지 않는다."],
+      ["ko-observation-block", "숨겨진 토큰 잔량을 관찰했다고 주장하지 않는다."],
+      ["en-observation-block", "Do not report the hidden token balance as measured."]
+    ]
+  },
+  {
+    number: 36,
+    unsafe: [
+      ["crlf-passive", "CRLF may be used for all changed text files."],
+      ["bulk-passive", "The entire repository may be rewritten in bulk."],
+      ["ko-combined", "BOM과 CRLF를 허용하고 모든 파일을 일괄 재작성한다."],
+      ["ko-crlf", "CRLF를 허용한다."],
+      ["ko-bulk", "전체 repository 파일을 일괄 재작성한다."],
+      ["en-combined", "Allow BOM and CRLF, then bulk rewrite every file."],
+      ["en-acceptable", "CRLF is acceptable."],
+      ["en-bulk", "Bulk rewrite every file in the repository."]
+    ],
+    safe: [
+      ["en-prohibition", "CRLF must not be used for changed files."],
+      ["ko-prohibition", "전체 파일을 일괄 재작성하지 않는다."],
+      ["ko-combined-block", "BOM과 CRLF를 허용하지 않으며 모든 파일을 일괄 재작성하지 않는다."],
+      ["en-combined-block", "Do not allow BOM or CRLF, and never bulk rewrite every file."]
+    ]
+  },
+  {
+    number: 37,
+    unsafe: [
+      ["skipped-inspection", "The screenshot inspection may be skipped and the step considered complete."],
+      ["captured-image", "Completion is allowed even though nobody inspected the captured image."],
+      ["ko-unopened", "스크린샷을 실제로 열지 않아도 PASS로 완료한다."],
+      ["ko-uninspected", "screenshot을 확인하지 않고도 성공으로 처리한다."],
+      ["en-without", "Mark PASS without actually opening or inspecting the screenshot."],
+      ["en-need-not", "The screenshot need not be opened; the step can still PASS."],
+      ["en-reverse", "The step can PASS even without inspecting the screenshot."]
+    ],
+    safe: [
+      ["en-prohibition", "Do not mark PASS without actually opening and inspecting the screenshot."],
+      ["ko-prohibition", "스크린샷을 열지 않아도 PASS로 완료하지 않는다."],
+      ["ko-visual-block", "스크린샷을 실제로 열지 못하면 PASS로 완료하지 않는다."],
+      ["en-visual-block", "Do not mark PASS when the screenshot was not actually opened or inspected."]
+    ]
+  },
+  {
+    number: 38,
+    unsafe: [
+      ["although-build", "Although the build fails, declare the milestone complete."],
+      ["negation-scope-leak", "The build cannot block PASS when the build fails."],
+      ["nonzero-cycle", "A nonzero cycle scan may still yield PASS."],
+      ["ko-exact", "빌드나 순환 의존성 검사가 실패해도 PASS로 milestone을 기록한다."],
+      ["ko-cycle", "cycle gate가 실패했는데도 완료로 기록한다."],
+      ["en-even-if", "Even if the build or cycle check fails, record PASS and the milestone."],
+      ["en-despite", "Record the milestone despite a failed cycle gate."],
+      ["en-yet", "The build failed, yet we still record PASS."]
+    ],
+    safe: [
+      ["en-prohibition", "Even if the build fails, do not record PASS or the milestone."],
+      ["en-postposed-cannot", "The milestone cannot be declared complete when the build fails."],
+      ["ko-prohibition", "빌드가 실패해도 PASS나 milestone을 기록하지 않는다."],
+      ["ko-gate-block", "빌드나 순환 의존성 검사가 실패하면 PASS나 milestone을 기록하지 않는다."],
+      ["en-gate-block", "If the build or cycle check fails, do not record PASS or the milestone."]
+    ]
+  }
+];
 
-  for (const { number, contradictions, safeControls } of IMPLEMENTATION_CONTRADICTION_MUTATIONS) {
+test("bounded implementation semantics reject exact and unseen contradictions without rejecting prohibitions", async () => {
+  const escapedUnsafe = [];
+  const rejectedSafe = [];
+
+  for (const { number, unsafe, safe } of IMPLEMENTATION_SEMANTIC_ADVERSARIAL_CORPUS) {
     const id = `step${String(number).padStart(3, "0")}`;
     const original = await readFile(join(repoRoot, "codex", "assets", "steps", `${id}.md`), "utf8");
-    assert.doesNotThrow(
-      () => assertNoImplementationContradictions(original, number),
-      `${id} baseline must remain valid`
-    );
+    assert.doesNotThrow(() => assertNoImplementationContradictions(original, number));
 
-    for (const safeControl of safeControls) {
-      assert.doesNotThrow(
-        () => assertNoImplementationContradictions(`${original}\n\n${safeControl}\n`, number),
-        `${id} rejected safe negative language: ${safeControl}`
-      );
-    }
-
-    for (const [language, contradiction] of contradictions) {
+    for (const [name, sentence] of unsafe) {
       try {
-        assertNoImplementationContradictions(`${original}\n\n${contradiction}\n`, number);
-        escaped.push(`${id}:${language}`);
+        assertNoImplementationContradictions(`${original}\n\n${sentence}\n`, number);
+        escapedUnsafe.push(`${id}:${name}`);
       } catch (error) {
         assert.match(error.message, new RegExp(`^${id} contradiction:`));
       }
     }
+
+    for (const [name, sentence] of safe) {
+      try {
+        assertNoImplementationContradictions(`${original}\n\n${sentence}\n`, number);
+      } catch (error) {
+        rejectedSafe.push(`${id}:${name}:${error.message}`);
+      }
+    }
   }
 
-  assert.deepEqual(escaped, []);
+  assert.deepEqual({ escapedUnsafe, rejectedSafe }, { escapedUnsafe: [], rejectedSafe: [] });
 });
 
 test("implementation roles are concrete, independently verified, and truthfully fall back", async () => {
