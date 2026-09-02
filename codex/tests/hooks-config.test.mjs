@@ -9,6 +9,7 @@ import { makeWorkspace } from "./helpers/workspace.mjs";
 
 const configUrl = new URL("../hooks/hooks.json", import.meta.url);
 const expectedScripts = new Map([
+  ["PreToolUse", "pre-tool-use.mjs"],
   ["SessionStart", "session-start.mjs"],
   ["UserPromptSubmit", "user-prompt-submit.mjs"],
   ["Stop", "stop.mjs"]
@@ -39,15 +40,21 @@ function assertResolvedScript(command, pluginRoot, flavor, expectedScript) {
   assert.ok(relative !== "" && relative !== ".." && !relative.startsWith(`..${flavor.sep}`));
 }
 
-test("hook config contains exactly the three synchronous lifecycle commands", async () => {
+test("hook config contains exactly four synchronous lifecycle and guard commands", async () => {
   const config = JSON.parse(await readFile(configUrl, "utf8"));
   assert.deepEqual(Object.keys(config), ["hooks"]);
-  assert.deepEqual(Object.keys(config.hooks).sort(), ["SessionStart", "Stop", "UserPromptSubmit"]);
-  assert.equal(allCommandHandlers(config).length, 3);
+  assert.deepEqual(Object.keys(config.hooks).sort(), ["PreToolUse", "SessionStart", "Stop", "UserPromptSubmit"]);
+  assert.equal(allCommandHandlers(config).length, 4);
 
   for (const [eventName, groups] of Object.entries(config.hooks)) {
     assert.equal(groups.length, 1);
-    assert.deepEqual(Object.keys(groups[0]), ["hooks"]);
+    if (eventName === "PreToolUse") {
+      assert.deepEqual(Object.keys(groups[0]), ["matcher", "hooks"]);
+      assert.equal(groups[0].matcher, "Bash|apply_patch");
+    } else {
+      assert.deepEqual(Object.keys(groups[0]), ["hooks"]);
+      assert.equal(groups[0].matcher, undefined);
+    }
     assert.equal(groups[0].hooks.length, 1);
     const handler = groups[0].hooks[0];
     const target = expectedScripts.get(eventName);

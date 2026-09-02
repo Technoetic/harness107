@@ -12,7 +12,7 @@ const CLOSED_PIPE_CODES = new Set([
   "ERR_STREAM_DESTROYED",
   "ERR_STREAM_WRITE_AFTER_END"
 ]);
-const HOOK_NAMES = new Set(["session-start", "user-prompt-submit", "stop"]);
+const HOOK_NAMES = new Set(["pre-tool-use", "session-start", "user-prompt-submit", "stop"]);
 const WIRE_DEFAULTS = Object.freeze({
   session_id: "session-test-wire",
   transcript_path: null,

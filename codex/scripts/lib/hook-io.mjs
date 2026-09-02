@@ -20,6 +20,18 @@ const EVENT_FIELDS = new Map([
     required: new Set(["hook_event_name", "cwd", "source", ...COMMON_REQUIRED_FIELDS]),
     optional: new Set()
   }],
+  ["PreToolUse", {
+    required: new Set([
+      "hook_event_name",
+      "cwd",
+      "turn_id",
+      "tool_name",
+      "tool_use_id",
+      "tool_input",
+      ...COMMON_REQUIRED_FIELDS
+    ]),
+    optional: new Set(["agent_id", "agent_type"])
+  }],
   ["UserPromptSubmit", {
     required: new Set([
       "hook_event_name",
@@ -475,6 +487,15 @@ export async function validateHookEvent(raw, expectedName) {
   }
   if (expectedName === "UserPromptSubmit") {
     if (typeof raw.turn_id !== "string" || typeof raw.prompt !== "string") {
+      fail("HOOK_EVENT_INVALID", "hook event rejected");
+    }
+  }
+  if (expectedName === "PreToolUse") {
+    if (
+      typeof raw.turn_id !== "string" ||
+      typeof raw.tool_name !== "string" ||
+      typeof raw.tool_use_id !== "string"
+    ) {
       fail("HOOK_EVENT_INVALID", "hook event rejected");
     }
   }

@@ -1,0 +1,14 @@
+{
+  "hook_event_name": "PreToolUse",
+  "cwd": "__WORKSPACE__",
+  "session_id": "fixture-session",
+  "transcript_path": null,
+  "permission_mode": "default",
+  "model": "gpt-5.6-codex",
+  "turn_id": "fixture-turn-bash",
+  "tool_name": "Bash",
+  "tool_use_id": "fixture-tool-bash",
+  "tool_input": {
+    "command": "rm -rf /"
+  }
+}
