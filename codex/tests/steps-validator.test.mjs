@@ -2579,6 +2579,271 @@ function assertStep35RoleContract(content) {
   assertPlanningPermissionContract(content);
 }
 
+function optionalRemoteToolContradictionRules(tool) {
+  return [
+    {
+      label: `${tool} remote download when the local tool is absent (Korean)`,
+      pattern: new RegExp(
+        String.raw`(?:로컬|local)[^.!?]{0,40}\b${tool}\b[^.!?]{0,70}(?:없(?:으면|어도)|부재|찾지 못(?:하면)?|미설치)[^.!?]{0,140}(?:(?:원격|네트워크|registry|remote|network)[^.!?]{0,80}(?:다운로드해|다운로드하여|다운로드한다|받아|설치해|설치하여|설치한다|가져와)|(?:다운로드해|다운로드하여|다운로드한다|받아|설치해|설치하여|설치한다|가져와)[^.!?]{0,80}(?:원격|네트워크|registry|remote|network))`,
+        "i"
+      )
+    },
+    {
+      label: `${tool} remote download when the local tool is absent (English)`,
+      pattern: new RegExp(
+        String.raw`\blocal\b[^.!?]{0,30}\b${tool}\b[^.!?]{0,70}\b(?:is\s+)?(?:absent|missing|unavailable|not (?:found|installed|available))\b[^.!?]{0,160}(?:(?:\bdownload\b|\bfetch\b|\binstall\b)[^.!?]{0,80}\b(?:network|internet|remote|registry)\b|\b(?:network|internet|remote|registry)\b[^.!?]{0,80}\b(?:download|fetch|install)\b)`,
+        "i"
+      ),
+      unless: /\b(?:do not|don't|never|must not|cannot|can't|may not)\s+(?:download|fetch|install)\b/i
+    }
+  ];
+}
+
+const IMPLEMENTATION_CONTRADICTION_RULES = new Map([
+  [31, [
+    {
+      label: "failed resolve/version/smoke accepted as PASS (Korean)",
+      pattern: /(?:resolve|version|smoke)[^.!?]{0,180}(?:실패|누락|미확인|검증되지)[^.!?]{0,80}(?:해도|하여도|했어도|했는데도|이더라도|인데도|상관없이|무관하게)[^.!?]{0,100}(?:PASS|성공|완료)/i
+    },
+    {
+      label: "failed resolve/version/smoke accepted as PASS (English concession)",
+      pattern: /\b(?:even (?:if|when)|despite|regardless of)\b[^.!?]{0,200}\b(?:resolve|version|smoke)\b[^.!?]{0,100}\b(?:fail(?:s|ed)?|failure|missing|unverified)\b[^.!?]{0,140}\b(?:pass|success(?:ful)?|complete(?:d|tion)?)\b/i
+    },
+    {
+      label: "failed resolve/version/smoke accepted as PASS (English still)",
+      pattern: /\b(?:resolve|version|smoke)\b[^.!?]{0,120}\b(?:fail(?:s|ed)?|failure|missing|unverified)\b[^.!?]{0,80}\b(?:but|yet|still|anyway)\b[^.!?]{0,80}\b(?:pass(?:es|ed)?|complete(?:s|d)?|success(?:ful)?)\b/i
+    },
+    {
+      label: "PASS recorded despite a failed resolve/version/smoke check (English reverse)",
+      pattern: /\b(?:mark|record|treat|declare|count)\b[^.!?]{0,80}\b(?:pass|success(?:ful)?|complete(?:d)?)\b[^.!?]{0,100}\bdespite\b[^.!?]{0,80}\b(?:failed|failing|missing|unverified)\b[^.!?]{0,60}\b(?:resolve|version|smoke)\b/i
+    }
+  ]],
+  [32, [
+    {
+      label: "overlapping ownership or unclosed dependency order accepted as PASS (Korean)",
+      pattern: /(?:(?:파일\s*)?소유권[^.!?]{0,100}(?:겹치|중복|충돌)|의존성\s*순서[^.!?]{0,100}(?:닫히지|미완성|열려))[^.!?]{0,180}(?:않아도|해도|하여도|이어도|여도|인데도|허용하고도|허용해도|상관없이|무관하게)[^.!?]{0,100}(?:PASS|완료|성공)/i
+    },
+    {
+      label: "overlapping ownership or unclosed dependency order accepted as PASS (English concession)",
+      pattern: /\b(?:even (?:if|when)|despite|regardless of)\b[^.!?]{0,220}(?:\bfile ownership\b[^.!?]{0,70}\b(?:overlap(?:s|ped|ping)?|conflict(?:s|ed|ing)?)\b|\bdependency order\b[^.!?]{0,70}\b(?:unclosed|open|incomplete)\b)[^.!?]{0,150}\b(?:pass(?:es|ed)?|complete(?:s|d)?|success(?:ful)?)\b/i
+    },
+    {
+      label: "overlapping ownership or unclosed dependency order accepted as PASS (English still)",
+      pattern: /(?:\bfile ownership\b[^.!?]{0,70}\b(?:overlap(?:s|ped|ping)?|conflict(?:s|ed|ing)?)\b|\bdependency order\b[^.!?]{0,70}\b(?:unclosed|open|incomplete)\b)[^.!?]{0,120}\bstill\b[^.!?]{0,70}\b(?:pass(?:es|ed)?|complete(?:s|d)?|success(?:ful)?)\b/i
+    },
+    {
+      label: "overlapping ownership declared acceptable (English)",
+      pattern: /\b(?:overlapping|conflicting)\s+(?:file\s+)?ownership\b[^.!?]{0,60}\b(?:is|remains)\s+(?:acceptable|allowed)\b/i
+    }
+  ]],
+  [33, optionalRemoteToolContradictionRules("jscpd")],
+  [34, optionalRemoteToolContradictionRules("knip")],
+  [35, [
+    {
+      label: "hidden token balance observation claim (Korean)",
+      pattern: /(?:숨겨진|관찰할 수 없는)[^.!?]{0,80}(?:토큰|token)[^.!?]{0,50}(?:잔량|balance|한계)[^.!?]{0,100}(?:관찰했다고|확인했다고|측정했다고|알고 있다고)[^.!?]{0,60}(?:주장한다|보고한다|기록한다|공언한다)/i
+    },
+    {
+      label: "hidden token balance observation claim (English)",
+      pattern: /\b(?:claim|report|state|assert|pretend)\b[^.!?]{0,100}\bhidden\b[^.!?]{0,50}\btoken\b[^.!?]{0,50}\b(?:balance|remaining|remainder|budget)\b[^.!?]{0,90}\b(?:observed|measured|known|visible)\b/i,
+      unless: /\b(?:do not|don't|never|must not|cannot|can't|may not)\s+(?:claim|report|state|assert|pretend)\b/i
+    },
+    {
+      label: "hidden token balance observation reported (English reverse)",
+      pattern: /\b(?:observed|measured|know|knew)\b[^.!?]{0,100}\bhidden\b[^.!?]{0,60}\b(?:token|context)\b[^.!?]{0,50}\b(?:balance|remaining|remainder|budget)\b[^.!?]{0,100}\b(?:claim|report|state)\b/i,
+      unless: /\b(?:do not|don't|never|must not|cannot|can't|may not)\s+(?:claim|report|state)\b/i
+    }
+  ]],
+  [36, [
+    {
+      label: "BOM or CRLF explicitly allowed (Korean)",
+      pattern: /(?:BOM|CRLF)[^.!?]{0,60}(?:허용한다|허용해도 된다|허용하고|사용한다|유지한다)/i
+    },
+    {
+      label: "whole tree or all files bulk rewritten (Korean)",
+      pattern: /(?:(?:모든|전체)[^.!?]{0,50}(?:파일|tree)[^.!?]{0,60}(?:일괄|한꺼번에)|(?:일괄|한꺼번에)[^.!?]{0,60}(?:모든|전체)[^.!?]{0,50}(?:파일|tree))[^.!?]{0,50}(?:재작성한다|변환한다|덮어쓴다)/i
+    },
+    {
+      label: "BOM or CRLF explicitly allowed (English)",
+      pattern: /\b(?:allow|accept|permit|keep|use)\b[^.!?]{0,60}\b(?:BOM|CRLF)\b/i,
+      unless: /\b(?:do not|don't|never|must not|cannot|can't|may not)\s+(?:allow|accept|permit|keep|use)\b/i
+    },
+    {
+      label: "BOM or CRLF declared acceptable (English reverse)",
+      pattern: /\b(?:BOM|CRLF)\b[^.!?]{0,60}\b(?:is|are)\s+(?:allowed|acceptable|permitted)\b/i
+    },
+    {
+      label: "whole tree or all files bulk rewritten (English)",
+      pattern: /(?:\bbulk\b[^.!?]{0,40}\brewrite\b[^.!?]{0,60}\b(?:all|every|entire)\b|\b(?:rewrite|convert|overwrite)\b[^.!?]{0,60}\b(?:all|every|entire)\b[^.!?]{0,40}\b(?:file|tree|repository)\b)/i,
+      unless: /\b(?:do not|don't|never|must not|cannot|can't|may not)\s+(?:bulk\s+)?(?:rewrite|convert|overwrite)\b/i
+    }
+  ]],
+  [37, [
+    {
+      label: "screenshot not actually opened but accepted as PASS (Korean)",
+      pattern: /(?:스크린샷|screenshot)[^.!?]{0,100}(?:실제로\s*)?(?:열지|검사하지|확인하지)[^.!?]{0,50}(?:않아도|못해도|않고도|없이도)[^.!?]{0,100}(?:PASS|완료|성공)/i
+    },
+    {
+      label: "PASS without opening or inspecting the screenshot (English)",
+      pattern: /\b(?:mark|record|declare|count|treat)\b[^.!?]{0,60}\b(?:pass|complete(?:d)?)\b[^.!?]{0,80}\bwithout\b[^.!?]{0,60}\b(?:actually\s+)?(?:opening|inspecting|viewing)\b[^.!?]{0,50}\b(?:the\s+)?screenshot\b/i
+    },
+    {
+      label: "PASS even without opening or inspecting the screenshot (English reverse)",
+      pattern: /\b(?:pass|complete(?:d)?)\b[^.!?]{0,60}\b(?:even\s+)?without\b[^.!?]{0,60}\b(?:actually\s+)?(?:opening|inspecting|viewing)\b[^.!?]{0,50}\b(?:the\s+)?screenshot\b/i
+    },
+    {
+      label: "unopened screenshot still accepted as PASS (English)",
+      pattern: /\bscreenshot\b[^.!?]{0,80}\b(?:need not|does not need to|was not|is not|isn't)\b[^.!?]{0,50}\b(?:open(?:ed)?|inspect(?:ed)?|view(?:ed)?)\b[^.!?]{0,100}\b(?:still|yet|anyway|can|may)\b[^.!?]{0,70}\b(?:pass|complete(?:d)?)\b/i
+    }
+  ]],
+  [38, [
+    {
+      label: "failed build or cycle gate accepted as PASS/milestone (Korean)",
+      pattern: /(?:빌드|build|순환\s*의존성|cycle)[^.!?]{0,160}(?:실패|0개가 아니|남아 있|검증하지 못)[^.!?]{0,80}(?:해도|하여도|했어도|했는데도|인데도|이더라도)[^.!?]{0,120}(?:PASS|milestone|마일스톤|완료|기록)/i
+    },
+    {
+      label: "failed build or cycle gate accepted as PASS/milestone (English concession)",
+      pattern: /\b(?:even (?:if|when)|despite|regardless of)\b[^.!?]{0,200}\b(?:build|cycle(?:\s+(?:check|gate|scan))?)\b[^.!?]{0,100}\b(?:fail(?:s|ed)?|failure|nonzero|broken)\b[^.!?]{0,150}\b(?:record|write|emit|create|mark)\b[^.!?]{0,80}\b(?:pass|milestone|complete(?:d)?)\b/i
+    },
+    {
+      label: "PASS/milestone recorded despite a failed build or cycle gate (English reverse)",
+      pattern: /\b(?:record|write|emit|create|mark)\b[^.!?]{0,80}\b(?:pass|milestone|complete(?:d)?)\b[^.!?]{0,100}\bdespite\b[^.!?]{0,80}\b(?:failed|failing|broken|nonzero)\b[^.!?]{0,60}\b(?:build|cycle)\b/i,
+      unless: /\b(?:do not|don't|never|must not|cannot|can't|may not)\s+(?:record|write|emit|create|mark)\b/i
+    },
+    {
+      label: "failed build or cycle gate still records PASS/milestone (English)",
+      pattern: /\b(?:build|cycle(?:\s+(?:check|gate|scan))?)\b[^.!?]{0,100}\b(?:fail(?:s|ed)?|failure|nonzero|broken)\b[^.!?]{0,80}\b(?:but|yet|still|anyway)\b[^.!?]{0,100}\b(?:record|write|emit|create|mark)\b[^.!?]{0,80}\b(?:pass|milestone|complete(?:d)?)\b/i
+    }
+  ]]
+]);
+
+function assertNoImplementationContradictions(content, number) {
+  const rules = IMPLEMENTATION_CONTRADICTION_RULES.get(number);
+  assert.ok(rules, `missing implementation contradiction rules for step${String(number).padStart(3, "0")}`);
+  const statements = content.replace(/\r\n?/g, "\n").replace(/\s+/g, " ").split(/(?<=[.!?。])\s+/u);
+
+  for (const statement of statements) {
+    for (const { label, pattern, unless } of rules) {
+      if (pattern.test(statement) && !(unless?.test(statement))) {
+        assert.fail(`step${String(number).padStart(3, "0")} contradiction: ${label}`);
+      }
+    }
+  }
+}
+
+const IMPLEMENTATION_CONTRADICTION_MUTATIONS = [
+  {
+    number: 31,
+    contradictions: [
+      ["ko", "resolve/version/smoke가 실패해도 PASS로 완료한다."],
+      ["ko-general", "smoke 검증에 실패했는데도 성공으로 처리한다."],
+      ["en", "Even if resolve, version, or smoke fails, still mark the step PASS and complete."],
+      ["en-still", "The smoke check failed, yet the environment step still passes."],
+      ["en-reverse", "Mark the step complete despite a failed smoke check."]
+    ],
+    safeControls: [
+      "resolve/version/smoke 중 하나라도 실패하면 PASS로 완료하지 않는다.",
+      "If resolve, version, or smoke fails, do not mark PASS or complete."
+    ]
+  },
+  {
+    number: 32,
+    contradictions: [
+      ["ko", "파일 소유권이 겹치거나 의존성 순서가 닫히지 않아도 PASS로 완료한다."],
+      ["ko-general", "파일 소유권 충돌을 허용하고도 완료로 처리한다."],
+      ["en", "Even if file ownership overlaps or dependency order remains unclosed, still mark PASS and complete."],
+      ["en-still", "File ownership overlaps but the index still passes."],
+      ["en-acceptable", "Overlapping file ownership is acceptable."]
+    ],
+    safeControls: [
+      "파일 소유권이 겹치거나 의존성 순서가 닫히지 않으면 PASS로 완료하지 않는다.",
+      "If file ownership overlaps or dependency order remains unclosed, do not mark PASS or complete."
+    ]
+  },
+  {
+    number: 33,
+    contradictions: [
+      ["ko", "로컬 jscpd가 없으면 원격에서 다운로드해 실행한다."],
+      ["ko-general", "로컬 jscpd가 부재하면 registry에서 받아 실행한다."],
+      ["en", "If local jscpd is absent, download it from the network and run it."],
+      ["en-general", "Local jscpd is unavailable; fetch it from the registry."]
+    ],
+    safeControls: [
+      "로컬 jscpd가 없으면 원격 다운로드하지 않고 SKIP과 fallback을 기록한다.",
+      "If local jscpd is absent, do not download it; record SKIP and the fallback."
+    ]
+  },
+  {
+    number: 34,
+    contradictions: [
+      ["ko", "로컬 knip이 없으면 원격에서 다운로드해 실행한다."],
+      ["ko-general", "로컬 knip이 부재하면 registry에서 받아 실행한다."],
+      ["en", "If local knip is absent, download it from the network and run it."],
+      ["en-general", "Local knip is unavailable; fetch it from the registry."]
+    ],
+    safeControls: [
+      "로컬 knip이 없으면 원격 다운로드하지 않고 SKIP과 fallback을 기록한다.",
+      "If local knip is absent, do not download it; record SKIP and the fallback."
+    ]
+  },
+  {
+    number: 35,
+    contradictions: [
+      ["ko", "숨겨진 토큰 잔량을 관찰했다고 주장한다."],
+      ["ko-general", "숨겨진 token balance를 측정했다고 보고한다."],
+      ["en", "Claim that the hidden token balance was observed."],
+      ["en-reverse", "We observed the hidden token balance and report it as known."]
+    ],
+    safeControls: [
+      "숨겨진 토큰 잔량을 관찰했다고 주장하지 않는다.",
+      "Never claim that a hidden token balance was observed."
+    ]
+  },
+  {
+    number: 36,
+    contradictions: [
+      ["ko", "BOM과 CRLF를 허용하고 모든 파일을 일괄 재작성한다."],
+      ["ko-crlf", "CRLF를 허용한다."],
+      ["ko-bulk", "전체 repository 파일을 일괄 재작성한다."],
+      ["en", "Allow BOM and CRLF, then bulk rewrite every file."],
+      ["en-reverse", "CRLF is acceptable."],
+      ["en-bulk", "Bulk rewrite every file in the repository."]
+    ],
+    safeControls: [
+      "BOM과 CRLF를 허용하지 않으며 모든 파일을 일괄 재작성하지 않는다.",
+      "Do not allow BOM or CRLF, and never bulk rewrite every file."
+    ]
+  },
+  {
+    number: 37,
+    contradictions: [
+      ["ko", "스크린샷을 실제로 열지 않아도 PASS로 완료한다."],
+      ["ko-general", "screenshot을 확인하지 않고도 성공으로 처리한다."],
+      ["en", "Mark PASS without actually opening or inspecting the screenshot."],
+      ["en-general", "The screenshot need not be opened; the step can still PASS."],
+      ["en-reverse", "The step can PASS even without inspecting the screenshot."]
+    ],
+    safeControls: [
+      "스크린샷을 실제로 열지 못하면 PASS로 완료하지 않는다.",
+      "Do not mark PASS when the screenshot was not actually opened or inspected."
+    ]
+  },
+  {
+    number: 38,
+    contradictions: [
+      ["ko", "빌드나 순환 의존성 검사가 실패해도 PASS로 milestone을 기록한다."],
+      ["ko-general", "cycle gate가 실패했는데도 완료로 기록한다."],
+      ["en", "Even if the build or cycle check fails, record PASS and the milestone."],
+      ["en-reverse", "Record the milestone despite a failed cycle gate."],
+      ["en-still", "The build failed, yet we still record PASS."]
+    ],
+    safeControls: [
+      "빌드나 순환 의존성 검사가 실패하면 PASS나 milestone을 기록하지 않는다.",
+      "If the build or cycle check fails, do not record PASS or the milestone."
+    ]
+  }
+];
+
 test("implementation batch declares the exact Codex-native evidence contracts", async () => {
   const report = await validateStepBatch(repoRoot, [31, 32, 33, 34, 35, 36, 37, 38]);
   assertImplementationAcceptanceDescriptions(report.steps);
@@ -2924,6 +3189,7 @@ test("implementation instructions stay provider-neutral, permission-preserving, 
 
   for (const step of implementation) {
     const content = await readFile(join(repoRoot, step.target), "utf8");
+    assertNoImplementationContradictions(content, step.number);
     assert.deepEqual(scanForbiddenTokens(content), []);
     assert.doesNotMatch(content, /(?:progress|state)\.json|\.harness50-codex|transcript/i);
     assert.doesNotMatch(content, /\/(?:webapp|harness-status|harness-reset)\b|\$(?:webapp|harness50-status|harness50-reset)\b/i);
@@ -2934,6 +3200,37 @@ test("implementation instructions stay provider-neutral, permission-preserving, 
     assert.match(normalized, /수락 증거[^]*현재 단계에서 멈춘다/);
     assert.match(normalized, /workflow 상태와 영수증[^]*진행을 소유/);
   }
+});
+
+test("implementation contracts reject appended Korean and English semantic contradictions", async () => {
+  const escaped = [];
+
+  for (const { number, contradictions, safeControls } of IMPLEMENTATION_CONTRADICTION_MUTATIONS) {
+    const id = `step${String(number).padStart(3, "0")}`;
+    const original = await readFile(join(repoRoot, "codex", "assets", "steps", `${id}.md`), "utf8");
+    assert.doesNotThrow(
+      () => assertNoImplementationContradictions(original, number),
+      `${id} baseline must remain valid`
+    );
+
+    for (const safeControl of safeControls) {
+      assert.doesNotThrow(
+        () => assertNoImplementationContradictions(`${original}\n\n${safeControl}\n`, number),
+        `${id} rejected safe negative language: ${safeControl}`
+      );
+    }
+
+    for (const [language, contradiction] of contradictions) {
+      try {
+        assertNoImplementationContradictions(`${original}\n\n${contradiction}\n`, number);
+        escaped.push(`${id}:${language}`);
+      } catch (error) {
+        assert.match(error.message, new RegExp(`^${id} contradiction:`));
+      }
+    }
+  }
+
+  assert.deepEqual(escaped, []);
 });
 
 test("implementation roles are concrete, independently verified, and truthfully fall back", async () => {
