@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import { posix, win32 } from "node:path";
+import { cp, mkdir, readFile } from "node:fs/promises";
+import { join, posix, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { runConfiguredHook } from "./helpers/run-hook.mjs";
+import { configuredHookInvocation, runConfiguredHook } from "./helpers/run-hook.mjs";
 import { makeWorkspace } from "./helpers/workspace.mjs";
 
 const configUrl = new URL("../hooks/hooks.json", import.meta.url);
@@ -84,11 +84,31 @@ test("PLUGIN_ROOT remains the exact quoted Codex discovery placeholder", async (
 
 test("Codex substitution executes the selected hook through the native host shell", async () => {
   const config = JSON.parse(await readFile(configUrl, "utf8"));
-  const pluginRoot = fileURLToPath(new URL("../..", import.meta.url));
+  const checkoutRoot = fileURLToPath(new URL("../..", import.meta.url));
+  const holder = await makeWorkspace();
+  const pluginRoot = join(holder, "installed plugin root with spaces");
+  await mkdir(join(pluginRoot, "codex"), { recursive: true });
+  await cp(join(checkoutRoot, "codex", "hooks"), join(pluginRoot, "codex", "hooks"), {
+    recursive: true
+  });
+  await cp(join(checkoutRoot, "codex", "scripts"), join(pluginRoot, "codex", "scripts"), {
+    recursive: true
+  });
   assert.match(pluginRoot, /\s/);
   const root = await makeWorkspace();
   const handler = config.hooks.SessionStart[0].hooks[0];
   const command = process.platform === "win32" ? handler.commandWindows : handler.command;
+  const invocation = configuredHookInvocation(command, pluginRoot);
+  const expanded = expandRoot(command, pluginRoot);
+  if (process.platform === "win32") {
+    assert.equal(invocation.executable, process.env.COMSPEC ?? process.env.ComSpec ?? "cmd.exe");
+    assert.deepEqual(invocation.args, ["/C", `"${expanded}"`]);
+    assert.equal(invocation.windowsVerbatimArguments, true);
+  } else {
+    assert.equal(invocation.executable, process.env.SHELL || "/bin/sh");
+    assert.deepEqual(invocation.args, ["-lc", expanded]);
+    assert.equal(invocation.windowsVerbatimArguments, false);
+  }
   const result = await runConfiguredHook(command, {
     hook_event_name: "SessionStart",
     cwd: root,

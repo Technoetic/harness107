@@ -1,6 +1,8 @@
-import { appendEvent, readState, writeStateAtomic } from "../scripts/lib/state-store.mjs";
+import { readState, writeStateAtomic } from "../scripts/lib/state-store.mjs";
 import {
+  appendPinnedHookEvent,
   assertHookStorageGuard,
+  captureHookStorageGuard,
   continuationMarker,
   guardedHookOperation,
   isDirectEntrypoint,
@@ -25,7 +27,12 @@ function currentMarkerPrompt(state, prompt, lifecycleEvents) {
     !stopTurnWasAccepted(lifecycleEvents, state);
 }
 
-export async function handleUserPromptSubmit(event, { workspaceRoot }) {
+export async function handleUserPromptSubmit(event, { workspaceRoot, eventNow }) {
+  const observed = await captureHookStorageGuard(workspaceRoot, { includeLock: false });
+  if (!observed.identities.has(observed.paths.codexDir)) {
+    await assertHookStorageGuard(observed);
+    return {};
+  }
   try {
     await withHookStorageLock(workspaceRoot, async guard => {
       const prompt = event.prompt;
@@ -62,13 +69,13 @@ export async function handleUserPromptSubmit(event, { workspaceRoot }) {
           await guardedHookOperation(
             guard,
             [guard.paths.eventsPath],
-            () => appendEvent(workspaceRoot, {
+            () => appendPinnedHookEvent(guard, {
               kind: "continuation_prompt_accepted",
               workflow_id: state.workflow_id,
               step: state.current_step,
               turn_id: state.last_stop_turn_id,
               baseline_receipt_count: state.completed_steps.length
-            })
+            }, { now: eventNow })
           );
           return;
         } catch (error) {
@@ -92,14 +99,14 @@ export async function handleUserPromptSubmit(event, { workspaceRoot }) {
         await guardedHookOperation(
           guard,
           [guard.paths.eventsPath],
-          () => appendEvent(workspaceRoot, {
+          () => appendPinnedHookEvent(guard, {
             kind: "workflow_paused",
             workflow_id: state.workflow_id,
             step: state.current_step,
             status: "paused",
             turn_id: turnId,
             reason_code: "USER_REQUEST"
-          })
+          }, { now: eventNow })
         );
       } catch (error) {
         if (error?.code === "HOOK_WORKSPACE_UNSAFE") throw error;

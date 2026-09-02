@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { renameSync, symlinkSync } from "node:fs";
-import { link, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { handleSessionStart } from "../hooks/session-start.mjs";
 import { handleStop } from "../hooks/stop.mjs";
 import { handleUserPromptSubmit } from "../hooks/user-prompt-submit.mjs";
 import { beginStep, completeStep, initWorkflow } from "../scripts/lib/workflow.mjs";
@@ -102,8 +103,104 @@ test("documented hook fixtures have distinct event-specific shapes", async () =>
     permission_mode: "default",
     model: "gpt-5.6-codex"
   });
+  for (const value of values) {
+    assert.equal(typeof value.session_id, "string");
+    assert.ok(value.transcript_path === null || typeof value.transcript_path === "string");
+    assert.equal(typeof value.permission_mode, "string");
+    assert.equal(typeof value.model, "string");
+  }
+  assert.equal(values[4].agent_id, "agent-reviewer-01");
+  assert.equal(values[4].agent_type, "reviewer");
   assert.equal(values[4].prompt, "다른 버그를 먼저 고쳐줘");
   assert.equal(values[5].stop_hook_active, false);
+});
+
+test("generated hook schemas require common wire fields and scope agent metadata to prompts", async () => {
+  const root = await makeWorkspace();
+  const complete = {
+    hook_event_name: "SessionStart",
+    cwd: root,
+    source: "startup",
+    session_id: "session-required-wire",
+    transcript_path: null,
+    permission_mode: "default",
+    model: "gpt-5.6-codex"
+  };
+  for (const field of ["session_id", "transcript_path", "permission_mode", "model"]) {
+    const incomplete = { ...complete };
+    delete incomplete[field];
+    const result = await runHook("session-start", incomplete, { rawEvent: true });
+    assert.equal(result.code, 1, field);
+    assert.equal(result.output.error.code, "HOOK_EVENT_INVALID", field);
+  }
+
+  assertEmptySuccess(await runHook("user-prompt-submit", {
+    hook_event_name: "UserPromptSubmit",
+    cwd: root,
+    turn_id: "turn-agent-wire",
+    prompt: "$webapp",
+    agent_id: "agent-01",
+    agent_type: "reviewer"
+  }));
+  for (const [name, event] of [
+    ["session-start", { ...complete, agent_id: "agent-01" }],
+    ["stop", {
+      ...complete,
+      hook_event_name: "Stop",
+      turn_id: "turn-no-agent",
+      stop_hook_active: false,
+      last_assistant_message: null,
+      agent_type: "reviewer"
+    }],
+    ["user-prompt-submit", {
+      ...complete,
+      hook_event_name: "UserPromptSubmit",
+      turn_id: "turn-bad-agent",
+      prompt: "$webapp",
+      agent_id: 7
+    }]
+  ]) {
+    const result = await runHook(name, event, { rawEvent: true });
+    assert.equal(result.code, 1);
+    assert.equal(result.output.error.code, "HOOK_EVENT_INVALID");
+  }
+});
+
+test("generated string identifiers accept schema-valid whitespace and Unicode without artifacts", async () => {
+  const common = {
+    session_id: " session/id 雪\n",
+    transcript_path: null,
+    permission_mode: "default",
+    model: " model preview 雪 "
+  };
+  const cases = [
+    ["session-start", {
+      ...common,
+      hook_event_name: "SessionStart",
+      source: "startup"
+    }],
+    ["user-prompt-submit", {
+      ...common,
+      hook_event_name: "UserPromptSubmit",
+      turn_id: " turn/id 雪\n",
+      prompt: "$webapp",
+      agent_id: " agent/id 雪\n",
+      agent_type: " reviewer type 雪 "
+    }],
+    ["stop", {
+      ...common,
+      hook_event_name: "Stop",
+      turn_id: " turn/id 雪\n",
+      stop_hook_active: false,
+      last_assistant_message: null
+    }]
+  ];
+  for (const [name, partial] of cases) {
+    const root = await makeWorkspace();
+    const result = await runHook(name, { ...partial, cwd: root }, { rawEvent: true });
+    assertEmptySuccess(result);
+    await assert.rejects(lstat(pathsFor(root).codexDir), error => error?.code === "ENOENT");
+  }
 });
 
 test("SessionStart accepts the official full shape and all documented sources without mutating state", async () => {
@@ -141,6 +238,7 @@ test("SessionStart accepts the official full shape and all documented sources wi
 test("SessionStart missing and completed workflows return the documented empty result", async () => {
   const missingRoot = await makeWorkspace();
   assertEmptySuccess(await runHook("session-start", await fixture("session-start.json", missingRoot)));
+  await assert.rejects(lstat(pathsFor(missingRoot).codexDir), error => error?.code === "ENOENT");
 
   const completedRoot = await makeWorkspace();
   const running = await init(completedRoot, "completed");
@@ -345,7 +443,7 @@ test("stop_hook_active releases bounded recursive entries until durable work adv
   assert.deepEqual(await events(root), beforeEvents);
 });
 
-test("active Stop stays quiet after acceptance until the executor begins a new attempt", async () => {
+test("every Stop stays quiet after acceptance until the executor begins a new attempt", async () => {
   const root = await makeWorkspace();
   const initialized = await init(root, "active-before-attempt");
   await begin(root, initialized, "active-before-attempt-run");
@@ -364,14 +462,16 @@ test("active Stop stays quiet after acceptance until the executor begins a new a
     prompt: failed.output.reason
   }));
 
-  for (let retry = 0; retry < 5; retry += 1) {
-    assertEmptySuccess(await runHook("stop", {
-      hook_event_name: "Stop",
-      cwd: root,
-      turn_id: `turn-active-waiting-${retry}`,
-      stop_hook_active: true,
-      last_assistant_message: null
-    }));
+  for (const stopHookActive of [false, true]) {
+    for (let retry = 0; retry < 3; retry += 1) {
+      assertEmptySuccess(await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: `turn-waiting-${stopHookActive}-${retry}`,
+        stop_hook_active: stopHookActive,
+        last_assistant_message: null
+      }));
+    }
   }
   const state = await readState(root);
   assert.equal(state.consecutive_failures, 1);
@@ -667,7 +767,8 @@ test("event-specific names fields types cwd turn IDs and booleans fail before mu
     ["session-start", { hook_event_name: "SessionStart", cwd: root, source: "startup", permission_mode: "workspace-write" }, "HOOK_EVENT_INVALID"],
     ["session-start", { hook_event_name: "SessionStart", cwd: root, source: "startup", unknown_official_field: true }, "HOOK_EVENT_INVALID"],
     ["session-start", { hook_event_name: "SessionStart", cwd: other, source: "startup" }, "HOOK_WORKSPACE_UNSAFE"],
-    ["user-prompt-submit", { hook_event_name: "UserPromptSubmit", cwd: root, turn_id: "", prompt: "hello" }, "HOOK_EVENT_INVALID"],
+    ["session-start", { hook_event_name: "SessionStart", cwd: root, source: "startup", session_id: 7 }, "HOOK_EVENT_INVALID"],
+    ["user-prompt-submit", { hook_event_name: "UserPromptSubmit", cwd: root, turn_id: 7, prompt: "hello" }, "HOOK_EVENT_INVALID"],
     ["user-prompt-submit", { hook_event_name: "UserPromptSubmit", cwd: root, turn_id: "turn", prompt: 7 }, "HOOK_EVENT_INVALID"],
     ["stop", { hook_event_name: "Stop", cwd: root, turn_id: "turn", stop_hook_active: "false", last_assistant_message: null }, "HOOK_EVENT_INVALID"],
     ["stop", { hook_event_name: "Stop", cwd: root, turn_id: "turn", stop_hook_active: false, last_assistant_message: [], extra: true }, "HOOK_EVENT_INVALID"]
@@ -751,6 +852,51 @@ test("hook getters cannot redirect locked state or event mutations outside the w
     assert.equal(swapped, true);
     assert.ok(Buffer.from(await readFile(pathsFor(outside).statePath)).equals(outsideStateBefore));
     assert.ok(Buffer.from(await readFile(pathsFor(outside).eventsPath)).equals(outsideEventsBefore));
+  }
+});
+
+test("hook append callbacks cannot redirect SessionStart PromptSubmit or Stop events outside", async () => {
+  for (const handlerName of ["session", "prompt", "stop"]) {
+    const root = await makeWorkspace();
+    const outside = await makeWorkspace();
+    await init(root, `append-${handlerName}-inside`);
+    await init(outside, `append-${handlerName}-outside`);
+    const outsideStateBefore = await readFile(pathsFor(outside).statePath);
+    const outsideEventsBefore = await readFile(pathsFor(outside).eventsPath);
+    let swapped = false;
+    const eventNow = () => {
+      if (!swapped) {
+        swapped = true;
+        swapCodexDirectory(root, outside);
+      }
+      return new Date("2026-09-02T12:00:00.000Z");
+    };
+
+    let operation;
+    if (handlerName === "session") {
+      operation = handleSessionStart({}, { workspaceRoot: root, eventNow });
+    } else if (handlerName === "prompt") {
+      operation = handleUserPromptSubmit({
+        turn_id: "turn-append-prompt",
+        prompt: "pause safely"
+      }, { workspaceRoot: root, eventNow });
+    } else {
+      operation = handleStop({
+        turn_id: "turn-append-stop",
+        stop_hook_active: false
+      }, { workspaceRoot: root, eventNow });
+    }
+    await operation.catch(() => {});
+
+    assert.equal(swapped, true, handlerName);
+    assert.ok(
+      Buffer.from(await readFile(pathsFor(outside).statePath)).equals(outsideStateBefore),
+      `${handlerName} changed outside state`
+    );
+    assert.ok(
+      Buffer.from(await readFile(pathsFor(outside).eventsPath)).equals(outsideEventsBefore),
+      `${handlerName} changed outside events`
+    );
   }
 });
 

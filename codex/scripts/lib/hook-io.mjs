@@ -1,4 +1,4 @@
-import { lstat, readFile, realpath } from "node:fs/promises";
+import { lstat, open, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { TextDecoder } from "node:util";
@@ -10,7 +10,7 @@ import { pathsFor } from "./paths.mjs";
 
 export const HOOK_INPUT_LIMIT = 1024 * 1024;
 
-const COMMON_OPTIONAL_FIELDS = new Set([
+const COMMON_REQUIRED_FIELDS = new Set([
   "session_id",
   "transcript_path",
   "permission_mode",
@@ -18,12 +18,18 @@ const COMMON_OPTIONAL_FIELDS = new Set([
 ]);
 const EVENT_FIELDS = new Map([
   ["SessionStart", {
-    required: new Set(["hook_event_name", "cwd", "source"]),
-    optional: COMMON_OPTIONAL_FIELDS
+    required: new Set(["hook_event_name", "cwd", "source", ...COMMON_REQUIRED_FIELDS]),
+    optional: new Set()
   }],
   ["UserPromptSubmit", {
-    required: new Set(["hook_event_name", "cwd", "turn_id", "prompt"]),
-    optional: COMMON_OPTIONAL_FIELDS
+    required: new Set([
+      "hook_event_name",
+      "cwd",
+      "turn_id",
+      "prompt",
+      ...COMMON_REQUIRED_FIELDS
+    ]),
+    optional: new Set(["agent_id", "agent_type"])
   }],
   ["Stop", {
     required: new Set([
@@ -31,9 +37,10 @@ const EVENT_FIELDS = new Map([
       "cwd",
       "turn_id",
       "stop_hook_active",
-      "last_assistant_message"
+      "last_assistant_message",
+      ...COMMON_REQUIRED_FIELDS
     ]),
-    optional: COMMON_OPTIONAL_FIELDS
+    optional: new Set()
   }]
 ]);
 const SESSION_SOURCES = new Set(["startup", "resume", "clear", "compact"]);
@@ -44,7 +51,16 @@ const PERMISSION_MODES = new Set([
   "dontAsk",
   "bypassPermissions"
 ]);
-const SAFE_ID = /^[A-Za-z0-9._:-]{1,256}$/;
+const SAFE_HOOK_EVENT_FIELDS = new Set([
+  "kind",
+  "workflow_id",
+  "step",
+  "turn_id",
+  "status",
+  "reason_code",
+  "baseline_receipt_count",
+  "completed_count"
+]);
 
 function fail(code, message) {
   throw new HarnessError(code, message);
@@ -198,7 +214,17 @@ export async function captureHookStorageGuard(workspaceRoot, { includeLock = tru
     }
     identities.set(path, information);
   }
-  return { paths, identities };
+  let eventsIdentity;
+  if (includeLock) {
+    const information = await existingStat(paths.eventsPath);
+    eventsIdentity = information !== null &&
+      !information.isSymbolicLink() &&
+      information.isFile() &&
+      information.nlink === 1n
+      ? information
+      : null;
+  }
+  return { paths, identities, eventsIdentity };
 }
 
 export async function assertHookStorageGuard(guard, controlPaths = []) {
@@ -210,6 +236,81 @@ export async function assertHookStorageGuard(guard, controlPaths = []) {
     if (current === null || current.isSymbolicLink() || !sameNode(expected, current)) {
       fail("HOOK_WORKSPACE_UNSAFE", "hook workspace rejected");
     }
+  }
+  if (guard.eventsIdentity !== undefined && guard.eventsIdentity !== null) {
+    const current = await existingStat(paths.eventsPath);
+    if (
+      current === null ||
+      current.isSymbolicLink() ||
+      !current.isFile() ||
+      current.nlink !== 1n ||
+      !sameNode(guard.eventsIdentity, current)
+    ) {
+      fail("HOOK_WORKSPACE_UNSAFE", "hook workspace rejected");
+    }
+  }
+}
+
+function materializeHookEvent(event, now) {
+  if (event === null || typeof event !== "object" || Array.isArray(event)) {
+    fail("HOOK_INTERNAL", "hook failed safely");
+  }
+  if (typeof now !== "function") fail("HOOK_INTERNAL", "hook failed safely");
+  const materialized = {};
+  for (const [key, value] of Object.entries(event)) {
+    if (!SAFE_HOOK_EVENT_FIELDS.has(key)) continue;
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      materialized[key] = value;
+    }
+  }
+  if (typeof materialized.kind !== "string" || !/^[a-z][a-z0-9_]*$/.test(materialized.kind)) {
+    fail("HOOK_INTERNAL", "hook failed safely");
+  }
+  const timestamp = now();
+  if (!(timestamp instanceof Date) || Number.isNaN(timestamp.getTime())) {
+    fail("HOOK_INTERNAL", "hook failed safely");
+  }
+  materialized.timestamp = timestamp.toISOString();
+  return materialized;
+}
+
+export async function appendPinnedHookEvent(guard, event, {
+  now = () => new Date()
+} = {}) {
+  const materialized = materializeHookEvent(event, now);
+  const bytes = Buffer.from(`${JSON.stringify(materialized)}\n`, "utf8");
+  await assertHookStorageGuard(guard, [guard.paths.eventsPath]);
+  const original = guard.eventsIdentity;
+  if (original === undefined || original === null) {
+    fail("HOOK_WORKSPACE_UNSAFE", "hook workspace rejected");
+  }
+
+  let handle;
+  try {
+    handle = await open(guard.paths.eventsPath, "r+");
+    const opened = await handle.stat({ bigint: true });
+    if (
+      opened.isSymbolicLink() ||
+      !opened.isFile() ||
+      opened.nlink !== 1n ||
+      !sameNode(original, opened)
+    ) {
+      fail("HOOK_WORKSPACE_UNSAFE", "hook workspace rejected");
+    }
+    await assertHookStorageGuard(guard, [guard.paths.eventsPath]);
+    if (opened.size + BigInt(bytes.length) > BigInt(HOOK_INPUT_LIMIT)) {
+      fail("HOOK_INTERNAL", "hook failed safely");
+    }
+    const result = await handle.write(bytes, 0, bytes.length, Number(opened.size));
+    if (result.bytesWritten !== bytes.length) fail("HOOK_INTERNAL", "hook failed safely");
+    await handle.sync();
+    await assertHookStorageGuard(guard, [guard.paths.eventsPath]);
+    return materialized;
+  } catch (error) {
+    await assertHookStorageGuard(guard, [guard.paths.eventsPath]);
+    throw error;
+  } finally {
+    await handle?.close().catch(() => {});
   }
 }
 
@@ -289,7 +390,7 @@ export async function validateEventWorkspace(cwd) {
 }
 
 function validateOptionalFields(event) {
-  if ("session_id" in event && !SAFE_ID.test(event.session_id)) {
+  if ("session_id" in event && typeof event.session_id !== "string") {
     fail("HOOK_EVENT_INVALID", "hook event rejected");
   }
   if (
@@ -303,6 +404,11 @@ function validateOptionalFields(event) {
   }
   if ("model" in event && typeof event.model !== "string") {
     fail("HOOK_EVENT_INVALID", "hook event rejected");
+  }
+  for (const field of ["agent_id", "agent_type"]) {
+    if (field in event && typeof event[field] !== "string") {
+      fail("HOOK_EVENT_INVALID", "hook event rejected");
+    }
   }
 }
 
@@ -327,13 +433,13 @@ export async function validateHookEvent(raw, expectedName) {
     fail("HOOK_EVENT_INVALID", "hook event rejected");
   }
   if (expectedName === "UserPromptSubmit") {
-    if (!SAFE_ID.test(raw.turn_id) || typeof raw.prompt !== "string") {
+    if (typeof raw.turn_id !== "string" || typeof raw.prompt !== "string") {
       fail("HOOK_EVENT_INVALID", "hook event rejected");
     }
   }
   if (expectedName === "Stop") {
     if (
-      !SAFE_ID.test(raw.turn_id) ||
+      typeof raw.turn_id !== "string" ||
       typeof raw.stop_hook_active !== "boolean" ||
       !(raw.last_assistant_message === null || typeof raw.last_assistant_message === "string")
     ) {

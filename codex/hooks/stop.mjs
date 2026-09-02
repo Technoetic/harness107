@@ -1,7 +1,9 @@
-import { appendEvent, readState, writeStateAtomic } from "../scripts/lib/state-store.mjs";
+import { readState, writeStateAtomic } from "../scripts/lib/state-store.mjs";
 import { failStep, reconcileWorkflow } from "../scripts/lib/workflow.mjs";
 import {
+  appendPinnedHookEvent,
   assertHookStorageGuard,
+  captureHookStorageGuard,
   continuationMarker,
   guardedHookOperation,
   isDirectEntrypoint,
@@ -56,7 +58,7 @@ function durableProgressSinceRequest(lifecycleEvents, state) {
   );
 }
 
-async function claimContinuation(workspaceRoot, turnId) {
+async function claimContinuation(workspaceRoot, turnId, eventNow) {
   return withHookStorageLock(workspaceRoot, async guard => {
     let state;
     try {
@@ -96,32 +98,38 @@ async function claimContinuation(workspaceRoot, turnId) {
     ) {
       return null;
     }
+    const updatedAt = mutationTime(state);
     state = await guardedHookOperation(
       guard,
       [guard.paths.statePath],
       () => writeStateAtomic(workspaceRoot, {
         ...state,
         last_stop_turn_id: turnId,
-        updated_at: mutationTime(state)
+        updated_at: updatedAt
       }),
       { allowReplacement: true }
     );
     await guardedHookOperation(
       guard,
       [guard.paths.eventsPath],
-      () => appendEvent(workspaceRoot, {
+      () => appendPinnedHookEvent(guard, {
         kind: "stop_continuation_requested",
         workflow_id: state.workflow_id,
         step: state.current_step,
         turn_id: turnId,
         baseline_receipt_count: state.completed_steps.length
-      })
+      }, { now: eventNow })
     );
     return state.continuation;
   });
 }
 
-export async function handleStop(event, { workspaceRoot }) {
+export async function handleStop(event, { workspaceRoot, eventNow }) {
+  const storage = await captureHookStorageGuard(workspaceRoot, { includeLock: false });
+  if (!storage.identities.has(storage.paths.codexDir)) {
+    await assertHookStorageGuard(storage);
+    return {};
+  }
   const observedEvent = await withHookStorageLock(workspaceRoot, async guard => {
     const value = {
       turnId: event.turn_id,
@@ -151,13 +159,21 @@ export async function handleStop(event, { workspaceRoot }) {
     if (!safelyReleasable(error)) throw error;
     return {};
   }
-  const pendingRequest = currentGenerationRequest(lifecycleEvents, state);
-  if (pendingRequest !== null && !stopTurnWasAccepted(lifecycleEvents, state, pendingRequest.turn_id)) {
+  const generationRequest = currentGenerationRequest(lifecycleEvents, state);
+  const generationAccepted = generationRequest !== null &&
+    stopTurnWasAccepted(lifecycleEvents, state, generationRequest.turn_id);
+  if (generationRequest !== null && !generationAccepted) {
     if (observedEvent.stopHookActive) return {};
     return {
       decision: "block",
       reason: continuationMarker(state.continuation)
     };
+  }
+  if (
+    generationAccepted &&
+    (state.current_attempt === null || state.current_attempt.failure_recorded)
+  ) {
+    return {};
   }
   if (stopTurnWasRequested(lifecycleEvents, state.workflow_id, observedEvent.turnId)) return {};
 
@@ -188,7 +204,7 @@ export async function handleStop(event, { workspaceRoot }) {
 
   let continuation;
   try {
-    continuation = await claimContinuation(workspaceRoot, observedEvent.turnId);
+    continuation = await claimContinuation(workspaceRoot, observedEvent.turnId, eventNow);
   } catch (error) {
     if (!safelyReleasable(error)) throw error;
     return {};

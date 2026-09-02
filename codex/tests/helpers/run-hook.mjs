@@ -13,6 +13,17 @@ const CLOSED_PIPE_CODES = new Set([
   "ERR_STREAM_WRITE_AFTER_END"
 ]);
 const HOOK_NAMES = new Set(["session-start", "user-prompt-submit", "stop"]);
+const WIRE_DEFAULTS = Object.freeze({
+  session_id: "session-test-wire",
+  transcript_path: null,
+  permission_mode: "default",
+  model: "gpt-5.6-codex"
+});
+
+function completeWireEvent(event) {
+  if (event === null || typeof event !== "object" || Array.isArray(event)) return event;
+  return { ...WIRE_DEFAULTS, ...event };
+}
 
 function chunksFor(value) {
   const values = Array.isArray(value)
@@ -181,15 +192,19 @@ async function runSpawned(executable, args, event, {
   });
 }
 
-export async function runHook(name, event, options = {}) {
+export async function runHook(name, event, { rawEvent = false, ...options } = {}) {
   if (!HOOK_NAMES.has(name)) throw new TypeError("runHook name is not recognized");
-  return runSpawned(process.execPath, [`${hookRoot}${name}.mjs`], event, options);
+  const wireEvent = rawEvent ? event : completeWireEvent(event);
+  const input = Object.hasOwn(options, "input") ? options.input : wireEvent;
+  return runSpawned(
+    process.execPath,
+    [`${hookRoot}${name}.mjs`],
+    wireEvent,
+    { ...options, input }
+  );
 }
 
-export async function runConfiguredHook(command, event, {
-  pluginRoot,
-  ...options
-} = {}) {
+export function configuredHookInvocation(command, pluginRoot) {
   if (
     typeof command !== "string" ||
     command === "" ||
@@ -201,14 +216,29 @@ export async function runConfiguredHook(command, event, {
     throw new TypeError("configured hook command and plugin root are invalid");
   }
   const expanded = command.replaceAll("${PLUGIN_ROOT}", pluginRoot);
-  const env = { PLUGIN_ROOT: pluginRoot, ...(options.env ?? {}) };
   if (process.platform === "win32") {
-    return runSpawned(
-      process.env.ComSpec ?? "cmd.exe",
-      ["/d", "/s", "/c", expanded],
-      event,
-      { ...options, env, windowsVerbatimArguments: true }
-    );
+    return {
+      executable: process.env.COMSPEC ?? process.env.ComSpec ?? "cmd.exe",
+      args: ["/C", `"${expanded}"`],
+      windowsVerbatimArguments: true
+    };
   }
-  return runSpawned("/bin/sh", ["-c", expanded], event, { ...options, env });
+  return {
+    executable: process.env.SHELL || "/bin/sh",
+    args: ["-lc", expanded],
+    windowsVerbatimArguments: false
+  };
+}
+
+export async function runConfiguredHook(command, event, {
+  pluginRoot,
+  ...options
+} = {}) {
+  const invocation = configuredHookInvocation(command, pluginRoot);
+  const env = { PLUGIN_ROOT: pluginRoot, ...(options.env ?? {}) };
+  return runSpawned(invocation.executable, invocation.args, event, {
+    ...options,
+    env,
+    windowsVerbatimArguments: invocation.windowsVerbatimArguments
+  });
 }

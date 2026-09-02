@@ -1,5 +1,8 @@
-import { appendEvent, readState } from "../scripts/lib/state-store.mjs";
+import { readState } from "../scripts/lib/state-store.mjs";
 import {
+  appendPinnedHookEvent,
+  assertHookStorageGuard,
+  captureHookStorageGuard,
   guardedHookOperation,
   isDirectEntrypoint,
   runHookDirect,
@@ -15,7 +18,12 @@ function contextOutput(additionalContext) {
   };
 }
 
-export async function handleSessionStart(_event, { workspaceRoot }) {
+export async function handleSessionStart(_event, { workspaceRoot, eventNow }) {
+  const observed = await captureHookStorageGuard(workspaceRoot, { includeLock: false });
+  if (!observed.identities.has(observed.paths.codexDir)) {
+    await assertHookStorageGuard(observed);
+    return {};
+  }
   return withHookStorageLock(workspaceRoot, async guard => {
     let state;
     try {
@@ -43,13 +51,13 @@ export async function handleSessionStart(_event, { workspaceRoot }) {
       await guardedHookOperation(
         guard,
         [guard.paths.eventsPath],
-        () => appendEvent(workspaceRoot, {
+        () => appendPinnedHookEvent(guard, {
           kind: "session_context_loaded",
           workflow_id: state.workflow_id,
           step: state.current_step,
           status: state.status,
           completed_count: state.completed_steps.length
-        })
+        }, { now: eventNow })
       );
     } catch {
       // Context loading remains useful when safe observation storage is unavailable.
