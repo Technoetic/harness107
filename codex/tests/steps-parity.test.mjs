@@ -176,6 +176,46 @@ test("target frontmatter and sole H1 exactly match index identity, phase, and ti
   }
 });
 
+test("CommonMark H1 detection includes indentation and tabs but excludes fenced code", async (t) => {
+  for (const [name, heading] of [
+    ["one leading space", " # Extra heading"],
+    ["two leading spaces with tab separator", "  #\tExtra heading"],
+    ["three leading spaces", "   # Extra heading"]
+  ]) {
+    await t.test(name, async (st) => {
+      const root = await fixtureRoot(st);
+      const target = join(root, "codex", "assets", "steps", "step021.md");
+      await writeFile(target, `${await readFile(target, "utf8")}\n${heading}\n`);
+      await assert.rejects(
+        () => stepValidator.validateRepositoryParity(root),
+        /exactly one H1/i
+      );
+    });
+  }
+
+  await t.test("the canonical H1 remains at column zero", async (st) => {
+    const root = await fixtureRoot(st);
+    const target = join(root, "codex", "assets", "steps", "step021.md");
+    const original = await readFile(target, "utf8");
+    await writeFile(target, original.replace(
+      "# Step 21 - 의존성 게이트 검증",
+      " # Step 21 - 의존성 게이트 검증"
+    ));
+    await assert.rejects(
+      () => stepValidator.validateRepositoryParity(root),
+      /H1/i
+    );
+  });
+
+  await t.test("backtick and tilde fenced pseudo-headings are ignored", async (st) => {
+    const root = await fixtureRoot(st);
+    const target = join(root, "codex", "assets", "steps", "step021.md");
+    const original = await readFile(target, "utf8");
+    await writeFile(target, `${original}\n\`\`\`markdown\n# fenced pseudo H1\n\`\`\`\n\n~~~text\n  #\talso fenced\n~~~\n\n    # four-space code, not an H1\n`);
+    await assert.doesNotReject(() => stepValidator.validateRepositoryParity(root));
+  });
+});
+
 test("declared paths are portable, normalized, and collision-free", async (t) => {
   const root = await fixtureRoot(t);
   const base = await loadFixtureIndex(root);
@@ -208,6 +248,9 @@ test("declared paths are portable, normalized, and collision-free", async (t) =>
   await t.test("artifact path portability", () => assertIndexMutationRejected(root, base, (index) => {
     index.steps[0].acceptance[0].path = "..\\outside.md";
   }, /portable|path/i));
+  await t.test("optional artifact path portability", () => assertIndexMutationRejected(root, base, (index) => {
+    index.steps[15].acceptance.find((item) => item.id === "tokei-baseline").path = "../optional.json";
+  }, /portable|path/i));
 });
 
 test("the dependency graph has unique owners and direct, used, prior dependencies", async (t) => {
@@ -227,6 +270,9 @@ test("the dependency graph has unique owners and direct, used, prior dependencie
     ["duplicate optional dependency", (index) => { index.steps[15].optional_requires.push("step011"); }, /optional_requires.*duplicate/i],
     ["required and optional overlap", (index) => { index.steps[15].requires.push("step011"); }, /disjoint|both required and optional/i],
     ["unknown dependency id", (index) => { index.steps[1].optional_requires.push("step999"); }, /optional.*canonical|dependency/i],
+    ["output artifact made optional", (index) => {
+      index.steps[0].acceptance.find((item) => item.id === "preflight-report").required = false;
+    }, /output.*required artifact acceptance/i],
     ["output without artifact acceptance", (index) => { index.steps[0].acceptance[1].path = "step_archive/other.md"; }, /output.*artifact acceptance/i]
   ];
   for (const [name, mutate, expected] of cases) {

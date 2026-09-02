@@ -299,6 +299,31 @@ async function validateStepDirectory(repoRoot, relativeDirectory, allowedAuxilia
   }
 }
 
+function findMarkdownAtxH1Lines(content) {
+  const headings = [];
+  let fence = null;
+  for (const line of content.split("\n")) {
+    if (fence !== null) {
+      const closing = /^ {0,3}(`+|~+)[ \t]*$/.exec(line);
+      if (
+        closing && closing[1][0] === fence.character
+        && closing[1].length >= fence.length
+      ) {
+        fence = null;
+      }
+      continue;
+    }
+    const opening = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (opening && !(opening[1][0] === "`" && opening[2].includes("`"))) {
+      fence = { character: opening[1][0], length: opening[1].length };
+      continue;
+    }
+    const heading = /^( {0,3})#(?:[ \t]+.*|[ \t]*)$/.exec(line);
+    if (heading) headings.push({ indentation: heading[1].length, line });
+  }
+  return headings;
+}
+
 function validateTargetDocument(entry, content) {
   const normalized = content.replaceAll("\r\n", "\n");
   const frontmatterMatch = /^---\n([^]*?)\n---(?:\n|$)/.exec(normalized);
@@ -315,10 +340,15 @@ function validateTargetDocument(entry, content) {
   exactKeys(frontmatter, ["name", "phase"], `${entry.id} frontmatter`);
   if (frontmatter.name !== entry.id) fail(`${entry.id} frontmatter name must match the index`);
   if (frontmatter.phase !== entry.phase) fail(`${entry.id} frontmatter phase must match the index`);
-  const headings = [...normalized.matchAll(/^# ([^\n]+)$/gm)];
+  const headings = findMarkdownAtxH1Lines(normalized);
   if (headings.length !== 1) fail(`${entry.id} target must contain exactly one H1`);
-  const expectedHeading = `Step ${entry.number} - ${entry.title}`;
-  if (headings[0][1] !== expectedHeading) fail(`${entry.id} H1 must be # ${expectedHeading}`);
+  const expectedHeading = `# Step ${entry.number} - ${entry.title}`;
+  if (headings[0].line !== expectedHeading) {
+    if (headings[0].indentation > 0 && headings[0].line.trimStart() === expectedHeading) {
+      fail(`${entry.id} canonical H1 must start at column zero`);
+    }
+    fail(`${entry.id} H1 must be ${expectedHeading}`);
+  }
 }
 
 function validatePathAndGraphParity(index) {
@@ -373,8 +403,10 @@ function validatePathAndGraphParity(index) {
       if (!consumed) fail(`${entry.id}.requires has unused dependency ${dependency}; no owned output is an input`);
     }
     for (const output of entry.outputs) {
-      if (!entry.acceptance.some((item) => item.kind === "artifact" && item.path === output)) {
-        fail(`${entry.id}.output lacks artifact acceptance: ${output}`);
+      if (!entry.acceptance.some((item) => (
+        item.kind === "artifact" && item.required && item.path === output
+      ))) {
+        fail(`${entry.id}.output lacks required artifact acceptance: ${output}`);
       }
     }
     for (const item of entry.acceptance.filter((candidate) => candidate.kind === "artifact" && candidate.required)) {
