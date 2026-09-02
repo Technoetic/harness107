@@ -352,6 +352,475 @@ test("preflight outputs have required artifact evidence and safe step instructio
   }
 });
 
+test("tooling batch declares the exact portable capability contracts", async () => {
+  const report = await validateStepBatch(repoRoot, [6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+  const projected = report.steps.map((step) => ({
+    number: step.number,
+    id: step.id,
+    title: step.title,
+    phase: step.phase,
+    source: step.source,
+    target: step.target,
+    inputs: step.inputs,
+    outputs: step.outputs,
+    requires: step.requires,
+    optional_requires: step.optional_requires,
+    network: step.network,
+    visual_review: step.visual_review,
+    acceptance: step.acceptance.map((item) => ({
+      id: item.id,
+      kind: item.kind,
+      required: item.required,
+      ...(item.path === undefined ? {} : { path: item.path }),
+      ...(item.command === undefined ? {} : { command: item.command }),
+      ...(item.command_pattern === undefined ? {} : { command_pattern: item.command_pattern })
+    })),
+    ported: step.ported,
+    next: step.next
+  }));
+
+  assert.deepEqual(projected, [
+    {
+      number: 6,
+      id: "step006",
+      title: "Vitest/Jest 유닛 테스트 러너 환경 설치",
+      phase: "tooling",
+      source: "assets/steps/step006.md",
+      target: "codex/assets/steps/step006.md",
+      inputs: ["package.json", "step_archive/step001_preflight.md"],
+      outputs: ["step_archive/step006_test_runner_test.md"],
+      requires: ["step001"],
+      optional_requires: [],
+      network: true,
+      visual_review: false,
+      acceptance: [
+        {
+          id: "test-runner-version",
+          kind: "command",
+          required: true,
+          command_pattern: "^npx (?:vitest|jest) --version$"
+        },
+        {
+          id: "test-runner-environment-report",
+          kind: "artifact",
+          required: true,
+          path: "step_archive/step006_test_runner_test.md"
+        },
+        {
+          id: "test-runner-selection",
+          kind: "check",
+          required: true
+        }
+      ],
+      ported: true,
+      next: "step007"
+    },
+    {
+      number: 7,
+      id: "step007",
+      title: "번들 분석 도구 환경 설치",
+      phase: "tooling",
+      source: "assets/steps/step007.md",
+      target: "codex/assets/steps/step007.md",
+      inputs: ["package.json", "step_archive/step001_preflight.md"],
+      outputs: ["step_archive/step007_bundle_analyzer_test.md"],
+      requires: ["step001"],
+      optional_requires: [],
+      network: true,
+      visual_review: false,
+      acceptance: [
+        {
+          id: "bundle-analyzer-version",
+          kind: "command",
+          required: true,
+          command_pattern: "^npm ls (?:rollup-plugin-visualizer|webpack-bundle-analyzer|source-map-explorer) --depth=0$"
+        },
+        {
+          id: "bundle-analyzer-environment-report",
+          kind: "artifact",
+          required: true,
+          path: "step_archive/step007_bundle_analyzer_test.md"
+        },
+        {
+          id: "bundle-analyzer-selection",
+          kind: "check",
+          required: true
+        }
+      ],
+      ported: true,
+      next: "step008"
+    },
+    {
+      number: 8,
+      id: "step008",
+      title: "jscpd 코드 중복 탐지 환경 설치",
+      phase: "tooling",
+      source: "assets/steps/step008.md",
+      target: "codex/assets/steps/step008.md",
+      inputs: ["package.json", "step_archive/step001_preflight.md"],
+      outputs: ["step_archive/step008_jscpd_test.md"],
+      requires: ["step001"],
+      optional_requires: [],
+      network: true,
+      visual_review: false,
+      acceptance: [
+        {
+          id: "jscpd-version",
+          kind: "command",
+          required: false,
+          command: "npx jscpd --version"
+        },
+        {
+          id: "jscpd-environment-report",
+          kind: "artifact",
+          required: true,
+          path: "step_archive/step008_jscpd_test.md"
+        },
+        {
+          id: "jscpd-disposition",
+          kind: "check",
+          required: true
+        }
+      ],
+      ported: true,
+      next: "step009"
+    },
+    {
+      number: 9,
+      id: "step009",
+      title: "Semgrep 정적 분석 환경 설치",
+      phase: "tooling",
+      source: "assets/steps/step009.md",
+      target: "codex/assets/steps/step009.md",
+      inputs: ["step_archive/step001_preflight.md"],
+      outputs: ["step_archive/step009_semgrep_test.md"],
+      requires: ["step001"],
+      optional_requires: [],
+      network: true,
+      visual_review: false,
+      acceptance: [
+        {
+          id: "semgrep-version",
+          kind: "command",
+          required: false,
+          command: "semgrep --version"
+        },
+        {
+          id: "semgrep-environment-report",
+          kind: "artifact",
+          required: true,
+          path: "step_archive/step009_semgrep_test.md"
+        },
+        {
+          id: "semgrep-disposition",
+          kind: "check",
+          required: true
+        }
+      ],
+      ported: true,
+      next: "step010"
+    },
+    {
+      number: 10,
+      id: "step010",
+      title: "knip 미사용 코드 탐지 환경 설치",
+      phase: "tooling",
+      source: "assets/steps/step010.md",
+      target: "codex/assets/steps/step010.md",
+      inputs: ["package.json", "step_archive/step001_preflight.md"],
+      outputs: ["step_archive/step010_knip_test.md"],
+      requires: ["step001"],
+      optional_requires: [],
+      network: true,
+      visual_review: false,
+      acceptance: [
+        {
+          id: "knip-version",
+          kind: "command",
+          required: true,
+          command: "npx knip --version"
+        },
+        {
+          id: "knip-environment-report",
+          kind: "artifact",
+          required: true,
+          path: "step_archive/step010_knip_test.md"
+        },
+        {
+          id: "knip-installation-verified",
+          kind: "check",
+          required: true
+        }
+      ],
+      ported: true,
+      next: "step011"
+    },
+    {
+      number: 11,
+      id: "step011",
+      title: "tokei 코드 통계 환경 설치",
+      phase: "tooling",
+      source: "assets/steps/step011.md",
+      target: "codex/assets/steps/step011.md",
+      inputs: ["step_archive/step001_preflight.md"],
+      outputs: ["step_archive/step011_tokei_test.md"],
+      requires: ["step001"],
+      optional_requires: [],
+      network: true,
+      visual_review: false,
+      acceptance: [
+        {
+          id: "tokei-version",
+          kind: "command",
+          required: false,
+          command: "tokei --version"
+        },
+        {
+          id: "tokei-environment-report",
+          kind: "artifact",
+          required: true,
+          path: "step_archive/step011_tokei_test.md"
+        },
+        {
+          id: "tokei-disposition",
+          kind: "check",
+          required: true
+        }
+      ],
+      ported: true,
+      next: "step012"
+    },
+    {
+      number: 12,
+      id: "step012",
+      title: "Lighthouse CI 웹 성능 감사 환경 설치",
+      phase: "tooling",
+      source: "assets/steps/step012.md",
+      target: "codex/assets/steps/step012.md",
+      inputs: ["package.json", "step_archive/step001_preflight.md"],
+      outputs: ["step_archive/step012_lhci_test.md"],
+      requires: ["step001"],
+      optional_requires: [],
+      network: true,
+      visual_review: false,
+      acceptance: [
+        {
+          id: "lhci-version",
+          kind: "command",
+          required: true,
+          command: "npx lhci --version"
+        },
+        {
+          id: "lhci-environment-report",
+          kind: "artifact",
+          required: true,
+          path: "step_archive/step012_lhci_test.md"
+        },
+        {
+          id: "lhci-installation-verified",
+          kind: "check",
+          required: true
+        }
+      ],
+      ported: true,
+      next: "step013"
+    },
+    {
+      number: 13,
+      id: "step013",
+      title: "stylelint CSS 린팅 환경 설치",
+      phase: "tooling",
+      source: "assets/steps/step013.md",
+      target: "codex/assets/steps/step013.md",
+      inputs: ["package.json", "step_archive/step001_preflight.md"],
+      outputs: ["step_archive/step013_stylelint_test.md"],
+      requires: ["step001"],
+      optional_requires: [],
+      network: true,
+      visual_review: false,
+      acceptance: [
+        {
+          id: "stylelint-version",
+          kind: "command",
+          required: true,
+          command: "npx stylelint --version"
+        },
+        {
+          id: "stylelint-environment-report",
+          kind: "artifact",
+          required: true,
+          path: "step_archive/step013_stylelint_test.md"
+        },
+        {
+          id: "stylelint-installation-verified",
+          kind: "check",
+          required: true
+        }
+      ],
+      ported: true,
+      next: "step014"
+    },
+    {
+      number: 14,
+      id: "step014",
+      title: "Biome 포매팅/린팅 환경 설치",
+      phase: "tooling",
+      source: "assets/steps/step014.md",
+      target: "codex/assets/steps/step014.md",
+      inputs: ["package.json", "step_archive/step001_preflight.md"],
+      outputs: ["step_archive/step014_biome_test.md"],
+      requires: ["step001"],
+      optional_requires: [],
+      network: true,
+      visual_review: false,
+      acceptance: [
+        {
+          id: "biome-version",
+          kind: "command",
+          required: true,
+          command: "npx biome --version"
+        },
+        {
+          id: "biome-environment-report",
+          kind: "artifact",
+          required: true,
+          path: "step_archive/step014_biome_test.md"
+        },
+        {
+          id: "biome-configuration",
+          kind: "check",
+          required: true
+        }
+      ],
+      ported: true,
+      next: "step015"
+    },
+    {
+      number: 15,
+      id: "step015",
+      title: "madge 순환 의존성 탐지 환경 설치",
+      phase: "tooling",
+      source: "assets/steps/step015.md",
+      target: "codex/assets/steps/step015.md",
+      inputs: ["package.json", "step_archive/step001_preflight.md"],
+      outputs: ["step_archive/step015_madge_test.md"],
+      requires: ["step001"],
+      optional_requires: [],
+      network: true,
+      visual_review: false,
+      acceptance: [
+        {
+          id: "madge-version",
+          kind: "command",
+          required: false,
+          command: "npx madge --version"
+        },
+        {
+          id: "madge-environment-report",
+          kind: "artifact",
+          required: true,
+          path: "step_archive/step015_madge_test.md"
+        },
+        {
+          id: "madge-disposition",
+          kind: "check",
+          required: true
+        }
+      ],
+      ported: true,
+      next: "step016"
+    }
+  ]);
+});
+
+test("tooling source hashes bind the untouched Claude steps 006 through 015", async () => {
+  const index = await loadIndex(repoRoot);
+  const hashes = await recordSourceHashes(repoRoot, index.steps.slice(5, 15));
+
+  assert.deepEqual(hashes, {
+    step006: "373e5961bc9a6906f4ef921d0c542824a9ee419a3d0ac2f55ab18e05253c3f0f",
+    step007: "53209e43a2145950d76a9eac0e36e11ffb71b99350cbd466d8072c98ad22bca5",
+    step008: "14976722eba206b66ad917115ddac28413fb31dfc8e49c1f7128e1fa4a2a984d",
+    step009: "3c2f99310df7c9690ffaf22f4174882b29563b64e6c6ecc026e83f99f7cbf06c",
+    step010: "dc6fb1cec685b10b315f4fa77cc85e9dfbbd00aaa4442f114d950a947eb08ea0",
+    step011: "f4c6f789452c1a4920e8ea69ce6ad1cee1871400234c73d5d240bac2eef0a948",
+    step012: "bf5dd150944bc2774679d6a04a366ed77386446ca5823e62cd3d10a1259f5735",
+    step013: "2245a7a78b2a21c546ab12b78849b3a7c2c85f54c8ea69a8b142de69f33a9f2e",
+    step014: "5bf9523b046adac78fbd28872c4388aeeca32220a541719884abf208c8b99075",
+    step015: "46c4a588eceb39df1b1dcdd798b4d3b3d5d2a818d6063bb98e558a13fd6be23b"
+  });
+});
+
+test("tooling documents bind exact frontmatter titles and current-step references", async () => {
+  const expected = [
+    { name: "step006", number: 6, title: "Vitest/Jest 유닛 테스트 러너 환경 설치" },
+    { name: "step007", number: 7, title: "번들 분석 도구 환경 설치" },
+    { name: "step008", number: 8, title: "jscpd 코드 중복 탐지 환경 설치" },
+    { name: "step009", number: 9, title: "Semgrep 정적 분석 환경 설치" },
+    { name: "step010", number: 10, title: "knip 미사용 코드 탐지 환경 설치" },
+    { name: "step011", number: 11, title: "tokei 코드 통계 환경 설치" },
+    { name: "step012", number: 12, title: "Lighthouse CI 웹 성능 감사 환경 설치" },
+    { name: "step013", number: 13, title: "stylelint CSS 린팅 환경 설치" },
+    { name: "step014", number: 14, title: "Biome 포매팅/린팅 환경 설치" },
+    { name: "step015", number: 15, title: "madge 순환 의존성 탐지 환경 설치" }
+  ];
+
+  for (const item of expected) {
+    const content = await readFile(
+      join(repoRoot, "codex", "assets", "steps", `${item.name}.md`),
+      "utf8"
+    );
+    assert.deepEqual(parseStepDocument(content), {
+      frontmatter: { name: item.name, phase: "tooling" },
+      titles: [{ number: item.number, title: item.title }],
+      referencedSteps: [item.number]
+    });
+  }
+});
+
+test("tooling outputs and instructions preserve safe one-step boundaries", async () => {
+  const report = await validateStepBatch(repoRoot, [6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+
+  for (const step of report.steps) {
+    for (const output of step.outputs) {
+      assert.ok(step.acceptance.some((item) => (
+        item.kind === "artifact" && item.required && item.path === output
+      )), `${step.id} output lacks required artifact evidence: ${output}`);
+    }
+
+    const instructions = await readFile(join(repoRoot, step.target), "utf8");
+    assert.deepEqual(scanForbiddenTokens(instructions), []);
+    assert.doesNotMatch(instructions, /(?:progress|state)\.json|\.harness50-codex/i);
+    assert.doesNotMatch(instructions, /\b(?:SessionStart|UserPromptSubmit|PreToolUse|Stop)\b|\bhooks?\b/i);
+    assert.doesNotMatch(instructions, /(?:다음|후속)\s*(?:Step|단계)|\bnext\s+step\b/i);
+    assert.match(
+      instructions,
+      /버전 또는 smoke 명령이 종료 코드 0으로 성공한 경우에만[^]*`설치됨`/
+    );
+  }
+});
+
+test("required tooling capabilities block while optional capabilities record an explicit skip", async () => {
+  const required = [6, 7, 10, 12, 13, 14];
+  const optional = [8, 9, 11, 15];
+
+  for (const number of required) {
+    const id = `step${String(number).padStart(3, "0")}`;
+    const content = await readFile(join(repoRoot, "codex", "assets", "steps", `${id}.md`), "utf8");
+    assert.match(content, /기능 분류:\s*필수/);
+    assert.match(content, /사용할 수 없으면[^]*이 단계를 완료하지 않는다/);
+    assert.doesNotMatch(content, /필수 기능[^]*`SKIP`[^]*(?:완료|수락 증거)/);
+  }
+
+  for (const number of optional) {
+    const id = `step${String(number).padStart(3, "0")}`;
+    const content = await readFile(join(repoRoot, "codex", "assets", "steps", `${id}.md`), "utf8");
+    assert.match(content, /기능 분류:\s*선택/);
+    assert.match(content, /사용할 수 없으면[^]*`SKIP`[^]*이유[^]*대체/);
+    assert.match(content, /`SKIP`[^]*수락 증거/);
+  }
+});
+
 test("preflight documents bind exact frontmatter and titles to only their current step", async () => {
   const expected = [
     { name: "step001", phase: "preflight", number: 1, title: "하네스 프리플라이트 체크" },

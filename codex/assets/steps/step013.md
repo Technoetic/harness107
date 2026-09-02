@@ -1,0 +1,61 @@
+---
+name: step013
+phase: tooling
+---
+
+# Step 13 - stylelint CSS 린팅 환경 설치
+
+## 목표
+
+stylelint와 표준 규칙 구성을 프로젝트 개발 의존성으로 준비하고, CLI 버전 명령으로
+실행 가능성을 검증한다.
+
+## 입력과 산출물
+
+- 입력: `package.json`
+- 입력: `step_archive/step001_preflight.md`
+- 필수 선행 항목: `step001`
+- 산출물: `step_archive/step013_stylelint_test.md`
+- 네트워크: 패키지 설치가 필요할 때 사용할 수 있다.
+- 시각 검토: 필요하지 않다.
+- 기능 분류: 필수
+
+## 설치와 검증
+
+프로젝트 루트에서 먼저 다음 명령을 실행한다.
+
+```text
+npx stylelint --version
+```
+
+사용할 수 없으면 프로젝트의 패키지 관리 방식을 우선한다. npm 프로젝트에서는
+다음 명령을 실행할 수 있다.
+
+```text
+npm install --save-dev stylelint stylelint-config-standard
+```
+
+기존 stylelint 구성이 있으면 덮어쓰지 않고 호환성을 확인한다. 정상 권한 확인을
+유지하며 설치와 버전 확인을 합쳐 최대 세 번까지만 시도한다.
+버전 또는 smoke 명령이 종료 코드 0으로 성공한 경우에만 도구를 `설치됨`으로 기록한다.
+manifest나 구성 파일 존재만으로 성공을 주장하지 않는다.
+
+제한된 시도 뒤에도 stylelint를 사용할 수 없으면 비밀값이 제거된 오류 범주와 사용자
+조치를 보고서에 기록하고 이 단계를 완료하지 않는다.
+
+## 환경 보고서
+
+`step_archive/step013_stylelint_test.md`에 다음 내용을 기록한다.
+
+- 버전 명령, 종료 코드, 확인된 버전
+- 설치 명령과 시도 횟수
+- 기존 구성의 보존 여부와 표준 규칙 구성 호환성
+- 실패했다면 비밀값이 제거된 오류 범주와 사용자 조치
+
+## 완료 조건
+
+- `stylelint-version`: 버전 명령이 종료 코드 0으로 끝난다.
+- `stylelint-environment-report`: 환경 보고서가 존재한다.
+- `stylelint-installation-verified`: 실행 가능한 버전과 구성 호환성이 기록된다.
+
+검증 결과를 수락 증거로 제출하고 이 단계에서 멈춘다.
