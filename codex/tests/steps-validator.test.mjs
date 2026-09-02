@@ -4075,3 +4075,812 @@ test("review semantic checks reject missing evidence, unavailable-visual bypasse
     assert.throws(() => contract(mutation), undefined, "review semantic mutation escaped: " + name);
   }
 });
+
+const E2E_COMMAND_PATTERN = "^(?:npm run|pnpm(?: run)?|yarn(?: run)?|bun run) (?:e2e|test:e2e|e2e:[A-Za-z0-9][A-Za-z0-9:_-]*|[A-Za-z0-9][A-Za-z0-9:_-]*:e2e)$";
+
+const EXPECTED_E2E_ACCEPTANCE_DESCRIPTIONS = {
+  step045: {
+    "e2e-test-report": "Stores the project-specific scenarios, edge cases, exact E2E command, attempts, and final independent verdict.",
+    "project-e2e-command": "Runs the exact non-optional local project E2E script without implicit package download.",
+    "local-playwright-only": "Confirms only the project-installed Playwright package and preserved project configuration are used.",
+    "bounded-browser-readiness": "Limits a missing browser installation to three normal-permission attempts and blocks if readiness is unavailable.",
+    "dynamic-scenario-coverage": "Confirms scenarios derive from the topic, design, built application, and implemented user flows.",
+    "edge-case-coverage": "Confirms at least two project-specific edge cases are exercised.",
+    "independent-e2e-verifier": "Confirms a non-modifying independent verifier checks the entire E2E suite and evidence.",
+    "bounded-pass-loop": "Requires an evidenced PASS within five rounds with no unresolved Critical or Important finding."
+  },
+  step046: {
+    "detailed-e2e-report": "Stores the viewport, screen, and state matrix, exact command, screenshot manifest, rounds, and final verdict.",
+    "e2e-primary-screenshot": "Stores the final primary detailed-E2E screenshot after any remediation.",
+    "screenshot-e2e-command": "Runs the exact non-optional local project screenshot E2E script without implicit package download.",
+    "viewport-screen-state-matrix": "Confirms every selected viewport, reachable screen, and meaningful state is exercised.",
+    "independent-screenshot-verifier": "Confirms the non-modifying verifier is distinct from the detailed-E2E remediator.",
+    "visual-inspection-required": "Confirms every final screenshot is actually opened and deterministic checks never replace visual inspection.",
+    "bounded-pass-loop": "Requires an evidenced PASS within five rounds with no unresolved Critical or Important finding."
+  },
+  step047: {
+    "keyboard-verification-report": "Stores the applicability matrix, interaction traces, screenshot manifest, rounds, and final verdict.",
+    "keyboard-primary-before-screenshot": "Stores the final primary keyboard state before interaction.",
+    "keyboard-primary-after-screenshot": "Stores the final primary keyboard state after interaction.",
+    "keyboard-interaction-matrix": "Confirms Tab, Shift+Tab, Enter or Space, arrows, Escape, shortcuts, and input behavior are tested where applicable.",
+    "input-three-state-evidence": "Confirms applicable input flows preserve before, during, and after visual evidence.",
+    "genuine-na-only": "Allows N/A only with application evidence while accessibility requirements can never be N/A.",
+    "independent-keyboard-verifier": "Confirms the non-modifying verifier is distinct from the keyboard remediator.",
+    "visual-inspection-required": "Confirms every final keyboard screenshot is actually opened and deterministic checks never replace visual inspection.",
+    "bounded-pass-loop": "Requires an evidenced PASS within five rounds with no unresolved Critical or Important finding."
+  },
+  step048: {
+    "mouse-verification-report": "Stores the applicability matrix, interaction traces, screenshot manifest, rounds, and final verdict.",
+    "mouse-primary-before-screenshot": "Stores the final primary mouse state before interaction.",
+    "mouse-primary-after-screenshot": "Stores the final primary mouse state after interaction.",
+    "mouse-interaction-matrix": "Confirms hover, click, context click, double click, drag and drop, and scroll are tested where applicable.",
+    "intermediate-state-evidence": "Confirms applicable drag and scroll flows preserve intermediate visual evidence.",
+    "genuine-na-only": "Allows N/A only when application evidence proves the interaction does not exist.",
+    "independent-mouse-verifier": "Confirms the non-modifying verifier is distinct from the mouse remediator.",
+    "visual-inspection-required": "Confirms every final mouse screenshot is actually opened and deterministic checks never replace visual inspection.",
+    "bounded-pass-loop": "Requires an evidenced PASS within five rounds with no unresolved Critical or Important finding."
+  },
+  step049: {
+    "design-visual-report": "Stores the deterministic component sample, eight-axis visual findings, remediation rounds, and final verdict.",
+    "design-primary-screenshot": "Stores the final primary design screenshot after evidence-bound remediation.",
+    "eight-axis-design-review": "Confirms layout, color, typography, responsive behavior, spacing, overlap or overflow, completeness, and interaction or accessibility.",
+    "design-token-research-traceability": "Traces every finding to selected design tokens, persisted research, and an observed screenshot region.",
+    "stable-component-sample": "Confirms a stable sorted sample covers min(10, component count) components without arbitrary font bans.",
+    "independent-design-verifier": "Confirms the non-modifying design judge is distinct from the visual remediator.",
+    "visual-inspection-required": "Confirms persisted evidence and every final screenshot are actually opened rather than inferred.",
+    "bounded-pass-loop": "Requires an evidenced PASS within five rounds with no unresolved Critical or Important finding."
+  },
+  step050: {
+    "console-error-report": "Stores the reachable-state manifest, redacted event findings, bounded settle evidence, rounds, and final verdict.",
+    "final-quality-milestone": "Stores the third quality milestone only after console, final build, dist, and independent verification gates pass.",
+    "final-dist-index-html": "Requires the final build-produced dist/index.html artifact.",
+    "console-errors-zero": "Confirms zero page errors, unhandled rejections, console errors, required-request failures, and crashes across every reachable state.",
+    "final-build": "Runs the exact non-optional build script declared by the project manifest after console verification passes.",
+    "final-dist-html-boundary": "Confirms the final dist/index.html is a regular nonempty file with valid HTML boundaries.",
+    "reachable-state-manifest": "Confirms initial, navigation, prerequisite input, and hidden reachable states are enumerated and exercised.",
+    "warning-classification": "Classifies every warning with evidence without silently treating an error as a warning.",
+    "bounded-settle-no-fixed-sleep": "Confirms state-specific bounded settle conditions are used instead of fixed sleeps.",
+    "secret-redaction": "Confirms reports redact credentials, tokens, cookies, authorization values, and sensitive query data.",
+    "independent-console-verifier": "Confirms the non-modifying verifier is distinct from the console-error remediator.",
+    "receipt-first-completion": "Confirms durable Step 50 receipt creation precedes completed state and any 50/50 report.",
+    "pass-only-final-milestone": "Requires every mandatory gate to PASS before the final report and third milestone count as evidence."
+  }
+};
+
+function assertE2eAcceptanceDescriptions(steps) {
+  const actual = Object.fromEntries(steps.map((step) => [
+    step.id,
+    Object.fromEntries(step.acceptance.map((item) => [item.id, item.description]))
+  ]));
+  assert.deepEqual(actual, EXPECTED_E2E_ACCEPTANCE_DESCRIPTIONS);
+}
+
+const E2E_ROLE_CONTRACTS = [
+  { number: 45, worker: /E2E 실행·보정자 역할/, verifier: /E2E 독립 검증자 역할/ },
+  { number: 46, worker: /상세 E2E 실행·보정자 역할/, verifier: /상세 E2E 독립 검증자 역할/ },
+  { number: 47, worker: /키보드 실행·보정자 역할/, verifier: /키보드 독립 검증자 역할/ },
+  { number: 48, worker: /마우스 실행·보정자 역할/, verifier: /마우스 독립 검증자 역할/ },
+  { number: 49, worker: /디자인 보정자 역할/, verifier: /디자인 독립 검증자 역할/ },
+  { number: 50, worker: /콘솔 오류 보정자 역할/, verifier: /콘솔 오류 독립 검증자 역할/ }
+];
+
+function assertE2eRoleContract(content, { worker, verifier }) {
+  const roleSection = extractMarkdownSection(content, "실행 역할").replace(/\s+/g, " ");
+  assert.match(roleSection, worker);
+  assert.match(roleSection, verifier);
+  assert.match(roleSection, /독립 검증자[^]*산출물과 application source를 수정하지 않는다/);
+  assert.match(roleSection, /위임 기능을 사용할 수 없으면[^]*현재 실행자가[^]*두 역할을 명확히 분리[^]*순서대로 수행/);
+  assert.match(roleSection, /별도 역할을 위임했다고 기록하지 않는다/);
+  assertPlanningPermissionContract(content);
+}
+
+function projectE2eStep(step) {
+  return {
+    number: step.number,
+    id: step.id,
+    title: step.title,
+    phase: step.phase,
+    source: step.source,
+    target: step.target,
+    source_sha256: step.source_sha256,
+    inputs: step.inputs,
+    outputs: step.outputs,
+    requires: step.requires,
+    optional_requires: step.optional_requires,
+    network: step.network,
+    visual_review: step.visual_review,
+    acceptance: step.acceptance.map((item) => ({
+      id: item.id,
+      kind: item.kind,
+      required: item.required,
+      ...(item.path === undefined ? {} : { path: item.path }),
+      ...(item.command_pattern === undefined ? {} : { command_pattern: item.command_pattern })
+    })),
+    ported: step.ported,
+    next: step.next
+  };
+}
+
+const EXPECTED_E2E_ROWS = [
+  {
+    number: 45,
+    id: "step045",
+    title: "E2E 테스트",
+    phase: "e2e",
+    source: "assets/steps/step045.md",
+    target: "codex/assets/steps/step045.md",
+    source_sha256: "e15fab9d35d251c8af652df3f07b9a9938aab449eb83baa304e571d90ca5f8b8",
+    inputs: [
+      "step_archive/TOPIC/TOPIC.md",
+      "step_archive/step001_preflight.md",
+      "step_archive/step030_레이아웃설계_chunk1.md",
+      "step_archive/step030_전체설계_chunk1.md",
+      "step_archive/step031_환경준비.md",
+      "step_archive/step038_smoke_test.md",
+      "dist/index.html",
+      "step_archive/step044_html컴포넌트화.md",
+      "step_archive/outputs/trust5_r2.md"
+    ],
+    outputs: ["step_archive/step045_e2e테스트결과.md"],
+    requires: ["step001", "step030", "step031", "step038", "step044"],
+    optional_requires: [],
+    network: true,
+    visual_review: false,
+    acceptance: [
+      { id: "e2e-test-report", kind: "artifact", required: true, path: "step_archive/step045_e2e테스트결과.md" },
+      { id: "project-e2e-command", kind: "command", required: true, command_pattern: E2E_COMMAND_PATTERN },
+      { id: "local-playwright-only", kind: "check", required: true },
+      { id: "bounded-browser-readiness", kind: "check", required: true },
+      { id: "dynamic-scenario-coverage", kind: "check", required: true },
+      { id: "edge-case-coverage", kind: "check", required: true },
+      { id: "independent-e2e-verifier", kind: "check", required: true },
+      { id: "bounded-pass-loop", kind: "check", required: true }
+    ],
+    ported: true,
+    next: "step046"
+  },
+  {
+    number: 46,
+    id: "step046",
+    title: "Playwright 스크린샷 기반 상세 E2E 테스트",
+    phase: "e2e",
+    source: "assets/steps/step046.md",
+    target: "codex/assets/steps/step046.md",
+    source_sha256: "aea2fbb218e66b365c2272ecf632e9159cba056ca44196dc025394e7f379a1b8",
+    inputs: [
+      "step_archive/step030_레이아웃설계_chunk1.md",
+      "step_archive/step030_전체설계_chunk1.md",
+      "step_archive/step038_smoke_test.md",
+      "dist/index.html",
+      "step_archive/outputs/step039_검증_r1.md",
+      "step_archive/step044_html컴포넌트화.md",
+      "step_archive/outputs/trust5_r2.md",
+      "step_archive/step045_e2e테스트결과.md"
+    ],
+    outputs: [
+      "step_archive/step046_screenshot_e2e.md",
+      "step_archive/screenshots/e2e/step046-primary.png"
+    ],
+    requires: ["step030", "step038", "step039", "step044", "step045"],
+    optional_requires: [],
+    network: false,
+    visual_review: true,
+    acceptance: [
+      { id: "detailed-e2e-report", kind: "artifact", required: true, path: "step_archive/step046_screenshot_e2e.md" },
+      { id: "e2e-primary-screenshot", kind: "artifact", required: true, path: "step_archive/screenshots/e2e/step046-primary.png" },
+      { id: "screenshot-e2e-command", kind: "command", required: true, command_pattern: E2E_COMMAND_PATTERN },
+      { id: "viewport-screen-state-matrix", kind: "check", required: true },
+      { id: "independent-screenshot-verifier", kind: "check", required: true },
+      { id: "visual-inspection-required", kind: "check", required: true },
+      { id: "bounded-pass-loop", kind: "check", required: true }
+    ],
+    ported: true,
+    next: "step047"
+  },
+  {
+    number: 47,
+    id: "step047",
+    title: "키보드 인터랙션 시각 검증",
+    phase: "e2e",
+    source: "assets/steps/step047.md",
+    target: "codex/assets/steps/step047.md",
+    source_sha256: "447c57b41a58bb991a3ed7d589ef96c3dda393264de7b6d358c50a5ab3d64339",
+    inputs: [
+      "step_archive/step030_레이아웃설계_chunk1.md",
+      "step_archive/step038_smoke_test.md",
+      "dist/index.html",
+      "step_archive/step044_html컴포넌트화.md",
+      "step_archive/outputs/trust5_r2.md",
+      "step_archive/step046_screenshot_e2e.md",
+      "step_archive/screenshots/e2e/step046-primary.png"
+    ],
+    outputs: [
+      "step_archive/step047_keyboard검증.md",
+      "step_archive/screenshots/keyboard/step047-primary-before.png",
+      "step_archive/screenshots/keyboard/step047-primary-after.png"
+    ],
+    requires: ["step030", "step038", "step044", "step046"],
+    optional_requires: [],
+    network: false,
+    visual_review: true,
+    acceptance: [
+      { id: "keyboard-verification-report", kind: "artifact", required: true, path: "step_archive/step047_keyboard검증.md" },
+      { id: "keyboard-primary-before-screenshot", kind: "artifact", required: true, path: "step_archive/screenshots/keyboard/step047-primary-before.png" },
+      { id: "keyboard-primary-after-screenshot", kind: "artifact", required: true, path: "step_archive/screenshots/keyboard/step047-primary-after.png" },
+      { id: "keyboard-interaction-matrix", kind: "check", required: true },
+      { id: "input-three-state-evidence", kind: "check", required: true },
+      { id: "genuine-na-only", kind: "check", required: true },
+      { id: "independent-keyboard-verifier", kind: "check", required: true },
+      { id: "visual-inspection-required", kind: "check", required: true },
+      { id: "bounded-pass-loop", kind: "check", required: true }
+    ],
+    ported: true,
+    next: "step048"
+  },
+  {
+    number: 48,
+    id: "step048",
+    title: "마우스 인터랙션 시각 검증",
+    phase: "e2e",
+    source: "assets/steps/step048.md",
+    target: "codex/assets/steps/step048.md",
+    source_sha256: "31335bf010b806da9ad4faa9a37faa7a40884b309dc43069cea0b397f3b92a78",
+    inputs: [
+      "step_archive/step030_레이아웃설계_chunk1.md",
+      "step_archive/step038_smoke_test.md",
+      "dist/index.html",
+      "step_archive/step044_html컴포넌트화.md",
+      "step_archive/outputs/trust5_r2.md",
+      "step_archive/step046_screenshot_e2e.md",
+      "step_archive/screenshots/e2e/step046-primary.png",
+      "step_archive/step047_keyboard검증.md",
+      "step_archive/screenshots/keyboard/step047-primary-before.png",
+      "step_archive/screenshots/keyboard/step047-primary-after.png"
+    ],
+    outputs: [
+      "step_archive/step048_마우스검증.md",
+      "step_archive/screenshots/mouse/step048-primary-before.png",
+      "step_archive/screenshots/mouse/step048-primary-after.png"
+    ],
+    requires: ["step030", "step038", "step044", "step046", "step047"],
+    optional_requires: [],
+    network: false,
+    visual_review: true,
+    acceptance: [
+      { id: "mouse-verification-report", kind: "artifact", required: true, path: "step_archive/step048_마우스검증.md" },
+      { id: "mouse-primary-before-screenshot", kind: "artifact", required: true, path: "step_archive/screenshots/mouse/step048-primary-before.png" },
+      { id: "mouse-primary-after-screenshot", kind: "artifact", required: true, path: "step_archive/screenshots/mouse/step048-primary-after.png" },
+      { id: "mouse-interaction-matrix", kind: "check", required: true },
+      { id: "intermediate-state-evidence", kind: "check", required: true },
+      { id: "genuine-na-only", kind: "check", required: true },
+      { id: "independent-mouse-verifier", kind: "check", required: true },
+      { id: "visual-inspection-required", kind: "check", required: true },
+      { id: "bounded-pass-loop", kind: "check", required: true }
+    ],
+    ported: true,
+    next: "step049"
+  },
+  {
+    number: 49,
+    id: "step049",
+    title: "Playwright 디자인 시각 검증 (독립 검증 루프)",
+    phase: "e2e",
+    source: "assets/steps/step049.md",
+    target: "codex/assets/steps/step049.md",
+    source_sha256: "9e8ea302a121b9ed305bbb4487e652f15990452ee1e2edd343e00ac99ddd67af",
+    inputs: [
+      "step_archive/step030_레이아웃설계_chunk1.md",
+      "step_archive/step030_전체설계_chunk1.md",
+      "step_archive/step038_smoke_test.md",
+      "dist/index.html",
+      "step_archive/outputs/step040_검증.md",
+      "step_archive/screenshots/compare-awwwards-applied-r1.png",
+      "step_archive/outputs/step043_검증_r1.md",
+      "step_archive/step044_html컴포넌트화.md",
+      "step_archive/outputs/trust5_r2.md",
+      "step_archive/step047_keyboard검증.md",
+      "step_archive/step048_마우스검증.md"
+    ],
+    outputs: [
+      "step_archive/outputs/step049_검증_r1.md",
+      "step_archive/screenshots/design/step049-primary-r1.png"
+    ],
+    requires: ["step030", "step038", "step040", "step043", "step044", "step047", "step048"],
+    optional_requires: [],
+    network: false,
+    visual_review: true,
+    acceptance: [
+      { id: "design-visual-report", kind: "artifact", required: true, path: "step_archive/outputs/step049_검증_r1.md" },
+      { id: "design-primary-screenshot", kind: "artifact", required: true, path: "step_archive/screenshots/design/step049-primary-r1.png" },
+      { id: "eight-axis-design-review", kind: "check", required: true },
+      { id: "design-token-research-traceability", kind: "check", required: true },
+      { id: "stable-component-sample", kind: "check", required: true },
+      { id: "independent-design-verifier", kind: "check", required: true },
+      { id: "visual-inspection-required", kind: "check", required: true },
+      { id: "bounded-pass-loop", kind: "check", required: true }
+    ],
+    ported: true,
+    next: "step050"
+  },
+  {
+    number: 50,
+    id: "step050",
+    title: "콘솔 에러 수집 및 해결",
+    phase: "e2e",
+    source: "assets/steps/step050.md",
+    target: "codex/assets/steps/step050.md",
+    source_sha256: "ddf3d929b6f586e3a5ac10c1aa7930de8064005556aba186ca6e6d45160f5af9",
+    inputs: [
+      "step_archive/step038_smoke_test.md",
+      "dist/index.html",
+      "step_archive/step044_html컴포넌트화.md",
+      "step_archive/outputs/trust5_r2.md",
+      "step_archive/step045_e2e테스트결과.md",
+      "step_archive/step046_screenshot_e2e.md",
+      "step_archive/screenshots/e2e/step046-primary.png",
+      "step_archive/step047_keyboard검증.md",
+      "step_archive/screenshots/keyboard/step047-primary-before.png",
+      "step_archive/screenshots/keyboard/step047-primary-after.png",
+      "step_archive/step048_마우스검증.md",
+      "step_archive/screenshots/mouse/step048-primary-before.png",
+      "step_archive/screenshots/mouse/step048-primary-after.png",
+      "step_archive/outputs/step049_검증_r1.md",
+      "step_archive/screenshots/design/step049-primary-r1.png"
+    ],
+    outputs: [
+      "step_archive/outputs/step050_콘솔에러.md",
+      "step_archive/outputs/trust5_r3.md"
+    ],
+    requires: ["step038", "step044", "step045", "step046", "step047", "step048", "step049"],
+    optional_requires: [],
+    network: false,
+    visual_review: false,
+    acceptance: [
+      { id: "console-error-report", kind: "artifact", required: true, path: "step_archive/outputs/step050_콘솔에러.md" },
+      { id: "final-quality-milestone", kind: "artifact", required: true, path: "step_archive/outputs/trust5_r3.md" },
+      { id: "final-dist-index-html", kind: "artifact", required: true, path: "dist/index.html" },
+      { id: "console-errors-zero", kind: "check", required: true },
+      { id: "final-build", kind: "command", required: true, command_pattern: REVIEW_BUILD_COMMAND_PATTERN },
+      { id: "final-dist-html-boundary", kind: "check", required: true },
+      { id: "reachable-state-manifest", kind: "check", required: true },
+      { id: "warning-classification", kind: "check", required: true },
+      { id: "bounded-settle-no-fixed-sleep", kind: "check", required: true },
+      { id: "secret-redaction", kind: "check", required: true },
+      { id: "independent-console-verifier", kind: "check", required: true },
+      { id: "receipt-first-completion", kind: "check", required: true },
+      { id: "pass-only-final-milestone", kind: "check", required: true }
+    ],
+    ported: true,
+    next: null
+  }
+];
+
+test("e2e batch declares exact metadata, evidence contracts, descriptions, and visual set", async () => {
+  await assertE2eTargetDigests(repoRoot);
+  const report = await validateStepBatch(repoRoot, [45, 46, 47, 48, 49, 50]);
+  assertE2eAcceptanceDescriptions(report.steps);
+  assert.deepEqual(report.steps.map(projectE2eStep), EXPECTED_E2E_ROWS);
+  assert.deepEqual(
+    report.steps.filter((step) => step.visual_review).map((step) => step.number),
+    [46, 47, 48, 49]
+  );
+});
+
+test("e2e source hashes bind untouched source steps 045 through 050", async () => {
+  const index = await loadIndex(repoRoot);
+  const hashes = await recordSourceHashes(repoRoot, index.steps.slice(44, 50));
+  assert.deepEqual(hashes, {
+    step045: "e15fab9d35d251c8af652df3f07b9a9938aab449eb83baa304e571d90ca5f8b8",
+    step046: "aea2fbb218e66b365c2272ecf632e9159cba056ca44196dc025394e7f379a1b8",
+    step047: "447c57b41a58bb991a3ed7d589ef96c3dda393264de7b6d358c50a5ab3d64339",
+    step048: "31335bf010b806da9ad4faa9a37faa7a40884b309dc43069cea0b397f3b92a78",
+    step049: "9e8ea302a121b9ed305bbb4487e652f15990452ee1e2edd343e00ac99ddd67af",
+    step050: "ddf3d929b6f586e3a5ac10c1aa7930de8064005556aba186ca6e6d45160f5af9"
+  });
+});
+
+test("e2e acceptance descriptions reject placeholder-wide mutation", async () => {
+  const index = await loadIndex(repoRoot);
+  const mutated = structuredClone(index.steps.slice(44, 50));
+  for (const step of mutated) {
+    for (const item of step.acceptance ?? []) item.description = "x";
+  }
+  assert.throws(() => assertE2eAcceptanceDescriptions(mutated));
+});
+
+const EXPECTED_E2E_TARGET_SHA256 = Object.freeze({
+  step045: "4138062bcc26c121d6fab7062c30f4997582ba1851d0562697dcaa72c51f5401",
+  step046: "786165695d3ebdedee8b74c6df3846aba70172958cab4a3e4eefacd6a99852b2",
+  step047: "91f410ddd5cb05eef476734abdc2f9b1260df0851006ab39e86685244fa52273",
+  step048: "eadd652ad35f6c9af3aa07b8a348b12aed4d7c6ff8e31753a6efefd8835ad491",
+  step049: "e4ec50a9e4136b5391d1ed217b89f18941da732cc74f3c18690e3a81cb64b4e0",
+  step050: "3c3f2c78049d9b9e36323ed7bd4b3094c0524f039509731c09ca3ae97f4f4a2e"
+});
+
+async function assertE2eTargetDigests(root) {
+  for (const [id, expected] of Object.entries(EXPECTED_E2E_TARGET_SHA256)) {
+    const relativePath = "codex/assets/steps/" + id + ".md";
+    let bytes;
+    try {
+      bytes = await readFile(join(root, relativePath));
+    } catch (error) {
+      const actual = "unreadable:" + (error?.code ?? "unknown");
+      throw new Error(id + " target digest mismatch: path=" + relativePath + " expected=" + expected + " actual=" + actual);
+    }
+    const actual = createHash("sha256").update(bytes).digest("hex");
+    if (actual !== expected) {
+      throw new Error(id + " target digest mismatch: path=" + relativePath + " expected=" + expected + " actual=" + actual);
+    }
+  }
+}
+
+function assertBoundedE2eLoop(section, { visual = false } = {}) {
+  const normalized = section.replace(/\s+/g, " ");
+  assert.match(normalized, /최대 5라운드/);
+  assert.match(normalized, /`Critical`[^]*`Important`[^]*하나라도 미해결[^]*차단/);
+  assert.match(normalized, /필수 입력[^]*필수 증거[^]*실행 capability[^]*없거나 사용할 수 없으면[^]*차단/);
+  assert.match(normalized, /`PASS`[^]*경우에만/);
+  assert.match(normalized, /스킵이나 미해결 finding은 통과 또는 완료 증거가 아니다/);
+  assert.doesNotMatch(normalized, /(?:무한|제한 없이)[^.]{0,80}반복|3[^.]{0,80}(?:실패|미수정)[^.]{0,80}(?:진행|스킵|완료)/);
+  assert.doesNotMatch(normalized, /스킵[^.]{0,100}(?:해도|하고도|이면)[^.]{0,50}(?:통과|완료)|미해결[^.]{0,100}(?:있어도|남아도)[^.]{0,50}(?:통과|완료)/);
+  if (visual) {
+    assert.match(normalized, /시각 검사 기능을 사용할 수 없으면[^.]*차단/);
+    assert.match(normalized, /결정적 DOM[^]*file[^]*실제로 이미지를 여는 시각 검사를 대체하지 못한다/i);
+    assert.match(normalized, /실제로 열어/);
+  }
+}
+
+function assertStep45Contract(content) {
+  const sections = extractOrderedMarkdownSections(content, [
+    "목표",
+    "입력과 산출물",
+    "실행 역할",
+    "사전 준비와 시나리오 설계",
+    "전체 E2E 실행과 독립 검증",
+    "완료 조건"
+  ]);
+  const readiness = sections["사전 준비와 시나리오 설계"].replace(/\s+/g, " ");
+  const execution = sections["전체 E2E 실행과 독립 검증"].replace(/\s+/g, " ");
+  assert.match(readiness, /project manifest[^]*lockfile[^]*로컬 Playwright/i);
+  assert.match(readiness, /browser[^]*없으면[^]*최대 3회[^]*정상 권한[^]*설치 시도/i);
+  assert.match(readiness, /implicit package download[^]*금지/i);
+  assert.match(readiness, /기존 Playwright configuration[^]*보존/i);
+  assert.match(readiness, /topic[^]*design[^]*built application[^]*user flow/i);
+  assert.match(readiness, /project-specific edge case[^]*최소 2개/i);
+  assert.doesNotMatch(readiness, /npx(?:\.cmd)?(?:\s+--yes)?/i);
+  assert.match(execution, /project manifest[^]*정확한 E2E script[^]*전체 suite[^]*exit code 0/i);
+  assert.match(execution, /실패 원인[^]*최소 변경[^]*다시 전체 suite/i);
+  assertBoundedE2eLoop(sections["전체 E2E 실행과 독립 검증"]);
+}
+
+function assertStep46Contract(content) {
+  const sections = extractOrderedMarkdownSections(content, [
+    "목표",
+    "입력과 산출물",
+    "실행 역할",
+    "화면·뷰포트·상태 행렬",
+    "스크린샷 E2E와 시각 검증",
+    "완료 조건"
+  ]);
+  const matrix = sections["화면·뷰포트·상태 행렬"].replace(/\s+/g, " ");
+  const loop = sections["스크린샷 E2E와 시각 검증"].replace(/\s+/g, " ");
+  assert.match(matrix, /30단계[^]*39단계[^]*viewport[^]*screen[^]*state/i);
+  assert.match(matrix, /viewport × screen × state/i);
+  assert.match(loop, /project manifest[^]*정확한 E2E script[^]*exit code 0/i);
+  assert.match(loop, /step_archive\/screenshots\/e2e\/step046-primary\.png/);
+  assert.match(loop, /matrix[^]*모든 최종 screenshot[^]*실제로 열어/i);
+  assertBoundedE2eLoop(sections["스크린샷 E2E와 시각 검증"], { visual: true });
+}
+
+function assertStep47Contract(content) {
+  const sections = extractOrderedMarkdownSections(content, [
+    "목표",
+    "입력과 산출물",
+    "실행 역할",
+    "키보드 검증 행렬",
+    "스크린샷과 독립 시각 검증",
+    "완료 조건"
+  ]);
+  const matrix = sections["키보드 검증 행렬"].replace(/\s+/g, " ");
+  const loop = sections["스크린샷과 독립 시각 검증"].replace(/\s+/g, " ");
+  for (const requirement of [
+    /Tab/, /Shift\+Tab/, /Enter[^]*Space/, /arrow/i, /Escape/, /shortcut/i, /input/i
+  ]) assert.match(matrix, requirement);
+  assert.match(matrix, /입력 전[^]*입력 중[^]*입력 완료 후/);
+  assert.match(matrix, /N\/A[^]*application evidence[^]*실제로 존재하지 않/i);
+  assert.match(matrix, /accessibility[^]*N\/A[^]*허용하지 않는다/i);
+  assert.match(loop, /step047-primary-before\.png[^]*step047-primary-after\.png/);
+  assert.match(loop, /각 적용 항목[^]*전후 screenshot[^]*input[^]*세 상태/i);
+  assertBoundedE2eLoop(sections["스크린샷과 독립 시각 검증"], { visual: true });
+}
+
+function assertStep48Contract(content) {
+  const sections = extractOrderedMarkdownSections(content, [
+    "목표",
+    "입력과 산출물",
+    "실행 역할",
+    "마우스 검증 행렬",
+    "스크린샷과 독립 시각 검증",
+    "완료 조건"
+  ]);
+  const matrix = sections["마우스 검증 행렬"].replace(/\s+/g, " ");
+  const loop = sections["스크린샷과 독립 시각 검증"].replace(/\s+/g, " ");
+  for (const requirement of [
+    /hover/i, /click/i, /context click/i, /double click/i, /drag[^]*drop/i, /scroll/i
+  ]) assert.match(matrix, requirement);
+  assert.match(matrix, /drag[^]*중간 상태[^]*scroll[^]*중간 상태/i);
+  assert.match(matrix, /N\/A[^]*application evidence[^]*실제로 존재하지 않/i);
+  assert.match(loop, /step048-primary-before\.png[^]*step048-primary-after\.png/);
+  assert.match(loop, /각 적용 항목[^]*전후 screenshot[^]*drag[^]*scroll[^]*중간 screenshot/i);
+  assertBoundedE2eLoop(sections["스크린샷과 독립 시각 검증"], { visual: true });
+}
+
+function assertStep49Contract(content) {
+  const sections = extractOrderedMarkdownSections(content, [
+    "목표",
+    "입력과 산출물",
+    "실행 역할",
+    "표본과 여덟 축",
+    "독립 디자인 검증 루프",
+    "완료 조건"
+  ]);
+  const sample = sections["표본과 여덟 축"].replace(/\s+/g, " ");
+  const loop = sections["독립 디자인 검증 루프"].replace(/\s+/g, " ");
+  assert.match(sample, /stable sort[^]*min\(10, component count\)/i);
+  for (const axis of [
+    "layout",
+    "color",
+    "typography",
+    "responsive",
+    "spacing",
+    "overlap/overflow",
+    "completeness",
+    "interaction/accessibility"
+  ]) assert.match(sample, new RegExp(axis.replace("/", "\\/"), "i"));
+  assert.match(sample, /selected design token[^]*persisted research evidence/i);
+  assert.match(sample, /font family[^]*이름만으로 금지하지 않는다/i);
+  assert.match(loop, /step_archive\/screenshots\/design\/step049-primary-r1\.png/);
+  assert.match(loop, /독립 검증자[^]*판정[^]*보정자[^]*수정/i);
+  assert.match(loop, /persisted evidence[^]*최종 screenshot[^]*실제로 열어/i);
+  assertBoundedE2eLoop(sections["독립 디자인 검증 루프"], { visual: true });
+}
+
+function assertStep50Contract(content) {
+  const sections = extractOrderedMarkdownSections(content, [
+    "목표",
+    "입력과 산출물",
+    "실행 역할",
+    "도달 가능 상태와 오류 수집",
+    "최종 build와 완료 순서",
+    "완료 조건"
+  ]);
+  const collection = sections["도달 가능 상태와 오류 수집"].replace(/\s+/g, " ");
+  const completion = sections["최종 build와 완료 순서"].replace(/\s+/g, " ");
+  assert.match(collection, /reachable-state manifest[^]*initial[^]*navigation[^]*input prerequisite[^]*hidden/i);
+  assert.match(collection, /pageerror[^]*unhandled rejection[^]*console\.error[^]*required-request failure[^]*crash/i);
+  assert.match(collection, /모두 0개/);
+  assert.match(collection, /warning[^]*근거[^]*분류/);
+  assert.match(collection, /bounded settle condition[^]*fixed sleep[^]*사용하지 않는다/i);
+  assert.match(collection, /credential[^]*token[^]*cookie[^]*authorization[^]*sensitive query[^]*redact/i);
+  assertBoundedE2eLoop(sections["도달 가능 상태와 오류 수집"]);
+  assert.match(completion, /console 검증[^]*`PASS`[^]*project manifest[^]*정확한 build 명령[^]*exit code 0/i);
+  assert.match(completion, /dist\/index\.html[^]*일반 파일[^]*0바이트보다 크[^]*<html[^]*<\/html>/i);
+  assert.match(completion, /모든 필수 gate[^]*`PASS`[^]*trust5_r3\.md/);
+  assert.match(completion, /현재 attempt evidence[^]*상태 관리자[^]*검증[^]*50단계 영수증[^]*내구성 있게 먼저 기록/);
+  assert.match(completion, /영수증[^]*completed[^]*current_step:null[^]*completed_at/);
+  assert.match(completion, /crash[^]*영수증에서 앞으로 reconcile/i);
+  assert.match(completion, /영수증[^]*complete[^]*실패[^]*50\/50[^]*보고하지 않는다/);
+  assert.match(completion, /영수증은 단계 artifact가 아니며[^]*문서[^]*직접[^]*상태나 영수증을 쓰지 않는다/);
+  assert.match(completion, /`Stop`[^]*영수증[^]*completed[^]*모두 확인[^]*종료를 허용/);
+  assert.match(completion, /continuation[^]*발행하지 않고[^]*미래 단계[^]*읽지 않는다/i);
+  assert.doesNotMatch(completion, /completed[^.]{0,100}영수증[^.]{0,80}(?:나중|후)/);
+}
+
+test("e2e documents bind exact frontmatter titles and only their current Step heading", async () => {
+  for (const row of EXPECTED_E2E_ROWS) {
+    const content = await readFile(join(repoRoot, row.target), "utf8");
+    assert.deepEqual(parseStepDocument(content), {
+      frontmatter: { name: row.id, phase: "e2e" },
+      titles: [{ number: row.number, title: row.title }],
+      referencedSteps: [row.number]
+    });
+  }
+});
+
+test("e2e outputs are unique required artifacts with closed direct dependencies", async () => {
+  const index = await loadIndex(repoRoot);
+  const e2e = (await validateStepBatch(repoRoot, [45, 46, 47, 48, 49, 50])).steps;
+  const ownersByOutput = new Map();
+  for (const step of index.steps) {
+    for (const output of step.outputs ?? []) {
+      const owners = ownersByOutput.get(output) ?? [];
+      owners.push(step.id);
+      ownersByOutput.set(output, owners);
+    }
+  }
+  const ownerByOutput = new Map(
+    [...ownersByOutput].map(([output, owners]) => [output, owners.length === 1 ? owners[0] : null])
+  );
+  const allOutputs = e2e.flatMap((step) => step.outputs);
+  assert.equal(new Set(allOutputs).size, allOutputs.length);
+  assert.deepEqual(ownersByOutput.get("dist/index.html"), ["step038"]);
+  for (const step of e2e) {
+    assert.ok(step.requires.includes("step038"), step.id + " must directly require the dist owner");
+    for (const output of step.outputs) {
+      assert.deepEqual(ownersByOutput.get(output), [step.id], output + " must have exactly one canonical owner");
+      assert.ok(step.acceptance.some((item) => (
+        item.kind === "artifact" && item.required && item.path === output
+      )), step.id + " output lacks required artifact evidence: " + output);
+    }
+    for (const input of step.inputs) {
+      const owner = ownerByOutput.get(input);
+      if (owner) assert.ok(step.requires.includes(owner), step.id + " does not require the owner of " + input);
+    }
+    for (const dependency of step.requires) {
+      assert.ok(
+        step.inputs.some((input) => ownerByOutput.get(input) === dependency),
+        step.id + " has an unbound dependency " + dependency
+      );
+    }
+  }
+});
+
+test("e2e instructions stay provider-neutral, permission-preserving, receipt-owned, and current-step scoped", async () => {
+  const e2e = (await validateStepBatch(repoRoot, [45, 46, 47, 48, 49, 50])).steps;
+  for (const step of e2e) {
+    const content = await readFile(join(repoRoot, step.target), "utf8");
+    assert.deepEqual(scanForbiddenTokens(content), []);
+    assert.doesNotMatch(content, /(?:progress|state)\.json|\.harness50-codex|transcript/i);
+    assert.doesNotMatch(content, /\/(?:webapp|harness-status|harness-reset)\b|\$(?:webapp|harness50-status|harness50-reset)\b/i);
+    assert.doesNotMatch(content, /(?:다음|후속)\s*(?:Step|단계)|\bnext\s+step\b/i);
+    assert.doesNotMatch(content, /\b(?:npx|html-bundler)\b|step\s*0?(?:69|81|84|89|104|107)|retired validator/i);
+    assert.doesNotMatch(content, /직접\s*(?:연쇄|chain)|hidden state|스마트\s*스킵|무한\s*반복|3[^.\n]{0,80}실패[^.\n]{0,80}(?:계속|진행)/i);
+    assertE2eRoleContract(content, E2E_ROLE_CONTRACTS.find((item) => item.number === step.number));
+    const normalized = content.replace(/\s+/g, " ");
+    assert.match(normalized, /수락 증거[^]*현재 단계에서 멈춘다/);
+    if (step.number < 50) assert.match(normalized, /workflow 상태와 영수증[^]*진행을 소유/);
+  }
+});
+
+test("e2e roles reject removals, false delegation, auto approval, and permission bypass", async () => {
+  for (const contract of E2E_ROLE_CONTRACTS) {
+    const id = "step" + String(contract.number).padStart(3, "0");
+    const original = await readFile(join(repoRoot, "codex", "assets", "steps", id + ".md"), "utf8");
+    const mutations = {
+      workerRemoved: original.replace(contract.worker, "삭제된 실행 역할"),
+      verifierRemoved: original.replace(contract.verifier, "삭제된 검증 역할"),
+      fallbackRemoved: original.replace(/위임 기능을 사용할 수\s*없으면[^.]+\./, "위임할 수 없으면 검증 없이 완료한다."),
+      falseDelegation: original.replace(/별도 역할을\s*위임했다고\s*기록하지\s*않는다/, "별도 역할을 위임했다고 기록한다"),
+      autoApproval: original.replace("## 입력과 산출물", "안전 명령은 자동 승인한다.\n\n## 입력과 산출물"),
+      permissionBypass: original.replace("## 입력과 산출물", "권한 확인 절차를 우회한다.\n\n## 입력과 산출물")
+    };
+    for (const [name, mutation] of Object.entries(mutations)) {
+      assert.notEqual(mutation, original, id + " mutation did not change content: " + name);
+      assert.throws(
+        () => assertE2eRoleContract(mutation, contract),
+        undefined,
+        id + " role mutation escaped: " + name
+      );
+    }
+  }
+});
+
+test("e2e command patterns are anchored, local-script only, and final build matches earlier gates", async () => {
+  const steps = (await validateStepBatch(repoRoot, [38, 44, 45, 46, 50])).steps;
+  const patterns = steps.map((step) => step.acceptance
+    .filter((item) => item.kind === "command")
+    .map((item) => [item.id, item.command_pattern]));
+  assert.deepEqual(patterns, [
+    [["project-build-command", REVIEW_BUILD_COMMAND_PATTERN]],
+    [["project-build-command", REVIEW_BUILD_COMMAND_PATTERN]],
+    [["project-e2e-command", E2E_COMMAND_PATTERN]],
+    [["screenshot-e2e-command", E2E_COMMAND_PATTERN]],
+    [["final-build", REVIEW_BUILD_COMMAND_PATTERN]]
+  ]);
+  for (const entries of patterns) {
+    for (const [, pattern] of entries) {
+      assert.match(pattern, /^\^/);
+      assert.match(pattern, /\$$/);
+      assert.doesNotThrow(() => new RegExp(pattern));
+    }
+  }
+  const e2eMatcher = new RegExp(E2E_COMMAND_PATTERN);
+  assert.equal(e2eMatcher.test("npm run test:e2e"), true);
+  assert.equal(e2eMatcher.test("pnpm run app:e2e"), true);
+  assert.equal(e2eMatcher.test("npx playwright test"), false);
+  assert.equal(e2eMatcher.test("npm run test:e2e --if-present"), false);
+});
+
+test("steps045 through 050 preserve their section-local E2E and final lifecycle contracts", async () => {
+  const paths = [45, 46, 47, 48, 49, 50].map((number) => (
+    join(repoRoot, "codex", "assets", "steps", "step" + String(number).padStart(3, "0") + ".md")
+  ));
+  const [step45, step46, step47, step48, step49, step50] = await Promise.all(
+    paths.map((path) => readFile(path, "utf8"))
+  );
+  assertStep45Contract(step45);
+  assertStep46Contract(step46);
+  assertStep47Contract(step47);
+  assertStep48Contract(step48);
+  assertStep49Contract(step49);
+  assertStep50Contract(step50);
+});
+
+test("e2e semantic checks reject bypasses, missing interactions, weak sampling, and premature completion", async () => {
+  const paths = [45, 46, 47, 48, 49, 50].map((number) => (
+    join(repoRoot, "codex", "assets", "steps", "step" + String(number).padStart(3, "0") + ".md")
+  ));
+  const [step45, step46, step47, step48, step49, step50] = await Promise.all(
+    paths.map((path) => readFile(path, "utf8"))
+  );
+  const cases = [
+    ["step045-implicit-download", assertStep45Contract, step45.replace(/implicit package\s*download을 금지/, "implicit package download을 허용")],
+    ["step045-unbounded", assertStep45Contract, step45.replace("최대 5라운드", "제한 없이 반복")],
+    ["step046-no-open", assertStep46Contract, step46.replace(/모든 최종 screenshot을 실제로\s*열어/, "모든 최종 screenshot의 파일 존재만 확인해")],
+    ["step046-visual-bypass", assertStep46Contract, step46.replace("시각 검사 기능을 사용할 수 없으면", "시각 검사 기능을 사용할 수 없어도")],
+    ["step047-missing-shift-tab", assertStep47Contract, step47.replace("Shift+Tab", "역방향 키")],
+    ["step047-accessibility-na", assertStep47Contract, step47.replace(/accessibility\s*항목에는 N\/A를 허용하지 않는다/, "accessibility 항목도 N/A로 끝낼 수 있다")],
+    ["step048-missing-intermediate", assertStep48Contract, step48.replace("drag와 scroll에는 중간 screenshot", "drag와 scroll에는 마지막 screenshot")],
+    ["step048-false-na", assertStep48Contract, step48.replace("실제로 존재하지 않음을", "검사가 어려움을")],
+    ["step049-small-sample", assertStep49Contract, step49.replace("min(10, component count)", "min(3, component count)")],
+    ["step049-font-ban", assertStep49Contract, step49.replace(/이름만으로 금지하지\s*않는다/, "이름만으로 금지한다")],
+    ["step050-fixed-sleep", assertStep50Contract, step50.replace(/fixed sleep은\s*사용하지 않는다/, "fixed sleep을 사용한다")],
+    ["step050-premature-milestone", assertStep50Contract, step50.replace(/모든\s*필수 gate가 `PASS`인 뒤에만/, "console 검사 전에도")],
+    ["step050-receipt-after-complete", assertStep50Contract, step50.replace("내구성 있게 먼저 기록한다", "completed 뒤에 기록한다")],
+    ["step050-report-without-receipt", assertStep50Contract, step50.replace("50/50을 보고하지 않는다", "50/50을 보고한다")]
+  ];
+  const originals = [step45, step46, step47, step48, step49, step50];
+  for (const [name, contract, mutation] of cases) {
+    const number = Number(name.slice(4, 7));
+    assert.notEqual(mutation, originals[number - 45], "mutation did not change E2E document: " + name);
+    assert.throws(() => contract(mutation), undefined, "E2E semantic mutation escaped: " + name);
+  }
+});
+
+test("e2e target digest seal rejects unsafe and benign byte mutations", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "harness50-e2e-digests-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "codex", "assets", "steps"), { recursive: true });
+  const cases = [
+    [45, "Implicit package download is allowed."],
+    [46, "Visual inspection may be skipped."],
+    [47, "Accessibility checks may be N/A."],
+    [48, "Intermediate drag and scroll evidence is optional."],
+    [49, "The verifier may edit application source."],
+    [50, "Completed state may be written before the receipt."]
+  ];
+  const originals = new Map();
+  for (const [number] of cases) {
+    const id = "step" + String(number).padStart(3, "0");
+    const relativePath = "codex/assets/steps/" + id + ".md";
+    const bytes = await readFile(join(repoRoot, relativePath));
+    originals.set(id, bytes);
+    await writeFile(join(root, relativePath), bytes);
+  }
+  const escaped = [];
+  const wrongDiagnostics = [];
+  for (const [number, contradiction] of cases) {
+    const id = "step" + String(number).padStart(3, "0");
+    const relativePath = "codex/assets/steps/" + id + ".md";
+    const original = originals.get(id);
+    const mutations = [
+      ["unsafe-contradiction", Buffer.concat([original, Buffer.from("\n" + contradiction + "\n")])],
+      ["benign-whitespace", Buffer.concat([original, Buffer.from("\n")])]
+    ];
+    for (const [name, mutated] of mutations) {
+      await writeFile(join(root, relativePath), mutated);
+      const actual = createHash("sha256").update(mutated).digest("hex");
+      const expectedMessage = id + " target digest mismatch: path=" + relativePath
+        + " expected=" + EXPECTED_E2E_TARGET_SHA256[id] + " actual=" + actual;
+      try {
+        await assertE2eTargetDigests(root);
+        escaped.push(id + ":" + name);
+      } catch (error) {
+        if (error.message !== expectedMessage) wrongDiagnostics.push(id + ":" + name + ":" + error.message);
+      } finally {
+        await writeFile(join(root, relativePath), original);
+      }
+    }
+  }
+  assert.deepEqual({ escaped, wrongDiagnostics }, { escaped: [], wrongDiagnostics: [] });
+});
