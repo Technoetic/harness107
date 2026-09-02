@@ -61,6 +61,7 @@ const SAFE_HOOK_EVENT_FIELDS = new Set([
   "baseline_receipt_count",
   "completed_count"
 ]);
+const preparedHookEvents = new WeakSet();
 
 function fail(code, message) {
   throw new HarnessError(code, message);
@@ -251,7 +252,9 @@ export async function assertHookStorageGuard(guard, controlPaths = []) {
   }
 }
 
-function materializeHookEvent(event, now) {
+export function preparePinnedHookEvent(event, {
+  now = () => new Date()
+} = {}) {
   if (event === null || typeof event !== "object" || Array.isArray(event)) {
     fail("HOOK_INTERNAL", "hook failed safely");
   }
@@ -271,20 +274,20 @@ function materializeHookEvent(event, now) {
     fail("HOOK_INTERNAL", "hook failed safely");
   }
   materialized.timestamp = timestamp.toISOString();
-  return materialized;
+  const prepared = Object.freeze({
+    value: Object.freeze(materialized),
+    bytes: Buffer.from(`${JSON.stringify(materialized)}\n`, "utf8")
+  });
+  preparedHookEvents.add(prepared);
+  return prepared;
 }
 
-export async function appendPinnedHookEvent(guard, event, {
-  now = () => new Date()
-} = {}) {
-  const materialized = materializeHookEvent(event, now);
-  const bytes = Buffer.from(`${JSON.stringify(materialized)}\n`, "utf8");
+async function openPinnedHookEventHandle(guard) {
   await assertHookStorageGuard(guard, [guard.paths.eventsPath]);
   const original = guard.eventsIdentity;
   if (original === undefined || original === null) {
     fail("HOOK_WORKSPACE_UNSAFE", "hook workspace rejected");
   }
-
   let handle;
   try {
     handle = await open(guard.paths.eventsPath, "r+");
@@ -298,20 +301,58 @@ export async function appendPinnedHookEvent(guard, event, {
       fail("HOOK_WORKSPACE_UNSAFE", "hook workspace rejected");
     }
     await assertHookStorageGuard(guard, [guard.paths.eventsPath]);
-    if (opened.size + BigInt(bytes.length) > BigInt(HOOK_INPUT_LIMIT)) {
+    return { handle, opened };
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    await assertHookStorageGuard(guard, [guard.paths.eventsPath]);
+    throw error;
+  }
+}
+
+export async function preflightPinnedHookEventTarget(guard, prepared) {
+  if (!preparedHookEvents.has(prepared)) fail("HOOK_INTERNAL", "hook failed safely");
+  const { handle, opened } = await openPinnedHookEventHandle(guard);
+  try {
+    if (opened.size + BigInt(prepared.bytes.length) > BigInt(HOOK_INPUT_LIMIT)) {
       fail("HOOK_INTERNAL", "hook failed safely");
     }
-    const result = await handle.write(bytes, 0, bytes.length, Number(opened.size));
-    if (result.bytesWritten !== bytes.length) fail("HOOK_INTERNAL", "hook failed safely");
+  } catch (error) {
+    await assertHookStorageGuard(guard, [guard.paths.eventsPath]);
+    throw error;
+  } finally {
+    await handle.close();
+  }
+  await assertHookStorageGuard(guard, [guard.paths.eventsPath]);
+}
+
+export async function appendPreparedPinnedHookEvent(guard, prepared) {
+  if (!preparedHookEvents.has(prepared)) fail("HOOK_INTERNAL", "hook failed safely");
+  const { handle, opened } = await openPinnedHookEventHandle(guard);
+  try {
+    if (opened.size + BigInt(prepared.bytes.length) > BigInt(HOOK_INPUT_LIMIT)) {
+      fail("HOOK_INTERNAL", "hook failed safely");
+    }
+    const result = await handle.write(
+      prepared.bytes,
+      0,
+      prepared.bytes.length,
+      Number(opened.size)
+    );
+    if (result.bytesWritten !== prepared.bytes.length) fail("HOOK_INTERNAL", "hook failed safely");
     await handle.sync();
     await assertHookStorageGuard(guard, [guard.paths.eventsPath]);
-    return materialized;
+    return prepared.value;
   } catch (error) {
     await assertHookStorageGuard(guard, [guard.paths.eventsPath]);
     throw error;
   } finally {
     await handle?.close().catch(() => {});
   }
+}
+
+export async function appendPinnedHookEvent(guard, event, options = {}) {
+  const prepared = preparePinnedHookEvent(event, options);
+  return appendPreparedPinnedHookEvent(guard, prepared);
 }
 
 export async function guardedHookOperation(guard, controlPaths, operation, {

@@ -1,12 +1,14 @@
 import { readState, writeStateAtomic } from "../scripts/lib/state-store.mjs";
 import { failStep, reconcileWorkflow } from "../scripts/lib/workflow.mjs";
 import {
-  appendPinnedHookEvent,
+  appendPreparedPinnedHookEvent,
   assertHookStorageGuard,
   captureHookStorageGuard,
   continuationMarker,
   guardedHookOperation,
   isDirectEntrypoint,
+  preflightPinnedHookEventTarget,
+  preparePinnedHookEvent,
   readLifecycleEvents,
   runHookDirect,
   stopTurnWasAccepted,
@@ -99,6 +101,14 @@ async function claimContinuation(workspaceRoot, turnId, eventNow) {
       return null;
     }
     const updatedAt = mutationTime(state);
+    const preparedRequest = preparePinnedHookEvent({
+      kind: "stop_continuation_requested",
+      workflow_id: state.workflow_id,
+      step: state.current_step,
+      turn_id: turnId,
+      baseline_receipt_count: state.completed_steps.length
+    }, { now: eventNow });
+    await preflightPinnedHookEventTarget(guard, preparedRequest);
     state = await guardedHookOperation(
       guard,
       [guard.paths.statePath],
@@ -112,13 +122,7 @@ async function claimContinuation(workspaceRoot, turnId, eventNow) {
     await guardedHookOperation(
       guard,
       [guard.paths.eventsPath],
-      () => appendPinnedHookEvent(guard, {
-        kind: "stop_continuation_requested",
-        workflow_id: state.workflow_id,
-        step: state.current_step,
-        turn_id: turnId,
-        baseline_receipt_count: state.completed_steps.length
-      }, { now: eventNow })
+      () => appendPreparedPinnedHookEvent(guard, preparedRequest)
     );
     return state.continuation;
   });

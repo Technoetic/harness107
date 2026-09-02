@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { renameSync, symlinkSync } from "node:fs";
-import { link, lstat, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { linkSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { link, lstat, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { handleSessionStart } from "../hooks/session-start.mjs";
@@ -57,6 +57,19 @@ async function events(root) {
     throw error;
   });
   return raw.trim() === "" ? [] : raw.trimEnd().split("\n").map(line => JSON.parse(line));
+}
+
+async function receiptSnapshot(root) {
+  const paths = pathsFor(root);
+  const names = await readdir(paths.receiptsDir).catch(error => {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  });
+  const snapshot = {};
+  for (const name of names.sort()) {
+    snapshot[name] = (await readFile(join(paths.receiptsDir, name))).toString("base64");
+  }
+  return snapshot;
 }
 
 function markerFor(continuation) {
@@ -526,6 +539,77 @@ test("a lost Stop output is re-delivered idempotently until its marker is accept
   assert.equal((await events(root)).filter(event =>
     event.kind === "stop_continuation_requested"
   ).length, 1);
+});
+
+test("Stop rejects unsafe event targets before changing state or receipts", async t => {
+  for (const mode of ["absent", "replaced", "hard-linked"]) {
+    await t.test(mode, async () => {
+      const root = await makeWorkspace();
+      const outside = await makeWorkspace();
+      await init(root, `claim-preflight-${mode}`);
+      const paths = pathsFor(root);
+      const stateBefore = await readFile(paths.statePath);
+      const eventsBefore = await readFile(paths.eventsPath);
+      const receiptsBefore = await receiptSnapshot(root);
+      const replacement = Buffer.from(`replacement-${mode}-before\n`);
+      const originalBackup = `${paths.eventsPath}.${mode}.original`;
+      const outsideEvent = join(outside, `${mode}-events.jsonl`);
+      let callbackCount = 0;
+      const eventNow = () => {
+        callbackCount += 1;
+        if (mode === "absent") {
+          unlinkSync(paths.eventsPath);
+        } else if (mode === "replaced") {
+          renameSync(paths.eventsPath, originalBackup);
+          writeFileSync(paths.eventsPath, replacement);
+        } else {
+          linkSync(paths.eventsPath, outsideEvent);
+        }
+        return new Date("2026-09-02T12:00:00.000Z");
+      };
+
+      await assert.rejects(handleStop({
+        turn_id: `turn-preflight-${mode}`,
+        stop_hook_active: false
+      }, { workspaceRoot: root, eventNow }), error => error?.code === "HOOK_WORKSPACE_UNSAFE");
+      assert.equal(callbackCount, 1);
+      assert.ok(Buffer.from(await readFile(paths.statePath)).equals(stateBefore));
+      assert.deepEqual(await receiptSnapshot(root), receiptsBefore);
+
+      if (mode === "absent") {
+        await assert.rejects(readFile(paths.eventsPath), error => error?.code === "ENOENT");
+      } else if (mode === "replaced") {
+        assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(replacement));
+        assert.ok(Buffer.from(await readFile(originalBackup)).equals(eventsBefore));
+      } else {
+        assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(eventsBefore));
+        assert.ok(Buffer.from(await readFile(outsideEvent)).equals(eventsBefore));
+      }
+    });
+  }
+});
+
+test("Stop rejects a full event ledger before changing state or receipts", async () => {
+  const root = await makeWorkspace();
+  await init(root, "claim-preflight-capacity");
+  const paths = pathsFor(root);
+  const ledgerPrefix = '{"kind":"padding","padding":"';
+  const ledgerSuffix = '"}\n';
+  const fullLedger = Buffer.from(
+    ledgerPrefix + "a".repeat((1024 * 1024) - ledgerPrefix.length - ledgerSuffix.length) + ledgerSuffix
+  );
+  await writeFile(paths.eventsPath, fullLedger);
+  const stateBefore = await readFile(paths.statePath);
+  const receiptsBefore = await receiptSnapshot(root);
+
+  assert.deepEqual(await handleStop({
+    turn_id: "turn-preflight-capacity",
+    stop_hook_active: false
+  }, { workspaceRoot: root }), {});
+
+  assert.ok(Buffer.from(await readFile(paths.statePath)).equals(stateBefore));
+  assert.deepEqual(await receiptSnapshot(root), receiptsBefore);
+  assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(fullLedger));
 });
 
 test("an accepted Stop marker can advance through a receipt to the next marked step", async () => {
