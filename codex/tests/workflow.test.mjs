@@ -1,10 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { existsSync, watch } from "node:fs";
 import {
   mkdir,
   readFile,
   readdir,
+  rename,
   stat,
   unlink,
   writeFile
@@ -21,7 +24,12 @@ import {
   transferOwner
 } from "../scripts/lib/ownership.mjs";
 import { pathsFor } from "../scripts/lib/paths.mjs";
-import { readReceipts, receiptPath } from "../scripts/lib/receipts.mjs";
+import {
+  readReceipts,
+  receiptPath,
+  syncDirectoryDurable,
+  writeReceiptExclusive
+} from "../scripts/lib/receipts.mjs";
 import { createInitialState, validateState } from "../scripts/lib/schema.mjs";
 import { readState, writeStateAtomic } from "../scripts/lib/state-store.mjs";
 import {
@@ -77,6 +85,46 @@ function evidenceFor(step, detail = `verified step ${step}`) {
 async function readEvents(root) {
   const raw = await readFile(pathsFor(root).eventsPath, "utf8");
   return raw.trimEnd().split("\n").filter(Boolean).map(line => JSON.parse(line));
+}
+
+async function crashChildAfterReceipt({ root, pluginRoot, step, attemptId, summary, evidence, now }) {
+  await mkdir(pathsFor(root).receiptsDir, { recursive: true });
+  let publish;
+  const published = new Promise(resolve => {
+    publish = resolve;
+  });
+  const watcher = watch(pathsFor(root).receiptsDir, (eventType, filename) => {
+    if (filename === `step${String(step).padStart(3, "0")}.json`) publish();
+  });
+  const moduleUrl = new URL("../scripts/lib/workflow.mjs", import.meta.url).href;
+  const input = { workspaceRoot: root, pluginRoot, step, attemptId, summary, evidence, now };
+  const script = `
+    import { completeStep } from ${JSON.stringify(moduleUrl)};
+    await completeStep(${JSON.stringify(input)});
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "--eval", script], {
+    stdio: ["ignore", "ignore", "ignore"]
+  });
+  const exited = once(child, "exit");
+  let timeout;
+  try {
+    await Promise.race([
+      published,
+      new Promise((resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error("receipt publication timeout")), 5000);
+      })
+    ]);
+    child.kill();
+    await exited;
+    if (existsSync(pathsFor(root).lockPath)) {
+      await rename(pathsFor(root).lockPath, `${pathsFor(root).lockPath}.crashed-test-lock`);
+    }
+  } finally {
+    clearTimeout(timeout);
+    watcher.close();
+    if (child.exitCode === null) child.kill();
+  }
+  assert.equal(existsSync(receiptPath(root, step)), true);
 }
 
 async function initAndBegin(root, {
@@ -148,6 +196,10 @@ test("owner lease is live before expiry and expired at the exact boundary", () =
     () => claimOwner(state, { sessionId: "session-2", now: plus(101) }),
     error => error.code === "OWNER_CONFLICT"
   );
+  assert.throws(
+    () => ownerLeaseExpired(state.owner, baseTime),
+    error => error.code === "CLOCK_REGRESSION"
+  );
 });
 
 test("anonymous ownership stays null and transfer invalidates attempt and continuation", () => {
@@ -170,8 +222,14 @@ test("anonymous ownership stays null and transfer invalidates attempt and contin
   });
   assert.equal(transferred.owner.session_id, "session-2");
   assert.equal(transferred.current_attempt, null);
-  assert.equal(transferred.continuation.nonce, "nonce-new");
+  assert.match(transferred.continuation.nonce, /^continuation-[a-f0-9]{64}$/);
   assert.notEqual(transferred.continuation.nonce, "nonce-old");
+  const retransferred = transferOwner(transferred, {
+    sessionId: "session-2",
+    now: plus(1),
+    nonce: "nonce-new"
+  });
+  assert.notEqual(retransferred.continuation.nonce, transferred.continuation.nonce);
 });
 
 test("continuations are one-use and bind workflow step and receipt count", () => {
@@ -247,6 +305,81 @@ test("new workflow atomically creates topic and refuses all recognized shared wo
   }
 });
 
+test("init rejects a redirected TOPIC directory before writing outside the workspace", async () => {
+  const root = await makeWorkspace();
+  const external = await makeWorkspace();
+  const archiveRoot = join(root, "step_archive");
+  await mkdir(archiveRoot, { recursive: true });
+  await writeFile(join(external, "sentinel.txt"), "outside-before\n");
+  await makeDirectoryLink(external, join(archiveRoot, "TOPIC"));
+
+  await assert.rejects(
+    () => initWorkflow({
+      workspaceRoot: root,
+      topic: "must stay inside",
+      now: baseTime,
+      idFactory: ids("workflow-unsafe", "nonce-unsafe")
+    }),
+    error => error.code === "WORKSPACE_PATH_UNSAFE"
+  );
+  assert.equal(existsSync(join(external, "TOPIC.md")), false);
+  assert.equal(await readFile(join(external, "sentinel.txt"), "utf8"), "outside-before\n");
+  assert.equal(await readState(root), null);
+});
+
+test("workflow mutations reject redirected control roots before creating an external lock", async () => {
+  const initRoot = await makeWorkspace();
+  const initExternal = await makeWorkspace();
+  await makeDirectoryLink(initExternal, join(initRoot, "step_archive"));
+  await assert.rejects(
+    () => initWorkflow({
+      workspaceRoot: initRoot,
+      topic: "redirected archive",
+      now: baseTime,
+      idFactory: ids("workflow-root-link", "nonce-root-link")
+    }),
+    error => error.code === "WORKSPACE_PATH_UNSAFE"
+  );
+  assert.deepEqual(await readdir(initExternal), []);
+
+  const resetRoot = await makeWorkspace();
+  const resetExternal = await makeWorkspace();
+  await mkdir(join(resetRoot, "step_archive"), { recursive: true });
+  await makeDirectoryLink(resetExternal, pathsFor(resetRoot).codexDir);
+  await assert.rejects(
+    () => resetWorkflow({ workspaceRoot: resetRoot, now: baseTime }),
+    error => error.code === "WORKSPACE_PATH_UNSAFE"
+  );
+  assert.deepEqual(await readdir(resetExternal), []);
+});
+
+test("first-use topic hierarchy and publication are durable with platform-correct handles", async () => {
+  const root = await makeWorkspace();
+  await initWorkflow({
+    workspaceRoot: root,
+    topic: "durable topic",
+    now: baseTime,
+    idFactory: ids("workflow-durable", "nonce-durable")
+  });
+  for (const path of [
+    join(root, "step_archive"),
+    join(root, "step_archive", "TOPIC")
+  ]) {
+    assert.equal((await stat(path)).isDirectory(), true);
+    await assert.doesNotReject(() => syncDirectoryDurable(path));
+  }
+  assert.equal(await readFile(join(root, "step_archive", "TOPIC", "TOPIC.md"), "utf8"), "durable topic\n");
+
+  const flags = [];
+  const openDirectory = async (path, flag) => {
+    flags.push(flag);
+    return { sync: async () => {}, close: async () => {} };
+  };
+  await syncDirectoryDurable(root, { platform: "win32", openDirectory });
+  await syncDirectoryDurable(root, { platform: "linux", openDirectory });
+  assert.deepEqual(flags, ["r+", "r"]);
+});
+
 test("concurrent initialization serializes and never mixes topic with workflow state", async () => {
   const root = await makeWorkspace();
   const settled = await Promise.allSettled([
@@ -274,8 +407,9 @@ test("begin consumes exactly the current marker and creates one unique current a
     now: plus(1),
     idFactory: factory
   });
+  assert.match(started.attempt.id, /^attempt-[a-f0-9]{64}$/);
   assert.deepEqual(started.attempt, {
-    id: "attempt-begin",
+    id: started.attempt.id,
     step: 1,
     session_id: null,
     started_at: plus(1),
@@ -305,7 +439,7 @@ test("concurrent begin calls serialize so a marker creates only one attempt", as
   ]);
   assert.equal(settled.filter(result => result.status === "fulfilled").length, 1);
   assert.equal(settled.filter(result => result.status === "rejected" && result.reason.code === "CONTINUATION_REPLAY").length, 1);
-  assert.ok(["attempt-a", "attempt-b"].includes((await readState(root)).current_attempt.id));
+  assert.match((await readState(root)).current_attempt.id, /^attempt-[a-f0-9]{64}$/);
 });
 
 test("valid ownership blocks ordinary mutation but explicit resume transfers and stales old work", async () => {
@@ -345,6 +479,150 @@ test("valid ownership blocks ordinary mutation but explicit resume transfers and
   );
 });
 
+test("resume cannot resurrect a consumed marker or recreate its attempt with repeated IDs and time", async () => {
+  const root = await makeWorkspace();
+  const pluginRoot = await makePluginFixture();
+  const repeated = () => "repeated-id";
+  const initialized = await initWorkflow({
+    workspaceRoot: root,
+    topic: "generation binding",
+    now: baseTime,
+    idFactory: repeated
+  });
+  const oldMarker = { ...initialized.continuation };
+  const first = await beginStep({
+    workspaceRoot: root,
+    step: 1,
+    sessionId: "session-generation",
+    marker: oldMarker,
+    now: baseTime,
+    idFactory: repeated
+  });
+  const resumed = await resumeWorkflow({
+    workspaceRoot: root,
+    sessionId: "session-generation",
+    now: baseTime,
+    idFactory: repeated
+  });
+  assert.notDeepEqual(resumed.continuation, oldMarker);
+  await assert.rejects(
+    () => beginStep({
+      workspaceRoot: root,
+      step: 1,
+      sessionId: "session-generation",
+      marker: oldMarker,
+      now: baseTime,
+      idFactory: repeated
+    }),
+    error => error.code === "CONTINUATION_REPLAY"
+  );
+  const second = await beginStep({
+    workspaceRoot: root,
+    step: 1,
+    sessionId: "session-generation",
+    marker: { ...resumed.continuation },
+    now: baseTime,
+    idFactory: repeated
+  });
+  assert.notEqual(second.attempt.id, first.attempt.id);
+  await assert.rejects(
+    () => completeStep({
+      workspaceRoot: root,
+      pluginRoot,
+      step: 1,
+      attemptId: first.attempt.id,
+      summary: "stale attempt",
+      evidence: evidenceFor(1),
+      now: baseTime
+    }),
+    error => error.code === "ATTEMPT_STALE"
+  );
+});
+
+test("retry after failure cannot recreate a stale attempt when the raw ID repeats", async () => {
+  const root = await makeWorkspace();
+  const pluginRoot = await makePluginFixture();
+  const repeated = () => "repeated-failure-id";
+  const initialized = await initWorkflow({
+    workspaceRoot: root,
+    topic: "failed attempt generations",
+    now: baseTime,
+    idFactory: repeated
+  });
+  const first = await beginStep({
+    workspaceRoot: root,
+    step: 1,
+    sessionId: null,
+    marker: { ...initialized.continuation },
+    now: baseTime,
+    idFactory: repeated
+  });
+  const failed = await failStep({
+    workspaceRoot: root,
+    step: 1,
+    attemptId: first.attempt.id,
+    reason: "retry",
+    evidence: evidenceFor(1),
+    now: baseTime
+  });
+  const second = await beginStep({
+    workspaceRoot: root,
+    step: 1,
+    sessionId: null,
+    marker: { ...failed.continuation },
+    now: baseTime,
+    idFactory: repeated
+  });
+  assert.notEqual(second.attempt.id, first.attempt.id);
+  await assert.rejects(
+    () => completeStep({
+      workspaceRoot: root,
+      pluginRoot,
+      step: 1,
+      attemptId: first.attempt.id,
+      summary: "stale failed attempt",
+      evidence: evidenceFor(1),
+      now: baseTime
+    }),
+    error => error.code === "ATTEMPT_STALE"
+  );
+});
+
+test("workflow mutations reject regressing clocks even for anonymous ownership", async () => {
+  const futureState = validateState({ ...initialState(), updated_at: plus(100) });
+  assert.throws(
+    () => claimOwner(futureState, { sessionId: null, now: baseTime }),
+    error => error.code === "CLOCK_REGRESSION"
+  );
+  assert.throws(
+    () => issueContinuation(futureState, { now: baseTime, nonce: "stale-clock-nonce" }),
+    error => error.code === "CLOCK_REGRESSION"
+  );
+  assert.throws(
+    () => transferOwner(futureState, { sessionId: null, now: baseTime, nonce: "stale-transfer" }),
+    error => error.code === "CLOCK_REGRESSION"
+  );
+  const root = await makeWorkspace();
+  const initialized = await initWorkflow({
+    workspaceRoot: root,
+    topic: "monotonic clock",
+    now: plus(100),
+    idFactory: ids("workflow-clock", "nonce-clock")
+  });
+  await assert.rejects(
+    () => beginStep({
+      workspaceRoot: root,
+      step: 1,
+      sessionId: null,
+      marker: { ...initialized.continuation },
+      now: baseTime,
+      idFactory: ids("attempt-clock")
+    }),
+    error => error.code === "CLOCK_REGRESSION"
+  );
+  assert.deepEqual(await readState(root), initialized);
+});
+
 test("an owned attempt is rejected once its lease reaches expiry", async () => {
   const root = await makeWorkspace();
   const pluginRoot = await makePluginFixture();
@@ -369,7 +647,6 @@ test("complete writes a sanitized receipt before state and advances exactly one 
   const root = await makeWorkspace();
   const pluginRoot = await makePluginFixture();
   const started = await initAndBegin(root);
-  let observed;
   const state = await completeStep({
     workspaceRoot: root,
     pluginRoot,
@@ -377,19 +654,8 @@ test("complete writes a sanitized receipt before state and advances exactly one 
     attemptId: started.attempt.id,
     summary: "preflight passed",
     evidence: evidenceFor(1, "tool inventory"),
-    now: plus(2),
-    hooks: {
-      afterReceipt: async () => {
-        observed = {
-          receiptExists: existsSync(receiptPath(root, 1)),
-          state: await readState(root)
-        };
-      }
-    }
+    now: plus(2)
   });
-  assert.equal(observed.receiptExists, true);
-  assert.deepEqual(observed.state.completed_steps, []);
-  assert.equal(observed.state.current_attempt.id, started.attempt.id);
   assert.deepEqual(state.completed_steps, [1]);
   assert.equal(state.current_step, 2);
   assert.equal(state.current_attempt, null);
@@ -405,21 +671,15 @@ test("receipt-first state failure is recoverable and semantic complete retry is 
   const root = await makeWorkspace();
   const pluginRoot = await makePluginFixture();
   const started = await initAndBegin(root);
-  await assert.rejects(
-    () => completeStep({
-      workspaceRoot: root,
-      pluginRoot,
-      step: 1,
-      attemptId: started.attempt.id,
-      summary: "durable receipt",
-      evidence: evidenceFor(1),
-      now: plus(2),
-      stateWriter: async () => {
-        throw new Error("injected state failure");
-      }
-    }),
-    /injected state failure/
-  );
+  await crashChildAfterReceipt({
+    root,
+    pluginRoot,
+    step: 1,
+    attemptId: started.attempt.id,
+    summary: "durable receipt",
+    evidence: evidenceFor(1),
+    now: plus(2)
+  });
   assert.equal((await readReceipts(root)).length, 1);
   assert.deepEqual((await readState(root)).completed_steps, []);
 
@@ -448,6 +708,36 @@ test("receipt-first state failure is recoverable and semantic complete retry is 
   );
 });
 
+test("exact receipt crash-gap recovery advances at and after owner lease expiry", async () => {
+  for (const elapsed of [OWNER_LEASE_MS, OWNER_LEASE_MS + 1000]) {
+    const root = await makeWorkspace();
+    const pluginRoot = await makePluginFixture();
+    const started = await initAndBegin(root, { initNow: baseTime, beginNow: baseTime });
+    await writeReceiptExclusive(root, {
+      schema_version: 1,
+      workflow_id: started.state.workflow_id,
+      step: 1,
+      attempt_id: started.attempt.id,
+      provenance: "codex-verified",
+      completed_at: plus(1),
+      summary: "crash-gap lease recovery",
+      evidence: evidenceFor(1)
+    });
+    const recovered = await completeStep({
+      workspaceRoot: root,
+      pluginRoot,
+      step: 1,
+      attemptId: started.attempt.id,
+      summary: "crash-gap lease recovery",
+      evidence: evidenceFor(1),
+      now: plus(elapsed)
+    });
+    assert.deepEqual(recovered.completed_steps, [1]);
+    assert.equal(recovered.current_step, 2);
+    assert.equal(recovered.owner, null);
+  }
+});
+
 test("Step 50 publishes its receipt before completed state", async () => {
   const root = await makeWorkspace();
   const pluginRoot = await makePluginFixture();
@@ -472,7 +762,16 @@ test("Step 50 publishes its receipt before completed state", async () => {
     now: plus(2),
     idFactory: ids("attempt-50")
   });
-  let stateAtReceipt;
+  await crashChildAfterReceipt({
+    root,
+    pluginRoot,
+    step: 50,
+    attemptId: started.attempt.id,
+    summary: "final step",
+    evidence: evidenceFor(50),
+    now: plus(3)
+  });
+  const stateAtReceipt = await readState(root);
   const completed = await completeStep({
     workspaceRoot: root,
     pluginRoot,
@@ -480,13 +779,7 @@ test("Step 50 publishes its receipt before completed state", async () => {
     attemptId: started.attempt.id,
     summary: "final step",
     evidence: evidenceFor(50),
-    now: plus(3),
-    hooks: {
-      afterReceipt: async () => {
-        assert.equal(existsSync(receiptPath(root, 50)), true);
-        stateAtReceipt = await readState(root);
-      }
-    }
+    now: plus(4)
   });
   assert.equal(stateAtReceipt.status, "running");
   assert.equal(stateAtReceipt.current_step, 50);
@@ -552,6 +845,33 @@ test("complete rejects a plugin step index redirected outside the resolved plugi
   );
   assert.deepEqual(await readReceipts(root), []);
   assert.deepEqual(await readState(root), started.state);
+});
+
+test("complete ignores caller-supplied writer and hook seams and persists through production writers", async () => {
+  const root = await makeWorkspace();
+  const pluginRoot = await makePluginFixture();
+  const started = await initAndBegin(root);
+  let executed = false;
+  const forbidden = async () => {
+    executed = true;
+    return started.state;
+  };
+  const completed = await completeStep({
+    workspaceRoot: root,
+    pluginRoot,
+    step: 1,
+    attemptId: started.attempt.id,
+    summary: "production persistence only",
+    evidence: evidenceFor(1),
+    now: plus(2),
+    hooks: { afterReceipt: forbidden },
+    stateWriter: forbidden,
+    receiptWriter: forbidden
+  });
+  assert.equal(executed, false);
+  assert.deepEqual((await readState(root)).completed_steps, [1]);
+  assert.equal((await readReceipts(root)).length, 1);
+  assert.deepEqual(completed, await readState(root));
 });
 
 test("each attempt can fail once and three consecutive failures block", async () => {
@@ -640,22 +960,46 @@ test("explicit resume opens a fresh retry window and pause obeys state boundarie
   assert.equal(unblocked.current_attempt, null);
 });
 
+test("pause renews a live owner lease and rejects the exact expiry boundary", async () => {
+  const root = await makeWorkspace();
+  await initAndBegin(root, { sessionId: "session-pause", initNow: baseTime, beginNow: baseTime });
+  const paused = await pauseWorkflow({
+    workspaceRoot: root,
+    reason: "pause before expiry",
+    now: plus(4 * 60 * 1000)
+  });
+  assert.equal(paused.owner.lease_updated_at, plus(4 * 60 * 1000));
+
+  const expiredRoot = await makeWorkspace();
+  const started = await initAndBegin(expiredRoot, {
+    sessionId: "session-expired",
+    initNow: baseTime,
+    beginNow: baseTime
+  });
+  await assert.rejects(
+    () => pauseWorkflow({
+      workspaceRoot: expiredRoot,
+      reason: "too late",
+      now: plus(OWNER_LEASE_MS)
+    }),
+    error => error.code === "OWNER_LEASE_EXPIRED"
+  );
+  assert.deepEqual(await readState(expiredRoot), started.state);
+});
+
 test("reconcile advances a receipt crash gap and blocks malformed receipt storage", async () => {
   const root = await makeWorkspace();
-  const pluginRoot = await makePluginFixture();
   const started = await initAndBegin(root);
-  await assert.rejects(() => completeStep({
-    workspaceRoot: root,
-    pluginRoot,
+  await writeReceiptExclusive(root, {
+    schema_version: 1,
+    workflow_id: started.state.workflow_id,
     step: 1,
-    attemptId: started.attempt.id,
+    attempt_id: started.attempt.id,
+    provenance: "codex-verified",
+    completed_at: plus(2),
     summary: "crash gap",
-    evidence: evidenceFor(1),
-    now: plus(2),
-    stateWriter: async () => {
-      throw new Error("crash before state");
-    }
-  }));
+    evidence: evidenceFor(1)
+  });
   const recovered = await reconcileWorkflow({ workspaceRoot: root, now: plus(3) });
   assert.deepEqual(recovered.completed_steps, [1]);
   assert.equal(recovered.current_step, 2);
@@ -665,6 +1009,45 @@ test("reconcile advances a receipt crash gap and blocks malformed receipt storag
   assert.equal(blocked.status, "blocked");
   assert.equal(blocked.blocked_reason, "RECEIPT_PARSE_ERROR");
   assert.deepEqual(blocked.completed_steps, [1]);
+});
+
+test("malformed first receipt discards state-only completion while later corruption preserves valid prefix", async () => {
+  const root = await makeWorkspace();
+  const pluginRoot = await makePluginFixture();
+  const started = await initAndBegin(root);
+  await completeStep({
+    workspaceRoot: root,
+    pluginRoot,
+    step: 1,
+    attemptId: started.attempt.id,
+    summary: "step one",
+    evidence: evidenceFor(1),
+    now: plus(2)
+  });
+  await writeFile(receiptPath(root, 1), "malformed-first\n", "utf8");
+  let blocked = await reconcileWorkflow({ workspaceRoot: root, now: plus(3) });
+  assert.equal(blocked.status, "blocked");
+  assert.deepEqual(blocked.completed_steps, []);
+  assert.equal(blocked.current_step, 1);
+  assert.equal(blocked.current_attempt, null);
+  assert.equal(blocked.continuation, null);
+
+  const laterRoot = await makeWorkspace();
+  const laterStarted = await initAndBegin(laterRoot);
+  await completeStep({
+    workspaceRoot: laterRoot,
+    pluginRoot,
+    step: 1,
+    attemptId: laterStarted.attempt.id,
+    summary: "valid prefix",
+    evidence: evidenceFor(1),
+    now: plus(2)
+  });
+  await writeFile(receiptPath(laterRoot, 2), "malformed-later\n", "utf8");
+  blocked = await reconcileWorkflow({ workspaceRoot: laterRoot, now: plus(3) });
+  assert.equal(blocked.status, "blocked");
+  assert.deepEqual(blocked.completed_steps, [1]);
+  assert.equal(blocked.current_step, 2);
 });
 
 test("status derives imported and native counts from receipt provenance", async () => {
@@ -732,6 +1115,44 @@ test("show reports preserved import diagnostics without inventing active state",
   });
 });
 
+test("show maps untrusted or malformed import diagnostics to constant safe output", async () => {
+  const trustedAction = "repair the Claude state or use a separate workspace";
+  for (const [artifact, expectedCode, expectedPreserved] of [
+    [{
+      schema_version: 1,
+      code: "SECRET_CODE_Bearer_abcdefghijklmnop",
+      source_preserved: true,
+      source_path: "step_archive/progress.json",
+      source_sha256: "b".repeat(64),
+      occurred_at: baseTime,
+      action: "Authorization: Bearer abcdefghijklmnop"
+    }, "CLAUDE_IMPORT_FAILED", false],
+    [{
+      schema_version: 1,
+      code: "CLAUDE_TOTAL_STEPS",
+      source_preserved: true,
+      source_path: "step_archive/progress.json",
+      source_sha256: "b".repeat(64),
+      occurred_at: baseTime,
+      action: "password=known-code-secret-action"
+    }, "CLAUDE_TOTAL_STEPS", true],
+    [{ code: "password=do-not-disclose", action: "secret-action" }, "CLAUDE_IMPORT_FAILED", false]
+  ]) {
+    const root = await makeWorkspace();
+    await mkdir(pathsFor(root).codexDir, { recursive: true });
+    await writeFile(pathsFor(root).importErrorPath, `${JSON.stringify(artifact)}\n`);
+    const raw = JSON.stringify(await showWorkflow({ workspaceRoot: root }));
+    assert.equal(raw.includes("abcdefghijklmnop"), false);
+    assert.equal(raw.includes("do-not-disclose"), false);
+    assert.equal(raw.includes("secret-action"), false);
+    assert.deepEqual(JSON.parse(raw).import_error, {
+      code: expectedCode,
+      source_preserved: expectedPreserved,
+      action: trustedAction
+    });
+  }
+});
+
 test("reset archives only Codex metadata and preserves Claude topic outputs and application bytes", async () => {
   const root = await makeWorkspace();
   await initWorkflow({
@@ -757,6 +1178,28 @@ test("reset archives only Codex metadata and preserves Claude topic outputs and 
   assert.equal(await readState(root), null);
   for (const [path] of preserved) assert.equal(await hashFile(path), before.get(path));
   assert.deepEqual((await readdir(pathsFor(root).codexDir)).sort(), ["backups"]);
+});
+
+test("reset rejects a redirected backups directory before moving metadata outside", async () => {
+  const root = await makeWorkspace();
+  const external = await makeWorkspace();
+  await initWorkflow({
+    workspaceRoot: root,
+    topic: "reset containment",
+    now: baseTime,
+    idFactory: ids("workflow-reset-unsafe", "nonce-reset-unsafe")
+  });
+  await writeFile(join(external, "sentinel.txt"), "outside-before\n");
+  await makeDirectoryLink(external, pathsFor(root).backupsDir);
+  const before = await readState(root);
+
+  await assert.rejects(
+    () => resetWorkflow({ workspaceRoot: root, now: plus(1) }),
+    error => error.code === "WORKSPACE_PATH_UNSAFE"
+  );
+  assert.deepEqual(await readState(root), before);
+  assert.equal(await readFile(join(external, "sentinel.txt"), "utf8"), "outside-before\n");
+  assert.deepEqual((await readdir(external)).sort(), ["sentinel.txt"]);
 });
 
 test("workflow events contain only allowlisted metadata and never nonce evidence reason or summary", async () => {
@@ -819,7 +1262,7 @@ test("event append failure leaves a valid consumed state and replay cannot creat
   }));
   const state = await readState(root);
   assert.doesNotThrow(() => validateState(state));
-  assert.equal(state.current_attempt.id, "attempt-event-failure");
+  assert.match(state.current_attempt.id, /^attempt-[a-f0-9]{64}$/);
   assert.equal(state.continuation, null);
   await assert.rejects(
     () => beginStep({ workspaceRoot: root, step: 1, sessionId: null, marker, now: plus(2), idFactory: ids("attempt-other") }),

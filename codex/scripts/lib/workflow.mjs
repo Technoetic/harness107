@@ -17,6 +17,7 @@ import { withRunLock } from "./lock.mjs";
 import {
   assertOwner,
   claimOwner,
+  ownerLeaseExpired,
   renewOwner,
   transferOwner
 } from "./ownership.mjs";
@@ -24,8 +25,10 @@ import { assertInside, pathsFor } from "./paths.mjs";
 import {
   parseReceipt,
   readReceipts,
+  receiptPath,
   reconcileReceipts,
   sanitizeEvidence,
+  syncDirectoryDurable,
   writeReceiptExclusive
 } from "./receipts.mjs";
 import { createInitialState, validateState } from "./schema.mjs";
@@ -39,6 +42,19 @@ import {
 const STEP_COUNT = 50;
 const TOPIC_RELATIVE_PATH = "step_archive/TOPIC/TOPIC.md";
 const IMPORT_RECOVERY_ACTION = "repair the Claude state or use a separate workspace";
+const SAFE_IMPORT_ERROR_CODES = new Set([
+  "CLAUDE_COMPLETED_STEPS",
+  "CLAUDE_IMPORT_FAILED",
+  "CLAUDE_PROGRESS_INVALID",
+  "CLAUDE_PROGRESS_JSON",
+  "CLAUDE_PROGRESS_MISSING",
+  "CLAUDE_SOURCE_CHANGED",
+  "CLAUDE_STEP_RANGE",
+  "CLAUDE_STEP_VALUE",
+  "CLAUDE_TOPIC_MISSING",
+  "CLAUDE_TOTAL_STEPS",
+  "CODEX_STEP_DEFINITIONS"
+]);
 const ACTIVE_METADATA = new Set([
   "state.json",
   "receipts",
@@ -110,6 +126,110 @@ function sameJson(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function samePath(left, right) {
+  const normalize = value => process.platform === "win32" ? value.toLowerCase() : value;
+  return normalize(resolve(left)) === normalize(resolve(right));
+}
+
+function sameNode(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+async function assertPhysicalComponents(workspaceRoot, candidates) {
+  const lexicalRoot = resolve(workspaceRoot);
+  let rootStat;
+  let canonicalRoot;
+  try {
+    rootStat = await lstat(lexicalRoot, { bigint: true });
+    canonicalRoot = await realpath(lexicalRoot);
+  } catch (error) {
+    fail("WORKSPACE_PATH_UNSAFE", "workspace root must be a physical directory", {
+      cause_code: typeof error?.code === "string" ? error.code : "INVALID"
+    });
+  }
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory() || !samePath(lexicalRoot, canonicalRoot)) {
+    fail("WORKSPACE_PATH_UNSAFE", "workspace root cannot be a link or redirected path");
+  }
+  for (const candidate of candidates) {
+    const contained = assertInside(lexicalRoot, candidate);
+    const relativeParts = contained.slice(lexicalRoot.length).split(/[\\/]+/).filter(Boolean);
+    let current = lexicalRoot;
+    for (const part of relativeParts) {
+      current = join(current, part);
+      let before;
+      try {
+        before = await lstat(current, { bigint: true });
+      } catch (error) {
+        if (error?.code === "ENOENT") break;
+        throw error;
+      }
+      if (before.isSymbolicLink()) {
+        fail("WORKSPACE_PATH_UNSAFE", "workspace path cannot traverse a link or reparse point");
+      }
+      const canonical = await realpath(current);
+      const after = await lstat(current, { bigint: true });
+      if (!sameNode(before, after) || !samePath(current, canonical)) {
+        fail("WORKSPACE_PATH_UNSAFE", "workspace path changed or redirected during validation");
+      }
+    }
+  }
+  return { lexicalRoot, rootStat };
+}
+
+async function assertPhysicalDirectory(workspaceRoot, directoryPath) {
+  await assertPhysicalComponents(workspaceRoot, [directoryPath]);
+  let value;
+  try {
+    value = await lstat(directoryPath, { bigint: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  if (value.isSymbolicLink() || !value.isDirectory()) {
+    fail("WORKSPACE_PATH_UNSAFE", "workflow directory must be a physical directory");
+  }
+  return value;
+}
+
+function assertMonotonicClock(state, clock) {
+  const current = clock.date.getTime();
+  const timestamps = [
+    state.created_at,
+    state.updated_at,
+    state.completed_at,
+    state.owner?.lease_updated_at,
+    state.current_attempt?.started_at,
+    state.continuation?.issued_at
+  ].filter(value => value !== null && value !== undefined);
+  if (timestamps.some(value => current < Date.parse(value))) {
+    fail("CLOCK_REGRESSION", "workflow mutation time cannot precede persisted state time");
+  }
+  return state;
+}
+
+function assertReceiptClock(receipts, clock) {
+  if (receipts.some(receipt => clock.date.getTime() < Date.parse(receipt.completed_at))) {
+    fail("CLOCK_REGRESSION", "workflow mutation time cannot precede a durable receipt");
+  }
+  return receipts;
+}
+
+function generationId(kind, rawId, state, extra = {}) {
+  const generation = {
+    kind,
+    raw_id: rawId,
+    workflow_id: state.workflow_id,
+    step: state.current_step,
+    completed_count: state.completed_steps.length,
+    updated_at: state.updated_at,
+    continuation: state.continuation,
+    current_attempt: state.current_attempt,
+    owner: state.owner,
+    ...extra
+  };
+  return `${kind}-${createHash("sha256").update(JSON.stringify(generation)).digest("hex")}`;
+}
+
 async function pathExists(path) {
   try {
     await lstat(path);
@@ -123,6 +243,11 @@ async function pathExists(path) {
 async function withMutation(workspaceRoot, rawNow, callback) {
   const paths = pathsFor(workspaceRoot);
   const clock = clockFrom(rawNow);
+  await assertPhysicalComponents(paths.workspaceRoot, [
+    join(paths.workspaceRoot, "step_archive"),
+    paths.codexDir,
+    paths.lockPath
+  ]);
   return withRunLock(paths.lockPath, () => callback(paths, clock), { now: clock.now });
 }
 
@@ -163,12 +288,13 @@ function markerFields(marker) {
 }
 
 export function issueContinuation(rawState, { now, nonce = randomUUID() } = {}) {
-  const state = validateState(rawState);
+  const clock = clockFrom(now);
+  const state = assertMonotonicClock(validateState(rawState), clock);
   if (state.status !== "running" || state.current_step === null) {
     fail("WORKFLOW_STATE", "continuations require a running incomplete workflow");
   }
   requireText(nonce, "nonce", "CONTINUATION_INVALID");
-  const issuedAt = clockFrom(now).iso;
+  const issuedAt = clock.iso;
   return validateState({
     ...state,
     continuation: {
@@ -207,6 +333,12 @@ export function consumeContinuation(rawState, { marker } = {}) {
 
 async function assertNoInitConflict(workspaceRoot, paths) {
   const archiveRoot = join(workspaceRoot, "step_archive");
+  await assertPhysicalComponents(workspaceRoot, [
+    archiveRoot,
+    join(archiveRoot, "TOPIC"),
+    join(archiveRoot, "TOPIC", "TOPIC.md"),
+    paths.codexDir
+  ]);
   const sharedPaths = [
     join(archiveRoot, "progress.json"),
     join(archiveRoot, "TOPIC", "TOPIC.md"),
@@ -228,21 +360,28 @@ async function assertNoInitConflict(workspaceRoot, paths) {
   }
 }
 
-async function flushDirectory(directoryPath) {
-  if (process.platform === "win32") return;
-  let handle;
+async function ensureDurableDirectory(workspaceRoot, directoryPath) {
+  const parentPath = dirname(directoryPath);
+  await assertPhysicalComponents(workspaceRoot, [parentPath, directoryPath]);
   try {
-    handle = await open(directoryPath, "r");
-    await handle.sync();
-  } finally {
-    await handle?.close();
+    await mkdir(directoryPath, { mode: 0o700 });
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
   }
+  const directory = await assertPhysicalDirectory(workspaceRoot, directoryPath);
+  if (directory === null) fail("WORKSPACE_PATH_UNSAFE", "durable directory disappeared after creation");
+  await syncDirectoryDurable(directoryPath);
+  await syncDirectoryDurable(parentPath);
+  return directory;
 }
 
 async function writeTopicExclusive(workspaceRoot, topic) {
   const topicPath = assertInside(workspaceRoot, join(workspaceRoot, ...TOPIC_RELATIVE_PATH.split("/")));
   const topicDirectory = dirname(topicPath);
-  await mkdir(topicDirectory, { recursive: true, mode: 0o700 });
+  const archiveRoot = dirname(topicDirectory);
+  await ensureDurableDirectory(workspaceRoot, archiveRoot);
+  const topicDirectoryIdentity = await ensureDurableDirectory(workspaceRoot, topicDirectory);
+  await assertPhysicalComponents(workspaceRoot, [topicDirectory, topicPath]);
   const bytes = Buffer.from(topic.endsWith("\n") ? topic : `${topic}\n`, "utf8");
   const temporaryPath = join(topicDirectory, `.${basename(topicPath)}.${process.pid}.${randomUUID()}.tmp`);
   let handle;
@@ -254,6 +393,14 @@ async function writeTopicExclusive(workspaceRoot, topic) {
     await handle.sync();
     await handle.close();
     handle = undefined;
+    const prePublishDirectory = await assertPhysicalDirectory(workspaceRoot, topicDirectory);
+    if (prePublishDirectory === null || !sameNode(topicDirectoryIdentity, prePublishDirectory)) {
+      fail("WORKSPACE_PATH_UNSAFE", "topic directory changed before publication");
+    }
+    const temporaryStat = await lstat(temporaryPath, { bigint: true });
+    if (temporaryStat.isSymbolicLink() || !temporaryStat.isFile()) {
+      fail("WORKSPACE_PATH_UNSAFE", "topic temporary must remain a physical file");
+    }
     try {
       await link(temporaryPath, topicPath);
     } catch (error) {
@@ -264,7 +411,15 @@ async function writeTopicExclusive(workspaceRoot, topic) {
     }
     await unlink(temporaryPath);
     temporaryExists = false;
-    await flushDirectory(topicDirectory);
+    const currentTopicDirectory = await assertPhysicalDirectory(workspaceRoot, topicDirectory);
+    if (currentTopicDirectory === null || !sameNode(topicDirectoryIdentity, currentTopicDirectory)) {
+      fail("WORKSPACE_PATH_UNSAFE", "topic directory changed during publication");
+    }
+    const topicStat = await lstat(topicPath, { bigint: true });
+    if (topicStat.isSymbolicLink() || !topicStat.isFile()) {
+      fail("WORKSPACE_PATH_UNSAFE", "published topic must be a physical file");
+    }
+    await syncDirectoryDurable(topicDirectory);
     return {
       path: topicPath,
       sha256: createHash("sha256").update(bytes).digest("hex")
@@ -327,7 +482,7 @@ export async function beginStep({
   const requestedSession = normalizeSessionId(sessionId);
   requireFactory(idFactory);
   return withMutation(workspaceRoot, now, async (paths, clock) => {
-    let state = await requireState(paths.workspaceRoot);
+    let state = assertMonotonicClock(await requireState(paths.workspaceRoot), clock);
     if (state.status !== "running") fail("WORKFLOW_STATE", "begin requires a running workflow");
     if (state.current_step !== step) {
       fail("STEP_MISMATCH", "begin step must match the current step", {
@@ -342,6 +497,7 @@ export async function beginStep({
     ) {
       assertOwner(state, { sessionId: requestedSession, now: clock.iso });
     }
+    const continuationGeneration = state.continuation;
     try {
       state = consumeContinuation(state, { marker });
     } catch (error) {
@@ -353,7 +509,10 @@ export async function beginStep({
     state = state.owner === null
       ? claimOwner(state, { sessionId: requestedSession, now: clock.iso })
       : assertOwner(state, { sessionId: requestedSession, now: clock.iso });
-    const attemptId = nextId(idFactory, "attempt ID");
+    const rawAttemptId = nextId(idFactory, "attempt ID");
+    const attemptId = generationId("attempt", rawAttemptId, state, {
+      continuation_generation: continuationGeneration
+    });
     const receipts = await readReceipts(paths.workspaceRoot);
     if (
       state.current_attempt?.id === attemptId ||
@@ -464,27 +623,15 @@ export async function completeStep({
   attemptId,
   summary,
   evidence,
-  now = () => new Date(),
-  hooks = {},
-  stateWriter = writeStateAtomic,
-  receiptWriter = writeReceiptExclusive
+  now = () => new Date()
 } = {}) {
   requireStep(step);
   requireText(attemptId, "attemptId", "ATTEMPT_INVALID");
   requireText(summary, "summary", "RECEIPT_INVALID");
-  if (hooks === null || typeof hooks !== "object" || Array.isArray(hooks)) {
-    fail("WORKFLOW_OPTIONS_INVALID", "hooks must be an object");
-  }
-  for (const hook of Object.values(hooks)) {
-    if (typeof hook !== "function") fail("WORKFLOW_OPTIONS_INVALID", "workflow hooks must be functions");
-  }
-  if (typeof stateWriter !== "function" || typeof receiptWriter !== "function") {
-    fail("WORKFLOW_OPTIONS_INVALID", "stateWriter and receiptWriter must be functions");
-  }
   return withMutation(workspaceRoot, now, async (paths, clock) => {
     await validatePluginRoot(pluginRoot);
     const sanitizedEvidence = sanitizeEvidence(evidence);
-    let state = await requireState(paths.workspaceRoot);
+    let state = assertMonotonicClock(await requireState(paths.workspaceRoot), clock);
     const receipts = await readReceipts(paths.workspaceRoot);
     const existing = receipts.find(receipt => receipt.step === step);
     const semanticReceipt = receiptForCompletion(state, {
@@ -502,18 +649,28 @@ export async function completeStep({
     if (state.status !== "running") fail("WORKFLOW_STATE", "complete requires a running workflow");
     const attempt = assertAttempt(state, step, attemptId);
     if (attempt.failure_recorded) fail("ATTEMPT_STALE", "a failed attempt cannot complete");
-    state = renewAttemptOwner(state, attempt, clock);
 
     let receipt;
     if (existing) {
       if (!sameCompletion(existing, semanticReceipt)) {
         fail("RECEIPT_CONFLICT", "a different receipt already exists for this step", { step });
       }
+      if (clock.date.getTime() < Date.parse(existing.completed_at)) {
+        fail("CLOCK_REGRESSION", "recovery time cannot precede the durable receipt");
+      }
+      if (state.owner !== null) {
+        if (state.owner.session_id !== attempt.session_id) {
+          fail("OWNER_CONFLICT", "durable receipt attempt does not belong to the current owner");
+        }
+        state = ownerLeaseExpired(state.owner, clock.iso)
+          ? validateState({ ...state, owner: null })
+          : renewAttemptOwner(state, attempt, clock);
+      }
       receipt = existing;
     } else {
-      receipt = await receiptWriter(paths.workspaceRoot, semanticReceipt);
+      state = renewAttemptOwner(state, attempt, clock);
+      receipt = await writeReceiptExclusive(paths.workspaceRoot, semanticReceipt);
     }
-    await hooks.afterReceipt?.({ receipt, state });
 
     const completedSteps = [...state.completed_steps, step];
     const completed = step === STEP_COUNT;
@@ -530,9 +687,7 @@ export async function completeStep({
       completed_at: completed ? receipt.completed_at : null
     });
     if (!completed) state = issueContinuation(state, { now: clock.iso });
-    await hooks.beforeStateWrite?.({ state, receipt });
-    state = await stateWriter(paths.workspaceRoot, state);
-    await hooks.afterStateWrite?.({ state, receipt });
+    state = await writeStateAtomic(paths.workspaceRoot, state);
     const events = [{
       kind: "step_completed",
       workflow_id: state.workflow_id,
@@ -566,7 +721,7 @@ export async function failStep({
   requireText(reason, "reason", "FAILURE_INVALID");
   return withMutation(workspaceRoot, now, async (paths, clock) => {
     sanitizeEvidence(evidence);
-    let state = await requireState(paths.workspaceRoot);
+    let state = assertMonotonicClock(await requireState(paths.workspaceRoot), clock);
     if (state.status !== "running") fail("WORKFLOW_STATE", "fail requires a running workflow");
     const attempt = assertAttempt(state, step, attemptId);
     if (attempt.failure_recorded) {
@@ -623,9 +778,15 @@ export async function pauseWorkflow({
 } = {}) {
   requireText(reason, "reason", "PAUSE_INVALID");
   return withMutation(workspaceRoot, now, async (paths, clock) => {
-    let state = await requireState(paths.workspaceRoot);
+    let state = assertMonotonicClock(await requireState(paths.workspaceRoot), clock);
     if (state.status === "paused") return state;
     if (state.status !== "running") fail("WORKFLOW_STATE", "only a running workflow can be paused");
+    if (state.owner !== null) {
+      state = renewOwner(state, {
+        sessionId: state.owner.session_id,
+        now: clock.iso
+      });
+    }
     state = validateState({
       ...state,
       status: "paused",
@@ -653,7 +814,7 @@ export async function resumeWorkflow({
   const requestedSession = normalizeSessionId(sessionId);
   requireFactory(idFactory);
   return withMutation(workspaceRoot, now, async (paths, clock) => {
-    let state = await requireState(paths.workspaceRoot);
+    let state = assertMonotonicClock(await requireState(paths.workspaceRoot), clock);
     if (state.status === "completed") fail("WORKFLOW_STATE", "a completed workflow cannot resume");
     const nonce = nextId(idFactory, "continuation nonce");
     state = validateState({
@@ -689,13 +850,40 @@ export async function resumeWorkflow({
   });
 }
 
-function blockForReceiptError(state, code) {
-  const completedSteps = state.status === "completed"
-    ? state.completed_steps.slice(0, STEP_COUNT - 1)
-    : state.completed_steps;
+async function trustedReceiptPrefix(workspaceRoot, workflowId) {
+  const { receiptsDir } = pathsFor(workspaceRoot);
+  const entries = await readdir(receiptsDir, { withFileTypes: true }).catch(error => {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  });
+  const names = new Set(entries.filter(entry => entry.isFile()).map(entry => entry.name));
+  const prefix = [];
+  for (let step = 1; step <= STEP_COUNT; step += 1) {
+    const name = `step${String(step).padStart(3, "0")}.json`;
+    if (!names.has(name)) break;
+    let receipt;
+    try {
+      receipt = parseReceipt(await readFile(receiptPath(workspaceRoot, step), "utf8"));
+    } catch {
+      break;
+    }
+    if (receipt.step !== step || receipt.workflow_id !== workflowId) break;
+    prefix.push(receipt);
+  }
+  return prefix;
+}
+
+function blockForReceiptError(state, code, prefixReceipts = []) {
+  const trustworthyPrefix = prefixReceipts.slice(0, STEP_COUNT - 1);
+  const completedSteps = trustworthyPrefix.map(receipt => receipt.step);
+  let importedPrefix = 0;
+  for (const receipt of trustworthyPrefix) {
+    if (receipt.provenance !== "claude-progress-import") break;
+    importedPrefix += 1;
+  }
   const importedFrom = state.imported_from === null
     ? null
-    : { ...state.imported_from, prefix_length: Math.min(state.imported_from.prefix_length, completedSteps.length) };
+    : { ...state.imported_from, prefix_length: importedPrefix };
   return validateState({
     ...state,
     status: "blocked",
@@ -714,14 +902,17 @@ export async function reconcileWorkflow({
   now = () => new Date()
 } = {}) {
   return withMutation(workspaceRoot, now, async (paths, clock) => {
-    const before = await requireState(paths.workspaceRoot);
+    const before = assertMonotonicClock(await requireState(paths.workspaceRoot), clock);
     let result;
     try {
-      result = reconcileReceipts(before, await readReceipts(paths.workspaceRoot));
+      const receipts = assertReceiptClock(await readReceipts(paths.workspaceRoot), clock);
+      result = reconcileReceipts(before, receipts);
     } catch (error) {
       if (typeof error?.code !== "string" || !error.code.startsWith("RECEIPT_")) throw error;
+      const prefixReceipts = await trustedReceiptPrefix(paths.workspaceRoot, before.workflow_id);
+      assertReceiptClock(prefixReceipts, clock);
       result = {
-        state: blockForReceiptError(before, error.code),
+        state: blockForReceiptError(before, error.code, prefixReceipts),
         diagnostics: [{ code: error.code }]
       };
     }
@@ -745,24 +936,32 @@ export async function reconcileWorkflow({
 }
 
 function validateImportError(value) {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    fail("IMPORT_ERROR_INVALID", "import-error.json must contain an object");
-  }
-  if (Object.keys(value).some(field => !IMPORT_ERROR_FIELDS.has(field))) {
-    fail("IMPORT_ERROR_INVALID", "import-error.json contains an unknown field");
-  }
+  const safeFailure = {
+    code: "CLAUDE_IMPORT_FAILED",
+    source_preserved: false,
+    action: IMPORT_RECOVERY_ACTION
+  };
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return safeFailure;
   if (
+    Object.keys(value).length !== IMPORT_ERROR_FIELDS.size ||
+    Object.keys(value).some(field => !IMPORT_ERROR_FIELDS.has(field)) ||
+    [...IMPORT_ERROR_FIELDS].some(field => !(field in value)) ||
     value.schema_version !== 1 ||
     typeof value.code !== "string" || value.code === "" ||
     typeof value.source_preserved !== "boolean" ||
+    value.source_path !== "step_archive/progress.json" ||
+    !(
+      value.source_sha256 === null ||
+      (typeof value.source_sha256 === "string" && /^[a-f0-9]{64}$/.test(value.source_sha256))
+    ) ||
+    typeof value.occurred_at !== "string" || Number.isNaN(Date.parse(value.occurred_at)) ||
     typeof value.action !== "string" || value.action === ""
-  ) {
-    fail("IMPORT_ERROR_INVALID", "import-error.json is malformed");
-  }
+  ) return safeFailure;
+  if (!SAFE_IMPORT_ERROR_CODES.has(value.code)) return safeFailure;
   return {
     code: value.code,
     source_preserved: value.source_preserved,
-    action: value.action
+    action: IMPORT_RECOVERY_ACTION
   };
 }
 
@@ -771,8 +970,7 @@ async function readImportError(path) {
     return validateImportError(JSON.parse(await readFile(path, "utf8")));
   } catch (error) {
     if (error?.code === "ENOENT") return null;
-    if (error instanceof HarnessError) throw error;
-    fail("IMPORT_ERROR_INVALID", "import-error.json is not valid JSON");
+    return validateImportError(null);
   }
 }
 
@@ -822,6 +1020,12 @@ export async function resetWorkflow({
   now = () => new Date()
 } = {}) {
   return withMutation(workspaceRoot, now, async (paths, clock) => {
+    const codexIdentity = await assertPhysicalDirectory(paths.workspaceRoot, paths.codexDir);
+    if (codexIdentity === null) fail("WORKFLOW_NOT_FOUND", "no Codex workflow metadata exists to reset");
+    let backupsIdentity = await assertPhysicalDirectory(paths.workspaceRoot, paths.backupsDir);
+    if (backupsIdentity === null) {
+      backupsIdentity = await ensureDurableDirectory(paths.workspaceRoot, paths.backupsDir);
+    }
     const entries = await readdir(paths.codexDir).catch(error => {
       if (error?.code === "ENOENT") return [];
       throw error;
@@ -829,10 +1033,31 @@ export async function resetWorkflow({
     if (!entries.some(name => ACTIVE_METADATA.has(name))) {
       fail("WORKFLOW_NOT_FOUND", "no Codex workflow metadata exists to reset");
     }
+    try {
+      const state = await readState(paths.workspaceRoot);
+      if (state !== null) assertMonotonicClock(state, clock);
+    } catch (error) {
+      if (!new Set(["STATE_INVALID", "STATE_PARSE_ERROR"]).has(error?.code)) throw error;
+    }
+    await assertPhysicalComponents(paths.workspaceRoot, [
+      paths.codexDir,
+      paths.backupsDir,
+      ...entries.filter(name => ACTIVE_METADATA.has(name)).map(name => join(paths.codexDir, name))
+    ]);
     const backupPath = await archiveActiveState(paths.workspaceRoot, {
       reason: "manual-reset",
       now: clock.now
     });
+    const currentCodex = await assertPhysicalDirectory(paths.workspaceRoot, paths.codexDir);
+    const currentBackups = await assertPhysicalDirectory(paths.workspaceRoot, paths.backupsDir);
+    if (
+      currentCodex === null || currentBackups === null ||
+      !sameNode(codexIdentity, currentCodex) ||
+      !sameNode(backupsIdentity, currentBackups)
+    ) {
+      fail("WORKSPACE_PATH_UNSAFE", "reset storage changed during archival");
+    }
+    await assertPhysicalComponents(paths.workspaceRoot, [backupPath]);
     return { backupPath };
   });
 }
