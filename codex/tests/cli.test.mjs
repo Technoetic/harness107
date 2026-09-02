@@ -7,14 +7,13 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { main } from "../scripts/harness-state.mjs";
+import { dispatch, main } from "../scripts/harness-state.mjs";
 import { readJsonInput } from "../scripts/lib/json-io.mjs";
 import { pathsFor } from "../scripts/lib/paths.mjs";
 import { readReceipts } from "../scripts/lib/receipts.mjs";
 import { readState } from "../scripts/lib/state-store.mjs";
 import { runCli } from "./helpers/run-cli.mjs";
 import {
-  makePluginFixture,
   makeWorkspace,
   writeClaudeCompletedPrefix
 } from "./helpers/workspace.mjs";
@@ -24,14 +23,53 @@ const IMPORT_ACTION = "repair the Claude state or use a separate workspace";
 const cliPath = fileURLToPath(new URL("../scripts/harness-state.mjs", import.meta.url));
 const jsonIoUrl = new URL("../scripts/lib/json-io.mjs", import.meta.url).href;
 const harnessStateUrl = new URL("../scripts/harness-state.mjs", import.meta.url).href;
+const packageRoot = fileURLToPath(new URL("../../", import.meta.url));
 
 function evidence(detail = "verified by CLI") {
-  return [{
-    acceptance_id: "state-transition",
-    kind: "check",
-    detail,
-    ok: true
-  }];
+  return [
+    {
+      acceptance_id: "topic-contract",
+      kind: "artifact",
+      detail,
+      ok: true,
+      artifact_path: "step_archive/TOPIC/TOPIC.md"
+    },
+    {
+      acceptance_id: "preflight-report",
+      kind: "artifact",
+      detail: "preflight report persisted",
+      ok: true,
+      artifact_path: "step_archive/step001_preflight.md"
+    },
+    {
+      acceptance_id: "node-runtime-version",
+      kind: "command",
+      detail: "version command exited successfully",
+      ok: true,
+      command: "node --version",
+      exit_code: 0
+    },
+    {
+      acceptance_id: "npm-cli-version",
+      kind: "command",
+      detail: "version command exited successfully",
+      ok: true,
+      command: "npm --version",
+      exit_code: 0
+    },
+    {
+      acceptance_id: "required-tool-inventory",
+      kind: "check",
+      detail: "required tools verified",
+      ok: true
+    },
+    {
+      acceptance_id: "optional-tool-disposition",
+      kind: "check",
+      detail: "optional tools recorded",
+      ok: true
+    }
+  ];
 }
 
 function parseSuccess(result) {
@@ -90,6 +128,28 @@ async function runCliWithClosedStdout(args) {
       stderr: Buffer.concat(stderr).toString("utf8")
     })));
     child.stdout.destroy();
+  });
+}
+
+async function runCliFromCwd(args, cwd, env = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [cliPath, ...args], {
+      cwd,
+      env: { ...process.env, ...env },
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true
+    });
+    const stdout = [];
+    const stderr = [];
+    child.once("error", reject);
+    child.stdout.on("data", chunk => stdout.push(Buffer.from(chunk)));
+    child.stderr.on("data", chunk => stderr.push(Buffer.from(chunk)));
+    child.once("close", code => resolve({
+      code: code ?? 1,
+      stdout: Buffer.concat(stdout).toString("utf8"),
+      stderr: Buffer.concat(stderr).toString("utf8")
+    }));
   });
 }
 
@@ -315,11 +375,35 @@ test("show emits one JSON document and no diagnostic noise", async () => {
   });
 });
 
+test("dispatch derives the immutable installed package root for import and completion", async () => {
+  const seen = [];
+  const operations = {
+    importClaudeProgress: async options => {
+      seen.push(options);
+      return { imported: true };
+    },
+    completeStep: async options => {
+      seen.push(options);
+      return { completed: true };
+    }
+  };
+
+  await dispatch("import-claude", { workspace: "workspace" }, null, operations);
+  await dispatch("complete", {
+    workspace: "workspace",
+    step: 1,
+    attempt: "attempt",
+    input: "-"
+  }, { summary: "summary", evidence: [] }, operations);
+
+  assert.equal(seen[0].pluginRoot, packageRoot);
+  assert.equal(seen[1].pluginRoot, packageRoot);
+});
+
 test("all ten commands dispatch to their workflow operations with literal structured values", async () => {
   const parent = await makeWorkspace();
   const root = join(parent, "workspace 공간 $ & ;");
   await mkdir(root);
-  const pluginRoot = await makePluginFixture();
   const topic = "한국어 topic with spaces, \"quotes\", $dollar; & | $(never-run)\n";
   const session = "세션 with spaces $ & ; quotes-'";
   const detail = "검증 detail with \"quotes\", $cash; & |";
@@ -329,6 +413,7 @@ test("all ten commands dispatch to their workflow operations with literal struct
   ], { input: { topic } }));
   assert.equal(await readFile(join(root, "step_archive", "TOPIC", "TOPIC.md"), "utf8"), topic);
   assert.equal(initialized.current_step, 1);
+  await writeFile(join(root, "step_archive", "step001_preflight.md"), "preflight passed\n", "utf8");
 
   const first = parseSuccess(await runCli([
     "begin", "--workspace", root, "--step", "1", "--session", session, "--input", "-"
@@ -346,7 +431,7 @@ test("all ten commands dispatch to their workflow operations with literal struct
   ], { input: { marker: failed.continuation } }));
   const summary = "완료 summary with \"quotes\", $cash; & |";
   const completed = parseSuccess(await runCli([
-    "complete", "--workspace", root, "--plugin-root", pluginRoot,
+    "complete", "--workspace", root,
     "--step", "1", "--attempt", retry.attempt.id, "--input", "-"
   ], { input: { summary, evidence: evidence(detail) } }));
   assert.deepEqual(completed.completed_steps, [1]);
@@ -376,13 +461,16 @@ test("all ten commands dispatch to their workflow operations with literal struct
 
 test("import-claude maps workspace and plugin roots without modifying Claude source", async () => {
   const root = await makeWorkspace();
-  const pluginRoot = await makePluginFixture();
+  const unrelatedCwd = await makeWorkspace();
   const source = await writeClaudeCompletedPrefix(root, 2, { topic: "가져오기 topic\n" });
   const sourcePath = join(root, "step_archive", "progress.json");
 
-  const imported = parseSuccess(await runCli([
-    "import-claude", "--workspace", root, "--plugin-root", pluginRoot
-  ]));
+  const imported = parseSuccess(await runCliFromCwd([
+    "import-claude", "--workspace", root
+  ], unrelatedCwd, {
+    PLUGIN_ROOT: join(root, "attacker-plugin"),
+    CLAUDE_PLUGIN_ROOT: join(root, "attacker-claude-plugin")
+  }));
   assert.deepEqual(imported.state.completed_steps, [1, 2]);
   assert.equal(imported.state.current_step, 3);
   assert.deepEqual(await readFile(sourcePath), source);
@@ -419,7 +507,14 @@ test("argument validation rejects malformed command lines deterministically", as
     { args: ["show", "--workspace", root, "--input", "-"], code: "FLAG_INVALID_FOR_COMMAND" },
     { args: ["init", "--workspace", root, "--input", "payload.json"], code: "INPUT_MODE" },
     { args: ["init", "--workspace", root], code: "FLAG_REQUIRED" },
-    { args: ["import-claude", "--workspace", root], code: "FLAG_REQUIRED" },
+    { args: ["import-claude", "--workspace", root, "--plugin-root", root], code: "FLAG_UNKNOWN" },
+    {
+      args: [
+        "complete", "--workspace", root, "--plugin-root", root,
+        "--step", "1", "--attempt", "attempt", "--input", "-"
+      ],
+      code: "FLAG_UNKNOWN"
+    },
     { args: ["show"], code: "FLAG_REQUIRED" }
   ];
   for (const fixture of cases) {
@@ -467,7 +562,6 @@ test("input validation rejects empty malformed non-object unknown and mistyped J
 
 test("command-specific structured schemas reject bad marker and evidence before workflow writes", async () => {
   const root = await makeWorkspace();
-  const pluginRoot = await makePluginFixture();
   const initialized = parseSuccess(await runCli([
     "init", "--workspace", root, "--input", "-"
   ], { input: { topic: "schema checks" } }));
@@ -483,7 +577,7 @@ test("command-specific structured schemas reject bad marker and evidence before 
   ], { input: { marker: initialized.continuation } }));
   const beforeComplete = await readState(root);
   const badComplete = await runCli([
-    "complete", "--workspace", root, "--plugin-root", pluginRoot,
+    "complete", "--workspace", root,
     "--step", "1", "--attempt", started.attempt.id, "--input", "-"
   ], { input: { summary: "bad evidence", evidence: [{ unexpected: true }] } });
   assert.equal(parseFailure(badComplete).code, "EVIDENCE_INVALID");

@@ -1,0 +1,34 @@
+name: test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  codex-and-claude-regressions:
+    name: ${{ matrix.os }} / Node 22
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Run Codex tests
+        run: node --test codex/tests/*.test.mjs
+      - name: Run isolated Claude regressions on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File codex/tests/claude-regression-copy.ps1 -SourceRoot .
+      - name: Run isolated Claude regressions on Ubuntu
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bash codex/tests/claude-regression-copy.sh .

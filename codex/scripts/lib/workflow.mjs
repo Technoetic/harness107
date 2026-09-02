@@ -7,12 +7,12 @@ import {
   readFile,
   readdir,
   realpath,
-  stat,
   unlink
 } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
 import { HarnessError } from "./errors.mjs";
+import { loadStepContract, validateCompletionEvidence } from "./acceptance.mjs";
 import { withRunLock } from "./lock.mjs";
 import {
   assertOwner,
@@ -756,25 +756,6 @@ export async function beginStep({
   });
 }
 
-async function validatePluginRoot(pluginRoot) {
-  if (typeof pluginRoot !== "string" || pluginRoot.trim() === "") {
-    fail("PLUGIN_ROOT_INVALID", "pluginRoot must be a non-empty directory path");
-  }
-  try {
-    const canonicalRoot = await realpath(resolve(pluginRoot));
-    if (!(await stat(canonicalRoot)).isDirectory()) throw new Error("not a directory");
-    const indexPath = assertInside(canonicalRoot, join(canonicalRoot, "codex", "assets", "steps", "index.json"));
-    const canonicalIndexPath = await realpath(indexPath);
-    assertInside(canonicalRoot, canonicalIndexPath);
-    if (!(await stat(canonicalIndexPath)).isFile()) throw new Error("missing step index");
-    return canonicalRoot;
-  } catch (error) {
-    fail("PLUGIN_ROOT_INVALID", "pluginRoot must resolve to an installed Harness50 package root", {
-      cause_code: typeof error?.code === "string" ? error.code : "INVALID"
-    });
-  }
-}
-
 function receiptForCompletion(state, {
   step,
   attemptId,
@@ -836,18 +817,45 @@ export async function completeStep({
   requireText(attemptId, "attemptId", "ATTEMPT_INVALID");
   requireText(summary, "summary", "RECEIPT_INVALID");
   return withMutation(workspaceRoot, now, async (paths, clock, guard) => {
-    await validatePluginRoot(pluginRoot);
-    await assertMutationGuard(guard);
-    const sanitizedEvidence = frozenEvidence(evidence);
+    const contract = await loadStepContract(pluginRoot, step);
     await assertMutationGuard(guard);
     let state = assertMonotonicClock(await requireState(paths.workspaceRoot, guard), clock);
     const receipts = await guardedReadReceipts(paths.workspaceRoot, guard);
     const existing = receipts.find(receipt => receipt.step === step);
+    let canonicalEvidence;
+    if (existing) {
+      try {
+        canonicalEvidence = (await validateCompletionEvidence({
+          contract,
+          evidence,
+          workspaceRoot: paths.workspaceRoot,
+          persistedEvidence: existing.evidence
+        })).evidence;
+      } catch (error) {
+        await assertMutationGuard(guard);
+        if (error?.code === "SENSITIVE_EVIDENCE") throw error;
+        if (
+          typeof error?.code === "string" &&
+          (error.code.startsWith("ACCEPTANCE_") || error.code === "EVIDENCE_INVALID" || error.code === "RECEIPT_CONFLICT")
+        ) {
+          fail("RECEIPT_CONFLICT", "completion evidence conflicts with the durable receipt", { step });
+        }
+        throw error;
+      }
+    } else {
+      canonicalEvidence = (await validateCompletionEvidence({
+        contract,
+        evidence,
+        workspaceRoot: paths.workspaceRoot
+      })).evidence;
+    }
+    canonicalEvidence = Object.freeze(canonicalEvidence.map(item => Object.freeze(item)));
+    await assertMutationGuard(guard);
     const semanticReceipt = receiptForCompletion(state, {
       step,
       attemptId,
       summary,
-      evidence: sanitizedEvidence,
+      evidence: canonicalEvidence,
       completedAt: existing?.completed_at ?? clock.iso
     });
 

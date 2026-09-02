@@ -57,10 +57,36 @@ export async function makePluginFixture({ missingStep = null } = {}) {
       number,
       id,
       title: `Fixture step ${number}`,
+      phase: number <= 5
+        ? "preflight"
+        : number <= 15
+          ? "tooling"
+          : number <= 24
+            ? "research"
+            : number <= 30
+              ? "planning"
+              : number <= 38
+                ? "implementation"
+                : number <= 44
+                  ? "review"
+                  : "e2e",
+      source: `assets/steps/${id}.md`,
       target: `codex/assets/steps/${id}.md`,
-      acceptance: [38, 44, 50].includes(number)
-        ? [{ id: `quality-milestone-${number}`, kind: "check", required: true }]
-        : []
+      source_sha256: "a".repeat(64),
+      inputs: [],
+      outputs: [],
+      requires: [],
+      optional_requires: [],
+      network: false,
+      visual_review: false,
+      acceptance: [{
+        id: "state-transition",
+        kind: "check",
+        required: true,
+        description: "Confirms the isolated fixture state transition."
+      }],
+      ported: true,
+      next: number === 50 ? null : `step${String(number + 1).padStart(3, "0")}`
     };
   });
   await writeFile(

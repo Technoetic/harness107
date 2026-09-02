@@ -519,7 +519,12 @@ test("Stop emits exactly one marked follow-up for a progressing workflow", async
     step: 1,
     attemptId: started.attempt.id,
     summary: "fixture completed",
-    evidence: [],
+    evidence: [{
+      acceptance_id: "state-transition",
+      kind: "check",
+      detail: "fixture state transition verified",
+      ok: true
+    }],
     now: new Date(Date.parse(started.state.updated_at) + 1).toISOString()
   });
   const result = await runHook("stop", await fixture("stop-running.json", root));
@@ -1441,7 +1446,12 @@ test("an accepted Stop marker can advance through a receipt to the next marked s
     step: 1,
     attemptId: started.attempt.id,
     summary: "chain step complete",
-    evidence: [],
+    evidence: [{
+      acceptance_id: "state-transition",
+      kind: "check",
+      detail: "fixture state transition verified",
+      ok: true
+    }],
     now: new Date(Date.parse(started.state.updated_at) + 1).toISOString()
   });
   const secondStop = await runHook("stop", {

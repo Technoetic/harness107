@@ -1,4 +1,4 @@
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { HarnessError } from "./lib/errors.mjs";
 import { importClaudeProgress } from "./lib/importer.mjs";
@@ -17,6 +17,7 @@ import {
 } from "./lib/workflow.mjs";
 
 const INPUT_LIMIT = 1024 * 1024;
+const PACKAGE_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const COMMANDS = new Set([
   "init",
   "show",
@@ -31,7 +32,6 @@ const COMMANDS = new Set([
 ]);
 const KNOWN_FLAGS = new Set([
   "workspace",
-  "plugin-root",
   "step",
   "attempt",
   "session",
@@ -42,16 +42,16 @@ const COMMAND_FLAGS = new Map([
   ["init", { allowed: ["workspace", "input"], required: ["workspace", "input"] }],
   ["show", { allowed: ["workspace"], required: ["workspace"] }],
   ["import-claude", {
-    allowed: ["workspace", "plugin-root"],
-    required: ["workspace", "plugin-root"]
+    allowed: ["workspace"],
+    required: ["workspace"]
   }],
   ["begin", {
     allowed: ["workspace", "step", "session", "input"],
     required: ["workspace", "step", "input"]
   }],
   ["complete", {
-    allowed: ["workspace", "plugin-root", "step", "attempt", "input"],
-    required: ["workspace", "plugin-root", "step", "attempt", "input"]
+    allowed: ["workspace", "step", "attempt", "input"],
+    required: ["workspace", "step", "attempt", "input"]
   }],
   ["fail", {
     allowed: ["workspace", "step", "attempt", "input"],
@@ -198,7 +198,7 @@ export function parseArgs(argv) {
     if (!(name in flags)) fail("FLAG_REQUIRED");
   }
   if ("input" in flags && flags.input !== "-") fail("INPUT_MODE");
-  for (const name of ["workspace", "plugin-root", "attempt", "session", "reason"]) {
+  for (const name of ["workspace", "attempt", "session", "reason"]) {
     if (name in flags && flags[name].trim() === "") fail("FLAG_VALUE");
   }
   return { command, flags };
@@ -212,7 +212,7 @@ export async function dispatch(command, flags, input, operations = OPERATIONS) {
     case "show":
       return operations.showWorkflow({ workspaceRoot });
     case "import-claude":
-      return operations.importClaudeProgress({ workspaceRoot, pluginRoot: flags["plugin-root"] });
+      return operations.importClaudeProgress({ workspaceRoot, pluginRoot: PACKAGE_ROOT });
     case "begin":
       return operations.beginStep({
         workspaceRoot,
@@ -223,7 +223,7 @@ export async function dispatch(command, flags, input, operations = OPERATIONS) {
     case "complete":
       return operations.completeStep({
         workspaceRoot,
-        pluginRoot: flags["plugin-root"],
+        pluginRoot: PACKAGE_ROOT,
         step: flags.step,
         attemptId: flags.attempt,
         summary: input.summary,
