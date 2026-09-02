@@ -85,6 +85,216 @@ function parseStepDocument(content) {
   };
 }
 
+function extractMarkdownSection(content, heading) {
+  const normalized = content.replaceAll("\r\n", "\n");
+  const headings = [...normalized.matchAll(/^## ([^\n]+)$/gm)];
+  const matches = headings.filter((match) => match[1] === heading);
+  assert.equal(matches.length, 1, `expected exactly one ## ${heading} section`);
+  const match = matches[0];
+  const next = headings.find((candidate) => candidate.index > match.index);
+  return normalized.slice(match.index + match[0].length, next?.index ?? normalized.length).trim();
+}
+
+function extractOrderedMarkdownSections(content, expectedHeadings) {
+  const normalized = content.replaceAll("\r\n", "\n");
+  const headings = [...normalized.matchAll(/^## ([^\n]+)$/gm)];
+  const sections = {};
+  let previousIndex = -1;
+
+  for (const expectedHeading of expectedHeadings) {
+    const matches = headings.filter((match) => match[1] === expectedHeading);
+    assert.equal(matches.length, 1, `expected exactly one ## ${expectedHeading} section`);
+    const match = matches[0];
+    assert.ok(match.index > previousIndex, `## ${expectedHeading} is out of order`);
+    const next = headings.find((candidate) => candidate.index > match.index);
+    sections[expectedHeading] = normalized
+      .slice(match.index + match[0].length, next?.index ?? normalized.length)
+      .trim();
+    previousIndex = match.index;
+  }
+
+  return sections;
+}
+
+function assertPlanningPermissionContract(content) {
+  const roleSection = extractMarkdownSection(content, "실행 역할").replace(/\s+/g, " ");
+  assert.match(roleSection, /정상 권한 확인을 유지/);
+  assert.match(roleSection, /자동 승인이나 권한 우회를 금지/);
+
+  assert.doesNotMatch(
+    content,
+    /(?:안전|일반|모든)(?:한)?\s*명령(?:은|을)?[^.\n]{0,120}자동\s*승인/i
+  );
+  assert.doesNotMatch(
+    content,
+    /권한\s*확인(?:\s*절차)?(?:을|를)?\s*우회/i
+  );
+  assert.doesNotMatch(
+    content,
+    /\bpermissionDecision\b["']?\s*(?::|=)\s*["']?(?:allow|ask)\b/i
+  );
+  assert.doesNotMatch(content, /\b(?:safe|ordinary|normal)\s+commands?[^.\n]{0,80}\bauto[- ]?approve/i);
+  assert.doesNotMatch(content, /\bauto[- ]?approve[^.\n]{0,80}\b(?:safe|ordinary|normal)\s+commands?\b/i);
+  assert.doesNotMatch(content, /\bbypass(?:ing)?\s+(?:the\s+)?permission\s+checks?\b/i);
+  assert.doesNotMatch(content, /\bdangerously[-_ ]?bypass(?:[-_ ][a-z]+)*\b/i);
+}
+
+function assertStep30SectionContract(content) {
+  const expectedOrder = [
+    "주제와 기획 확인",
+    "첫 설계 활동: 구조화된 대안 탐색",
+    "독립 선택",
+    "Class 설계 계약",
+    "비동기와 성능 계약",
+    "레이아웃·상호작용·접근성 계약",
+    "최종 독립 검증",
+    "완료 조건"
+  ];
+  const sections = extractOrderedMarkdownSections(content, expectedOrder);
+  const goal = extractMarkdownSection(content, "목표").replace(/\s+/g, " ");
+  const topic = sections["주제와 기획 확인"].replace(/\s+/g, " ");
+  const exploration = sections["첫 설계 활동: 구조화된 대안 탐색"].replace(/\s+/g, " ");
+  const selection = sections["독립 선택"].replace(/\s+/g, " ");
+  const classDesign = sections["Class 설계 계약"].replace(/\s+/g, " ");
+  const asyncDesign = sections["비동기와 성능 계약"].replace(/\s+/g, " ");
+  const accessibility = sections["레이아웃·상호작용·접근성 계약"].replace(/\s+/g, " ");
+  const verification = sections["최종 독립 검증"].replace(/\s+/g, " ");
+  const completion = sections["완료 조건"].replace(/\s+/g, " ");
+
+  assert.match(goal, /실제 구현이나 패키지 설치는 수행하지 않는다/);
+
+  assert.match(topic, /가장 먼저 `step_archive\/TOPIC\/TOPIC\.md`/);
+  assert.match(topic, /`topic`[^]*`audience`[^]*`interactive`[^]*`real_world_apps`[^]*`constraints`/);
+  assert.match(topic, /29단계[^]*기획[^]*검증 보고서[^]*`PASS`/);
+
+  assert.match(exploration, /첫 설계 활동은 구조화된 브레인스토밍과 대안 탐색/);
+  assert.match(exploration, /외부 기능의 특정 이름[^]*의존하지 않는다/);
+  assert.match(exploration, /사용자에게 옵션을 질문하지 않고[^]*주제 제약 안에서/);
+  assert.match(exploration, /설계안 A[^]*설계안 B[^]*설계안 C/);
+  assert.match(exploration, /레이아웃 구조[^]*아키텍처[^]*반응형 전략[^]*실질적으로 달라야/);
+  assert.doesNotMatch(exploration, /\b(?:superpowers:|Skill\s*\(|skill\s*=|plugin:)/i);
+  assert.doesNotMatch(exploration, /사용자에게[^.\n]{0,80}옵션(?:을)?\s*질문(?:한다|하라)/);
+
+  assert.match(selection, /독립 선택자는 대안을 수정하지 않고 정확히 하나만 선택/);
+  assert.match(selection, /유지보수성[^]*반응형 구현 난이도[^]*조사 적합성[^]*접근성/);
+  assert.match(
+    selection,
+    /선택된 안만[^]*`step_archive\/step030_레이아웃설계_chunk1\.md`[^]*`step_archive\/step030_전체설계_chunk1\.md`/
+  );
+
+  assert.match(classDesign, /단일 책임[^]*합성[^]*생성자 주입[^]*전역 상태[^]*public[^]*private/i);
+  assert.match(classDesign, /클래스 다이어그램[^]*의존 관계도[^]*public async 시그니처[^]*시퀀스 다이어그램[^]*라이프사이클/);
+
+  assert.match(asyncDesign, /`async init\(\)`[^]*`async start\(\)`/);
+  assert.match(asyncDesign, /I\/O[^]*DOM[^]*애니메이션[^]*취소[^]*오류[^]*병렬[^]*성능/);
+  assert.match(asyncDesign, /부분 실패 복구/);
+
+  for (const required of [/키보드/, /포커스/, /reduced-motion/i, /터치/, /(?:명암|contrast)/i]) {
+    assert.match(accessibility, required);
+  }
+  assert.match(accessibility, /반응형 breakpoint[^]*화면 상태/);
+  assert.match(accessibility, /loading[^]*empty[^]*error[^]*disabled/);
+
+  const reportReferences = [...new Set(
+    [...verification.matchAll(/`(step_archive\/outputs\/step030_최종검증(?:_r\d+)?\.md)`/g)]
+      .map((match) => match[1])
+  )];
+  assert.deepEqual(reportReferences, ["step_archive/outputs/step030_최종검증.md"]);
+  assert.match(verification, /동일한 선언 보고서[^]*라운드별 섹션[^]*최대 5라운드/);
+  assert.match(verification, /`PASS`[^]*경우에만 완료/);
+  assert.match(verification, /`FAIL`[^]*완료 증거가 될 수 없다/);
+  assert.match(verification, /5라운드[^]*`PASS`[^]*없으면[^]*차단/);
+  assert.doesNotMatch(verification, /최종검증_r[2-5]\.md|스킵[^]*(?:완료|종료)/);
+
+  for (const acceptanceId of [
+    "design-alternatives",
+    "design-selection",
+    "layout-design-chunk-1",
+    "overall-design-chunk-1",
+    "final-design-verification",
+    "class-architecture-contract",
+    "async-lifecycle-contract",
+    "responsive-accessibility-contract",
+    "pass-verdict"
+  ]) {
+    assert.match(completion, new RegExp("`" + acceptanceId + "`"));
+  }
+
+  return sections;
+}
+
+const EXPECTED_PLANNING_ACCEPTANCE_DESCRIPTIONS = {
+  step025: {
+    "base-planning-snapshot": "Stores the topic-complete base planning snapshot with a bounded manifest.",
+    "planning-verification-report": "Stores every bounded independent review round in one report.",
+    "topic-fidelity": "Confirms every topic, audience, interaction, application, and constraint field is reflected.",
+    "general-research-provenance": "Traces every factual claim and planning decision to persisted general-research evidence.",
+    "planning-chunks-bounded": "Confirms the declared planning manifest matches a snapshot of at most 500 lines.",
+    "bounded-independent-review": "Confirms an independent reviewer used no more than five evidence-first rounds.",
+    "pass-verdict": "Requires a fully evidenced PASS; FAIL and skipped findings never satisfy completion."
+  },
+  step026: {
+    "github-planning-snapshot": "Stores a complete planning snapshot enriched only by persisted GitHub evidence.",
+    "github-planning-verification": "Stores every bounded independent GitHub-evidence review round in one report.",
+    "persisted-github-response-only": "Confirms only the one persisted successful API response supplies candidates and facts.",
+    "decision-provenance": "Traces every architecture and pattern decision to an exact response item and research section.",
+    "planning-chunks-bounded": "Confirms the declared planning manifest matches a snapshot of at most 500 lines.",
+    "bounded-independent-review": "Confirms an independent reviewer used no more than five evidence-first rounds.",
+    "pass-verdict": "Requires a fully evidenced PASS; FAIL and skipped findings never satisfy completion."
+  },
+  step027: {
+    "api-contract-planning-snapshot": "Stores a complete planning snapshot enriched by the persisted official API contract.",
+    "api-contract-planning-verification": "Stores every bounded independent contract review round in one report.",
+    "concrete-contract-provenance": "Traces the concrete subject, version, and every contract decision to the official source.",
+    "schema-contract-completeness": "Confirms structures, fields, authentication, rates, errors, retries, and limits are covered without invention.",
+    "planning-chunks-bounded": "Confirms the declared planning manifest matches a snapshot of at most 500 lines.",
+    "bounded-independent-review": "Confirms an independent reviewer used no more than five evidence-first rounds.",
+    "pass-verdict": "Requires a fully evidenced PASS; FAIL and skipped findings never satisfy completion."
+  },
+  step028: {
+    "repository-planning-snapshot": "Stores a complete planning snapshot enriched by quarantined static repository evidence.",
+    "repository-planning-verification": "Stores every bounded independent repository-evidence review round in one report.",
+    "static-analysis-only": "Confirms cloned code was never executed, installed, built, tested, or automated.",
+    "decision-provenance": "Traces structures, patterns, and constraints to a commit and exact cloned-file lines.",
+    "planning-chunks-bounded": "Confirms the declared planning manifest matches a snapshot of at most 500 lines.",
+    "bounded-independent-review": "Confirms an independent reviewer used no more than five evidence-first rounds.",
+    "pass-verdict": "Requires a fully evidenced PASS; FAIL and skipped findings never satisfy completion."
+  },
+  step029: {
+    "visual-planning-snapshot": "Stores the complete integrated visual and interaction planning snapshot.",
+    "visual-planning-verification": "Stores every bounded independent visual-evidence review round in one report.",
+    "planning-screenshot-input": "Requires the primary screenshot used during visual planning inspection.",
+    "evidence-axis-fidelity": "Confirms only evidence-named axes and alternatives informed planning decisions.",
+    "interaction-accessibility-contracts": "Confirms responsive, interaction, state, keyboard, focus, touch, motion, and contrast contracts.",
+    "visual-evidence-inspection": "Confirms required screenshots were actually opened and compared with the capture manifest.",
+    "planning-chunks-bounded": "Confirms the declared planning manifest matches a snapshot of at most 500 lines.",
+    "bounded-independent-review": "Confirms an independent reviewer used no more than five evidence-first rounds.",
+    "pass-verdict": "Requires a fully evidenced PASS; FAIL and skipped findings never satisfy completion."
+  },
+  step030: {
+    "design-alternatives": "Stores three materially distinct layout, architecture, and responsive alternatives.",
+    "design-selection": "Stores the independent selector's one evidence-based choice without modifying alternatives.",
+    "layout-design-chunk-1": "Stores the bounded final layout and interaction design selected from the alternatives.",
+    "overall-design-chunk-1": "Stores the bounded final class architecture and asynchronous design.",
+    "final-design-verification": "Stores every bounded final independent verification round in one report.",
+    "structured-brainstorming-first": "Confirms structured brainstorming and alternative exploration was the first design activity.",
+    "independent-selector": "Confirms a separate selector chose exactly one alternative without editing it.",
+    "class-architecture-contract": "Confirms SRP classes, composition, constructor injection, state ownership, and public/private APIs.",
+    "async-lifecycle-contract": "Confirms asynchronous initialization, start, I/O, cancellation, errors, parallelism, and performance contracts.",
+    "responsive-accessibility-contract": "Confirms responsive breakpoints, states, keyboard, focus, reduced motion, touch, and contrast contracts.",
+    "design-chunks-bounded": "Confirms design manifests match declared chunks of at most 500 lines.",
+    "pass-verdict": "Requires the final independent verifier to record an evidenced PASS."
+  }
+};
+
+function assertPlanningAcceptanceDescriptions(steps) {
+  const actual = Object.fromEntries(steps.map((step) => [
+    step.id,
+    Object.fromEntries(step.acceptance.map((item) => [item.id, item.description]))
+  ]));
+  assert.deepEqual(actual, EXPECTED_PLANNING_ACCEPTANCE_DESCRIPTIONS);
+}
+
 test("map covers every source step with canonical boundaries", async () => {
   const index = await loadIndex(repoRoot);
   const report = validateIndex(index, { repoRoot, requirePorted: false });
@@ -1477,6 +1687,7 @@ test("step024 requires a bounded independent PASS and never auto-routes a FAIL",
 
 test("planning batch declares the exact Codex-native artifact contracts", async () => {
   const report = await validateStepBatch(repoRoot, [25, 26, 27, 28, 29, 30]);
+  assertPlanningAcceptanceDescriptions(report.steps);
   const projected = report.steps.map((step) => ({
     number: step.number,
     id: step.id,
@@ -1736,6 +1947,16 @@ test("planning source hashes bind the untouched source steps 025 through 030", a
   });
 });
 
+test("planning acceptance descriptions reject placeholder-wide mutation", async () => {
+  const index = await loadIndex(repoRoot);
+  const mutated = structuredClone(index.steps.slice(24, 30));
+  for (const step of mutated) {
+    for (const item of step.acceptance) item.description = "x";
+  }
+
+  assert.throws(() => assertPlanningAcceptanceDescriptions(mutated));
+});
+
 test("planning documents bind exact frontmatter titles and only their current Step heading", async () => {
   const expected = [
     { name: "step025", number: 25, title: "기획: 전체 조사결과 기반 (독립 검증 루프)" },
@@ -1793,10 +2014,47 @@ test("planning instructions stay local, provider-neutral, permission-preserving,
     assert.doesNotMatch(content, /(?:progress|state)\.json|\.harness50-codex|transcript/i);
     assert.doesNotMatch(content, /\b(?:SessionStart|UserPromptSubmit|PreToolUse|Stop)\b|\bhooks?\b/i);
     assert.doesNotMatch(content, /(?:다음|후속)\s*(?:Step|단계)|\bnext\s+step\b/i);
-    assert.match(content, /정상 권한 확인[^]*(?:자동 승인|권한 우회)[^]*금지/);
+    assertPlanningPermissionContract(content);
     assert.match(content, /수락 증거[^]*현재 단계에서 멈춘다/);
     assert.match(content, /workflow 상태와 영수증[^]*진행을 소유/);
   }
+});
+
+test("planning permission contracts reject contradictions and section-displaced assurances", async () => {
+  const original = await readFile(join(repoRoot, "codex", "assets", "steps", "step025.md"), "utf8");
+  const contradictions = [
+    "안전 명령 자동 승인.",
+    "안전 명령은 자동 승인한다.",
+    "일반 명령을 자동 승인하라.",
+    "권한 확인 우회.",
+    "권한 확인 절차를 우회한다.",
+    '"permissionDecision": "allow"',
+    "permissionDecision = ask",
+    "Auto-approve safe commands.",
+    "Bypass permission checks.",
+    "Use dangerously-bypass-approvals-and-sandbox."
+  ];
+  const permissionSentence = /어느 방식에서도 정상 권한 확인을 유지하고 자동\s+승인이나 권한 우회를 금지한다\./;
+  assert.match(original, permissionSentence);
+  const displaced = original
+    .replace(permissionSentence, "")
+    .replace(
+      "## 입력과 산출물",
+      "정상 권한 확인을 유지하고 자동 승인이나 권한 우회를 금지한다.\n\n## 입력과 산출물"
+    );
+
+  for (const directive of contradictions) {
+    const contradictory = original.replace(
+      "## 입력과 산출물",
+      `${directive}\n\n## 입력과 산출물`
+    );
+    assert.throws(
+      () => assertPlanningPermissionContract(contradictory),
+      undefined,
+      `contradictory permission directive escaped: ${directive}`
+    );
+  }
+  assert.throws(() => assertPlanningPermissionContract(displaced));
 });
 
 test("every planning step separates a concrete author from an independent verifier honestly", async () => {
@@ -1892,29 +2150,77 @@ test("step029 turns only inspected visual evidence into responsive accessible pl
 
 test("step030 separates three alternatives, independent selection, final design, and verification", async () => {
   const content = await readFile(join(repoRoot, "codex", "assets", "steps", "step030.md"), "utf8");
-
-  assert.match(content, /가장 먼저[^]*`step_archive\/TOPIC\/TOPIC\.md`/);
-  assert.match(content, /첫 설계 활동[^]*구조화된 브레인스토밍[^]*대안 탐색/);
-  assert.match(content, /외부 기능의 특정 이름[^]*의존하지 않는다/);
-  assert.match(content, /사용자에게 옵션을 질문하지 않고[^]*주제 제약 안에서[^]*결정/);
-  assert.match(content, /설계안 A[^]*설계안 B[^]*설계안 C/);
-  assert.match(content, /레이아웃 구조[^]*아키텍처[^]*반응형 전략[^]*실질적으로 달라야/);
-  assert.match(content, /독립 선택자[^]*대안을 수정하지 않고[^]*하나만 선택/);
-  assert.match(content, /유지보수성[^]*반응형 구현 난이도[^]*조사 적합성[^]*접근성/);
-  assert.match(content, /선택된 안만[^]*최종[^]*설계/);
-  assert.match(content, /최종 독립 검증자[^]*`PASS`[^]*경우에만[^]*완료/);
+  assertStep30SectionContract(content);
 });
 
 test("step030 preserves class, async lifecycle, performance, and accessibility contracts", async () => {
   const content = await readFile(join(repoRoot, "codex", "assets", "steps", "step030.md"), "utf8");
+  const sections = assertStep30SectionContract(content);
 
-  assert.match(content, /단일 책임[^]*합성[^]*생성자 주입[^]*전역 상태[^]*public[^]*private/i);
-  assert.match(content, /`async init\(\)`[^]*`async start\(\)`/);
-  assert.match(content, /I\/O[^]*DOM[^]*애니메이션[^]*취소[^]*오류[^]*병렬[^]*성능/);
-  assert.match(content, /클래스 다이어그램[^]*의존 관계도[^]*public async 시그니처[^]*시퀀스 다이어그램[^]*라이프사이클/);
-  assert.match(content, /반응형 breakpoint[^]*상태[^]*키보드[^]*포커스[^]*reduced-motion[^]*터치/i);
-  assert.match(content, /모든 라운드[^]*`step_archive\/outputs\/step030_최종검증\.md`[^]*라운드별 섹션/);
-  assert.match(content, /최대 5라운드[^]*5라운드[^]*`PASS`[^]*없으면[^]*차단/);
+  assert.ok(sections["Class 설계 계약"].length > 0);
+  assert.ok(sections["비동기와 성능 계약"].length > 0);
+  assert.ok(sections["레이아웃·상호작용·접근성 계약"].length > 0);
+});
+
+test("step030 rejects displaced, reordered, contradictory, and incomplete section semantics", async () => {
+  const original = await readFile(join(repoRoot, "codex", "assets", "steps", "step030.md"), "utf8");
+  const explorationHeading = "## 첫 설계 활동: 구조화된 대안 탐색";
+  const explorationBody = extractMarkdownSection(original, "첫 설계 활동: 구조화된 대안 탐색");
+  const archived = original.replace(
+    explorationHeading,
+    "## 보관된 비규범 참고 메모"
+  );
+  const deletedHeading = original.replace(`${explorationHeading}\n`, "");
+  const displacedBody = original
+    .replace(explorationBody, "규범적 대안 탐색 내용은 이 섹션에 없다.")
+    .replace("## 완료 조건", `## 보관된 비규범 참고 메모\n\n${explorationBody}\n\n## 완료 조건`);
+  const outOfOrder = original
+    .replace("## 독립 선택", "## __TEMP_SELECTION__")
+    .replace("## Class 설계 계약", "## 독립 선택")
+    .replace("## __TEMP_SELECTION__", "## Class 설계 계약");
+  const withoutContrast = original.replaceAll("명암", "시각적 구분");
+  const namedExternalSkill = original.replace(
+    explorationHeading,
+    `${explorationHeading}\n\n먼저 Skill(skill="superpowers:brainstorming")에 의존한다.`
+  );
+  const asksUserOptions = original.replace(
+    "사용자에게 옵션을 질문하지 않고",
+    "사용자에게 옵션을 질문한다. 그런 뒤"
+  );
+  const performsImplementation = original.replace(
+    /실제 구현이나\s+패키지 설치는 수행하지 않는다\./,
+    "실제 구현과 패키지 설치를 수행한다."
+  );
+  const selectsMany = original.replace("정확히 하나만 선택", "여러 안을 선택");
+  const splitVerificationReports = original.replaceAll(
+    "step_archive/outputs/step030_최종검증.md",
+    "step_archive/outputs/step030_최종검증_r2.md"
+  );
+  const unboundedVerification = original.replace(
+    "최대 5라운드만 수행한다.",
+    "필요한 만큼 반복한다."
+  );
+
+  for (const [name, mutation] of Object.entries({
+    archived,
+    deletedHeading,
+    displacedBody,
+    outOfOrder,
+    withoutContrast,
+    namedExternalSkill,
+    asksUserOptions,
+    performsImplementation,
+    selectsMany,
+    splitVerificationReports,
+    unboundedVerification
+  })) {
+    assert.notEqual(mutation, original, `mutation did not change the document: ${name}`);
+    assert.throws(
+      () => assertStep30SectionContract(mutation),
+      undefined,
+      `step030 section mutation escaped: ${name}`
+    );
+  }
 });
 
 test("preflight documents bind exact frontmatter and titles to only their current step", async () => {
