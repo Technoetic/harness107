@@ -42,11 +42,11 @@ function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-function validateAcceptance(entry) {
+function validateAcceptance(entry, repoRoot) {
   if (!Array.isArray(entry.acceptance)) fail(`${entry.id}.acceptance must be an array`);
   const ids = new Set();
-  let hasScreenshotArtifact = false;
-  let hasCheck = false;
+  let hasRequiredScreenshotArtifact = false;
+  let hasRequiredCheck = false;
 
   for (const item of entry.acceptance) {
     if (!isPlainObject(item)) fail(`${entry.id}.acceptance items must be objects`);
@@ -58,22 +58,24 @@ function validateAcceptance(entry) {
     requireString(item.description, `${entry.id}.acceptance description`);
 
     if (item.kind === "artifact") {
-      workspacePath(".", item.path, `${entry.id}.acceptance artifact path`);
-      if (/screenshot/i.test(item.id) || /screenshot/i.test(item.path)) hasScreenshotArtifact = true;
+      workspacePath(repoRoot, item.path, `${entry.id}.acceptance artifact path`);
+      if (item.required && (/screenshot/i.test(item.id) || /screenshot/i.test(item.path))) {
+        hasRequiredScreenshotArtifact = true;
+      }
     }
     if (item.kind === "command") {
       const declaration = item.command ?? item.command_pattern;
       requireString(declaration, `${entry.id}.acceptance command`);
     }
-    if (item.kind === "check") hasCheck = true;
+    if (item.kind === "check" && item.required) hasRequiredCheck = true;
   }
 
-  if (entry.visual_review && (!hasScreenshotArtifact || !hasCheck)) {
-    fail(`${entry.id}.visual_review requires a screenshot artifact and check`);
+  if (entry.visual_review && (!hasRequiredScreenshotArtifact || !hasRequiredCheck)) {
+    fail(`${entry.id}.visual_review requires a required screenshot artifact and required check`);
   }
 }
 
-function validateFinalMetadata(entry) {
+function validateFinalMetadata(entry, repoRoot) {
   for (const field of [
     "inputs", "outputs", "requires", "optional_requires", "acceptance"
   ]) {
@@ -81,14 +83,14 @@ function validateFinalMetadata(entry) {
   }
   if (typeof entry.network !== "boolean") fail(`${entry.id}.network must be boolean`);
   if (typeof entry.visual_review !== "boolean") fail(`${entry.id}.visual_review must be boolean`);
-  validateAcceptance(entry);
+  validateAcceptance(entry, repoRoot);
 }
 
 function validatePortedEntry(entry, repoRoot) {
   const targetPath = workspacePath(repoRoot, entry.target, `${entry.id}.target`);
   if (!existsSync(targetPath)) fail(`missing Codex step: ${entry.target}`);
   if (entry.ported !== true) fail(`${entry.id} must be marked ported`);
-  validateFinalMetadata(entry);
+  validateFinalMetadata(entry, repoRoot);
   const diagnostics = scanForbiddenTokens(readFileSync(targetPath, "utf8"));
   if (diagnostics.length > 0) {
     fail(`${entry.id} contains forbidden token(s): ${diagnostics.map((item) => item.code).join(", ")}`);
@@ -104,9 +106,9 @@ export function scanForbiddenTokens(content) {
   requireString(content, "content");
   const rules = [
     ["MODEL_SPECIFIC", /\b(?:Claude|Haiku|Sonnet)\b/gi],
-    ["TOOL_SPECIFIC", /\b(?:Read|Write|Edit|Bash|Task|WebFetch|WebSearch)\b/g],
+    ["TOOL_SPECIFIC", /\b(?:Read|Write|Edit|Bash|Task|WebFetch|WebSearch)\b/gi],
     ["CLAUDE_PATH", /\.claude(?:[\\/]|\b)/gi],
-    ["STALE_STEP", /\bstep(?:0?(?:69|81|84)|104|107)\b/gi],
+    ["STALE_STEP", /\bsteps?\s*(?:0?(?:69|81|84)|104|107)\b/gi],
     ["RETIRED_VALIDATOR", RETIRED_VALIDATOR]
   ];
   const diagnostics = [];
@@ -138,14 +140,19 @@ export function validateIndex(index, { repoRoot, requirePorted = false } = {}) {
   if (index.steps.length !== STEP_COUNT) fail(`index must contain exactly ${STEP_COUNT} steps`);
 
   const numbers = new Set();
-  const ids = new Set();
   for (const entry of index.steps) {
     if (!isPlainObject(entry)) fail("step entry must be an object");
     if (!Number.isInteger(entry.number) || entry.number < 1 || entry.number > STEP_COUNT) {
       fail("step numbers must be integers from 1 through 50");
     }
-    if (numbers.has(entry.number)) fail("step numbers must be unique");
     numbers.add(entry.number);
+  }
+  for (let number = 1; number <= STEP_COUNT; number += 1) {
+    if (!numbers.has(number)) fail(`index has a gap at step ${number}`);
+  }
+
+  const ids = new Set();
+  for (const entry of index.steps) {
     const id = canonicalId(entry.number);
     if (entry.id !== id || ids.has(entry.id)) fail(`step ${entry.number} has a non-canonical id`);
     ids.add(entry.id);
@@ -163,11 +170,7 @@ export function validateIndex(index, { repoRoot, requirePorted = false } = {}) {
     const expectedNext = entry.number === STEP_COUNT ? null : canonicalId(entry.number + 1);
     if (entry.next !== expectedNext) fail(`${id}.next must be ${expectedNext ?? "null"}`);
     if (entry.ported !== false && entry.ported !== true) fail(`${id}.ported must be boolean`);
-    if (requirePorted) validatePortedEntry(entry, repoRoot);
-  }
-
-  for (let number = 1; number <= STEP_COUNT; number += 1) {
-    if (!numbers.has(number)) fail(`index has a gap at step ${number}`);
+    if (entry.ported || requirePorted) validatePortedEntry(entry, repoRoot);
   }
   return { steps: index.steps };
 }

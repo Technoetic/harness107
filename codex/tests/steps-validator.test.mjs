@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,6 +36,33 @@ async function fixtureRoot() {
   const root = await mkdtemp(join(tmpdir(), "harness50-steps-"));
   await mkdir(join(root, "assets", "steps"), { recursive: true });
   return root;
+}
+
+async function portedFixture({ acceptance, visualReview = false } = {}) {
+  const root = await fixtureRoot();
+  await mkdir(join(root, "codex", "assets", "steps"), { recursive: true });
+  const steps = Array.from({ length: 50 }, (_, offset) => entry(offset + 1, {
+    inputs: [],
+    outputs: [],
+    requires: [],
+    optional_requires: [],
+    network: false,
+    visual_review: visualReview,
+    acceptance: acceptance ?? [{
+      id: "completion-check",
+      kind: "check",
+      required: true,
+      description: "Records deterministic completion evidence."
+    }],
+    ported: true
+  }));
+  for (const step of steps) {
+    await writeFile(join(root, step.source), `source ${step.number}\n`);
+    await writeFile(join(root, step.target), "Use available capabilities.\n");
+  }
+  const hashes = await recordSourceHashes(root, steps);
+  for (const step of steps) step.source_sha256 = hashes[step.id];
+  return { root, index: { schema_version: 1, steps } };
 }
 
 test("initial map covers every Claude step before runtime work begins", async () => {
@@ -79,20 +106,30 @@ test("validator rejects provider-specific and stale runtime tokens", () => {
     scanForbiddenTokens("run build-validator.ps1").map((item) => item.code),
     ["RETIRED_VALIDATOR"]
   );
+  assert.deepEqual(
+    scanForbiddenTokens("use read to inspect Step 81 and steps 69").map((item) => item.code),
+    ["TOOL_SPECIFIC", "STALE_STEP"]
+  );
 });
 
-test("index rejects gaps and invalid phases", () => {
-  assert.throws(() => validateIndex({
-    schema_version: 1,
-    steps: [entry(1, { next: "step003" })]
-  }, { repoRoot, requirePorted: false }));
-
+test("index rejects invalid phases", () => {
   assert.throws(() => validateIndex({
     schema_version: 1,
     steps: Array.from({ length: 50 }, (_, offset) => entry(offset + 1, {
       phase: offset === 0 ? "unknown" : "preflight"
     }))
   }, { repoRoot, requirePorted: false }), /phase/);
+});
+
+test("index reports the missing number in a 50-row duplicate-number map", async () => {
+  const index = await loadIndex(repoRoot);
+  const invalid = structuredClone(index);
+  invalid.steps[1] = structuredClone(invalid.steps[2]);
+
+  assert.throws(
+    () => validateIndex(invalid, { repoRoot, requirePorted: false }),
+    /index has a gap at step 2/
+  );
 });
 
 test("index rejects an invalid final next pointer", async () => {
@@ -152,6 +189,67 @@ test("unported entries do not require targets but ported entries require complet
     schema_version: 1,
     steps: steps.map((step) => ({ ...step, ported: true }))
   }, { repoRoot: root, requirePorted: true }), /step001.inputs/);
+});
+
+test("ported entries require targets and final metadata even when requirePorted is false", async () => {
+  const { root, index } = await portedFixture();
+  await rm(join(root, index.steps[0].target));
+
+  assert.throws(
+    () => validateIndex(index, { repoRoot: root, requirePorted: false }),
+    /missing Codex step/
+  );
+
+  await writeFile(join(root, index.steps[0].target), "Use available capabilities.\n");
+  index.steps[0].inputs = undefined;
+
+  assert.throws(
+    () => validateIndex(index, { repoRoot: root, requirePorted: false }),
+    /step001.inputs/
+  );
+});
+
+test("ported artifact paths are constrained to the selected repository root", async () => {
+  const { root, index } = await portedFixture({
+    acceptance: [{
+      id: "outside-artifact",
+      kind: "artifact",
+      required: true,
+      description: "Stores a deterministic artifact.",
+      path: "../outside-artifact.md"
+    }]
+  });
+
+  assert.throws(
+    () => validateIndex(index, { repoRoot: root, requirePorted: false }),
+    /artifact path escapes the workspace/
+  );
+});
+
+test("visual review requires a required screenshot artifact and required check", async () => {
+  const { root, index } = await portedFixture({
+    visualReview: true,
+    acceptance: [
+      {
+        id: "screenshot-artifact",
+        kind: "artifact",
+        required: false,
+        description: "Stores a screenshot.",
+        path: "step_archive/screenshots/step001.png"
+      },
+      {
+        id: "visual-check",
+        kind: "check",
+        required: false,
+        description: "Records the inspection outcome."
+      }
+    ]
+  });
+
+  assert.throws(
+    () => validateIndex(index, { repoRoot: root, requirePorted: false }),
+    /required screenshot artifact and required check/
+  );
 });
 
 test("ported batch validation rejects missing Codex files", async () => {
