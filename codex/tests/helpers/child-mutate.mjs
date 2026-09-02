@@ -1,6 +1,6 @@
 import { once } from "node:events";
 
-import { mutateState } from "../../scripts/lib/state-store.mjs";
+import { appendEvent, mutateState } from "../../scripts/lib/state-store.mjs";
 import { withRunLock } from "../../scripts/lib/lock.mjs";
 import { pathsFor } from "../../scripts/lib/paths.mjs";
 
@@ -64,6 +64,13 @@ try {
       send({ type: "result", acquired: true, pid: process.pid });
       await released;
     }, { waitMs: 0 });
+  } else if (mode === "append-event") {
+    await appendEvent(workspaceRoot, {
+      kind: "workflow_paused",
+      workflow_id: "w".repeat(256 * 1024),
+      status: "paused"
+    }, { now: () => new Date("2026-09-02T00:00:00.000Z") });
+    send({ type: "result", acquired: true, pid: process.pid });
   } else {
     await mutateState(workspaceRoot, async state => {
       send({ type: "result", acquired: true, pid: process.pid });

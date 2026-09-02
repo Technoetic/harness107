@@ -12,7 +12,7 @@ import {
 import { basename, join } from "node:path";
 
 import { HarnessError } from "./errors.mjs";
-import { assertRunLockHeld, withRunLock } from "./lock.mjs";
+import { assertRunLockHeld, isRunLockHeld, withRunLock } from "./lock.mjs";
 import { pathsFor } from "./paths.mjs";
 import { parseState } from "./schema.mjs";
 
@@ -125,6 +125,22 @@ function sameNode(left, right) {
   return left.dev === right.dev && left.ino === right.ino;
 }
 
+async function eventPathStat(path, message) {
+  try {
+    return await lstat(path, { bigint: true });
+  } catch {
+    throw new HarnessError("WORKSPACE_PATH_UNSAFE", message);
+  }
+}
+
+async function eventHandleStat(handle, message) {
+  try {
+    return await handle.stat({ bigint: true });
+  } catch {
+    throw new HarnessError("WORKSPACE_PATH_UNSAFE", message);
+  }
+}
+
 function requirePreparedBatch(prepared) {
   if (!preparedEventBatches.has(prepared)) {
     throw new HarnessError("EVENT_INVALID", "event batch must be prepared canonically");
@@ -143,7 +159,11 @@ export function prepareEventBatch(events, { now = () => new Date() } = {}) {
     throw new HarnessError("EVENT_INVALID", "now must return a valid Date");
   }
   const clock = () => new Date(timestamp);
-  const values = events.map(event => Object.freeze(sanitizeEvent(event, clock)));
+  const canonicalTimestamp = timestamp.toISOString();
+  const values = events.map(event => Object.freeze(sanitizeEvent({
+    ...event,
+    timestamp: canonicalTimestamp
+  }, clock)));
   const bytes = Buffer.from(values.map(event => `${JSON.stringify(event)}\n`).join(""), "utf8");
   const prepared = Object.freeze({
     events: Object.freeze(values),
@@ -168,6 +188,12 @@ async function defaultWriteChunk(handle, buffer, offset, length, position) {
   return handle.write(buffer, offset, length, position);
 }
 
+async function withEventWriteLock(workspaceRoot, operation) {
+  const { lockPath } = pathsFor(workspaceRoot);
+  if (isRunLockHeld(lockPath)) return operation();
+  return withRunLock(lockPath, operation);
+}
+
 export async function withPinnedEventBatch(workspaceRoot, prepared, mutation, {
   writeChunk = defaultWriteChunk,
   beforeAppend = async () => {}
@@ -180,45 +206,73 @@ export async function withPinnedEventBatch(workspaceRoot, prepared, mutation, {
   ) {
     throw new HarnessError("EVENT_INVALID", "event batch callbacks must be functions");
   }
-  const { eventsPath } = pathsFor(workspaceRoot);
-  let original;
-  try {
-    original = await lstat(eventsPath, { bigint: true });
-  } catch (error) {
-    if (error?.code === "ENOENT") {
-      throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log must already exist");
+  return withEventWriteLock(workspaceRoot, async () => {
+    const { eventsPath } = pathsFor(workspaceRoot);
+    const original = await eventPathStat(eventsPath, "event log must already exist");
+    if (original.isSymbolicLink() || !original.isFile() || original.nlink !== 1n) {
+      throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log must be an unaliased regular file");
     }
-    throw error;
-  }
-  if (original.isSymbolicLink() || !original.isFile() || original.nlink !== 1n) {
-    throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log must be an unaliased regular file");
-  }
-  let handle;
-  try {
-    handle = await open(eventsPath, "r+");
-    const opened = await handle.stat({ bigint: true });
-    if (!opened.isFile() || opened.nlink !== 1n || !sameNode(original, opened)) {
-      throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log changed before batch mutation");
+    let handle;
+    try {
+      try {
+        handle = await open(eventsPath, "r+");
+      } catch {
+        throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log could not be opened safely");
+      }
+      const opened = await eventHandleStat(handle, "event log could not be inspected safely");
+      if (!opened.isFile() || opened.nlink !== 1n || !sameNode(original, opened)) {
+        throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log changed before batch mutation");
+      }
+      if (opened.size + BigInt(prepared.bytes.length) > BigInt(EVENT_LOG_LIMIT)) {
+        throw new HarnessError("EVENT_LOG_LIMIT", "event log exceeds the byte limit");
+      }
+      const result = await mutation();
+      await beforeAppend();
+      const prewrite = await eventHandleStat(handle, "event log changed during batch mutation");
+      if (
+        !prewrite.isFile() ||
+        prewrite.nlink !== 1n ||
+        !sameNode(original, prewrite) ||
+        prewrite.size !== opened.size
+      ) {
+        throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log changed during batch mutation");
+      }
+      const current = await eventPathStat(eventsPath, "event log changed during batch mutation");
+      if (
+        current.isSymbolicLink() ||
+        !current.isFile() ||
+        current.nlink !== 1n ||
+        !sameNode(original, current) ||
+        current.size !== prewrite.size
+      ) {
+        throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log changed during batch mutation");
+      }
+      if (prewrite.size + BigInt(prepared.bytes.length) > BigInt(EVENT_LOG_LIMIT)) {
+        throw new HarnessError("EVENT_LOG_LIMIT", "event log exceeds the byte limit");
+      }
+      const expectedSize = prewrite.size + BigInt(prepared.bytes.length);
+      await writeAll(handle, prepared.bytes, Number(prewrite.size), writeChunk);
+      await handle.sync();
+      const written = await eventHandleStat(handle, "event log changed during batch append");
+      const final = await eventPathStat(eventsPath, "event log changed during batch append");
+      if (
+        !written.isFile() ||
+        written.nlink !== 1n ||
+        !sameNode(original, written) ||
+        written.size !== expectedSize ||
+        final.isSymbolicLink() ||
+        !final.isFile() ||
+        final.nlink !== 1n ||
+        !sameNode(original, final) ||
+        final.size !== expectedSize
+      ) {
+        throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log changed during batch append");
+      }
+      return result;
+    } finally {
+      await handle?.close().catch(() => {});
     }
-    if (opened.size + BigInt(prepared.bytes.length) > BigInt(EVENT_LOG_LIMIT)) {
-      throw new HarnessError("EVENT_LOG_LIMIT", "event log exceeds the byte limit");
-    }
-    const result = await mutation();
-    await beforeAppend();
-    const current = await lstat(eventsPath, { bigint: true });
-    if (current.isSymbolicLink() || !current.isFile() || current.nlink !== 1n || !sameNode(original, current)) {
-      throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log changed during batch mutation");
-    }
-    await writeAll(handle, prepared.bytes, Number(opened.size), writeChunk);
-    await handle.sync();
-    const final = await lstat(eventsPath, { bigint: true });
-    if (final.isSymbolicLink() || !final.isFile() || final.nlink !== 1n || !sameNode(original, final)) {
-      throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log changed during batch append");
-    }
-    return result;
-  } finally {
-    await handle?.close().catch(() => {});
-  }
+  });
 }
 
 function archiveReason(value) {
@@ -297,21 +351,52 @@ export async function mutateState(workspaceRoot, mutation, lockOptions = {}) {
 export async function appendEvent(workspaceRoot, event, { now = () => new Date() } = {}) {
   const { codexDir, eventsPath } = pathsFor(workspaceRoot);
   const prepared = prepareEventBatch([event], { now });
-  await mkdir(codexDir, { recursive: true });
-  const handle = await open(eventsPath, "a+", 0o600);
-  try {
-    const opened = await handle.stat({ bigint: true });
-    if (!opened.isFile() || opened.nlink !== 1n) {
-      throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log must be an unaliased regular file");
+  await withEventWriteLock(workspaceRoot, async () => {
+    await mkdir(codexDir, { recursive: true });
+    let handle;
+    try {
+      try {
+        handle = await open(eventsPath, "a+", 0o600);
+      } catch {
+        throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log could not be opened safely");
+      }
+      const opened = await eventHandleStat(handle, "event log could not be inspected safely");
+      const current = await eventPathStat(eventsPath, "event log could not be inspected safely");
+      if (
+        !opened.isFile() ||
+        opened.nlink !== 1n ||
+        current.isSymbolicLink() ||
+        !current.isFile() ||
+        current.nlink !== 1n ||
+        !sameNode(opened, current) ||
+        current.size !== opened.size
+      ) {
+        throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log must be an unaliased regular file");
+      }
+      if (opened.size + BigInt(prepared.bytes.length) > BigInt(EVENT_LOG_LIMIT)) {
+        throw new HarnessError("EVENT_LOG_LIMIT", "event log exceeds the byte limit");
+      }
+      const expectedSize = opened.size + BigInt(prepared.bytes.length);
+      await writeAll(handle, prepared.bytes, Number(opened.size), defaultWriteChunk);
+      await handle.sync();
+      const written = await eventHandleStat(handle, "event log changed during append");
+      const final = await eventPathStat(eventsPath, "event log changed during append");
+      if (
+        !written.isFile() ||
+        written.nlink !== 1n ||
+        written.size !== expectedSize ||
+        final.isSymbolicLink() ||
+        !final.isFile() ||
+        final.nlink !== 1n ||
+        !sameNode(written, final) ||
+        final.size !== expectedSize
+      ) {
+        throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log changed during append");
+      }
+    } finally {
+      await handle?.close();
     }
-    if (opened.size + BigInt(prepared.bytes.length) > BigInt(EVENT_LOG_LIMIT)) {
-      throw new HarnessError("EVENT_LOG_LIMIT", "event log exceeds the byte limit");
-    }
-    await writeAll(handle, prepared.bytes, Number(opened.size), defaultWriteChunk);
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
+  });
   return prepared.events[0];
 }
 

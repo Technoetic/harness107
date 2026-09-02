@@ -226,6 +226,11 @@ export function assertRunLockHeld(lockPath) {
   }
 }
 
+export function isRunLockHeld(lockPath) {
+  const owner = lockContext.getStore();
+  return owner?.lockPath === lockPath && owner.active === true;
+}
+
 export async function withRunLock(lockPath, fn, {
   waitMs = 5000,
   staleMs = 30000,

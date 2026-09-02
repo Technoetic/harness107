@@ -339,6 +339,7 @@ test("processStop claims delivery in state and replays it without event authorit
     accepted: false,
     allow_active_stop: false
   });
+  assert.equal(claimed.updated_at, plus(1));
 
   await writeFile(pathsFor(root).eventsPath, "");
   assert.deepEqual(await processStop({
@@ -389,6 +390,107 @@ test("processStop propagates post-commit telemetry path swaps and replays after 
   }), { decision: "block", continuation: initialized.continuation });
 });
 
+test("processStop reports post-commit same-inode growth and preserves state replay", async () => {
+  const root = await makeWorkspace();
+  const initialized = await initWorkflow({
+    workspaceRoot: root,
+    topic: "projection same inode",
+    now: baseTime,
+    idFactory: ids("workflow-projection-growth", "nonce-projection-growth", "generation-projection-growth")
+  });
+  const paths = pathsFor(root);
+  const eventsBefore = await readFile(paths.eventsPath);
+  const external = Buffer.from('{"kind":"external_growth","timestamp":"2026-09-02T00:00:01.000Z"}\n');
+  await assert.rejects(() => processStop({
+    workspaceRoot: root,
+    turnId: "turn-projection-growth",
+    stopHookActive: false,
+    now: plus(1),
+    eventBatchOptions: {
+      beforeAppend: () => writeFile(paths.eventsPath, external, { flag: "a" })
+    }
+  }), error => error.code === "WORKSPACE_PATH_UNSAFE");
+  const committed = await readState(root);
+  assert.equal(committed.stop_delivery.requested_turn_id, "turn-projection-growth");
+  assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(Buffer.concat([eventsBefore, external])));
+
+  assert.deepEqual(await processStop({
+    workspaceRoot: root,
+    turnId: "turn-projection-growth-retry",
+    stopHookActive: false,
+    now: plus(2)
+  }), { decision: "block", continuation: initialized.continuation });
+});
+
+test("processStop reports post-commit event unlink before append and replays after repair", async () => {
+  const root = await makeWorkspace();
+  const initialized = await initWorkflow({
+    workspaceRoot: root,
+    topic: "projection unlink before",
+    now: baseTime,
+    idFactory: ids("workflow-unlink-before", "nonce-unlink-before", "generation-unlink-before")
+  });
+  const paths = pathsFor(root);
+  const eventsBefore = await readFile(paths.eventsPath);
+  await assert.rejects(() => processStop({
+    workspaceRoot: root,
+    turnId: "turn-unlink-before",
+    stopHookActive: false,
+    now: plus(1),
+    eventBatchOptions: {
+      beforeAppend: () => unlink(paths.eventsPath)
+    }
+  }), error => error.code === "WORKSPACE_PATH_UNSAFE");
+  assert.equal((await readState(root)).stop_delivery.requested_turn_id, "turn-unlink-before");
+  assert.equal(existsSync(paths.eventsPath), false);
+
+  await writeFile(paths.eventsPath, eventsBefore);
+  assert.deepEqual(await processStop({
+    workspaceRoot: root,
+    turnId: "turn-unlink-before-retry",
+    stopHookActive: false,
+    now: plus(2)
+  }), { decision: "block", continuation: initialized.continuation });
+});
+
+test("processStop reports post-commit event unlink after append and replays after repair", async () => {
+  const root = await makeWorkspace();
+  const initialized = await initWorkflow({
+    workspaceRoot: root,
+    topic: "projection unlink after",
+    now: baseTime,
+    idFactory: ids("workflow-unlink-after", "nonce-unlink-after", "generation-unlink-after")
+  });
+  const paths = pathsFor(root);
+  const eventsBefore = await readFile(paths.eventsPath);
+  let writes = 0;
+  await assert.rejects(() => processStop({
+    workspaceRoot: root,
+    turnId: "turn-unlink-after",
+    stopHookActive: false,
+    now: plus(1),
+    eventBatchOptions: {
+      writeChunk: async (handle, buffer, offset, length, position) => {
+        const result = await handle.write(buffer, offset, length, position);
+        writes += 1;
+        await unlink(paths.eventsPath);
+        return result;
+      }
+    }
+  }), error => error.code === "WORKSPACE_PATH_UNSAFE");
+  assert.equal(writes, 1);
+  assert.equal((await readState(root)).stop_delivery.requested_turn_id, "turn-unlink-after");
+  assert.equal(existsSync(paths.eventsPath), false);
+
+  await writeFile(paths.eventsPath, eventsBefore);
+  assert.deepEqual(await processStop({
+    workspaceRoot: root,
+    turnId: "turn-unlink-after-retry",
+    stopHookActive: false,
+    now: plus(2)
+  }), { decision: "block", continuation: initialized.continuation });
+});
+
 test("processStop tolerates an ordinary post-commit telemetry fault and replays from state", async () => {
   const root = await makeWorkspace();
   const initialized = await initWorkflow({
@@ -418,6 +520,29 @@ test("processStop tolerates an ordinary post-commit telemetry fault and replays 
     stopHookActive: false,
     now: plus(2)
   }), result);
+});
+
+test("processStop does not misclassify arbitrary post-commit exceptions as telemetry I/O", async () => {
+  const root = await makeWorkspace();
+  await initWorkflow({
+    workspaceRoot: root,
+    topic: "projection exception classification",
+    now: baseTime,
+    idFactory: ids("workflow-projection-exception", "nonce-projection-exception", "generation-projection-exception")
+  });
+  const fixtureError = new Error("fixture programming exception");
+  await assert.rejects(() => processStop({
+    workspaceRoot: root,
+    turnId: "turn-projection-exception",
+    stopHookActive: false,
+    now: plus(1),
+    eventBatchOptions: {
+      beforeAppend: async () => {
+        throw fixtureError;
+      }
+    }
+  }), error => error === fixtureError);
+  assert.equal((await readState(root)).stop_delivery.requested_turn_id, "turn-projection-exception");
 });
 
 test("acceptStopDelivery atomically accepts only the exact requested state marker", async () => {

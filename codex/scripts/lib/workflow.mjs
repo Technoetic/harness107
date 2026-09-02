@@ -1137,6 +1137,19 @@ function stopRequestEvent(state, turnId) {
   };
 }
 
+const OPTIONAL_TELEMETRY_IO_CODES = new Set([
+  "EIO",
+  "ENOSPC",
+  "EDQUOT",
+  "EFBIG",
+  "EROFS",
+  "EVENT_WRITE_FAILED"
+]);
+
+function optionalTelemetryIoFailure(error) {
+  return OPTIONAL_TELEMETRY_IO_CODES.has(error?.code);
+}
+
 async function commitStopTransition(paths, guard, clock, before, state, events, eventBatchOptions = {}) {
   const changed = !sameJson(before, state);
   if (events.length === 0) {
@@ -1154,8 +1167,11 @@ async function commitStopTransition(paths, guard, clock, before, state, events, 
   } catch (error) {
     if (!stateCommitted) throw error;
     if (error?.code === "WORKSPACE_PATH_UNSAFE" || error?.code === "HOOK_WORKSPACE_UNSAFE") throw error;
-    // State is the control authority. Telemetry projection may be repaired or omitted.
-    return state;
+    if (optionalTelemetryIoFailure(error)) {
+      // State is the control authority. Ordinary telemetry I/O may be repaired or omitted.
+      return state;
+    }
+    throw error;
   }
 }
 
@@ -1256,7 +1272,8 @@ export async function processStop({
       }
       state = validateState({
         ...state,
-        stop_delivery: { ...delivery, requested_turn_id: turnId }
+        stop_delivery: { ...delivery, requested_turn_id: turnId },
+        updated_at: clock.iso
       });
       events.push(stopRequestEvent(state, turnId));
       state = await commitStopTransition(paths, guard, clock, before, state, events, eventBatchOptions);

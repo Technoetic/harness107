@@ -417,14 +417,14 @@ test("event append keeps only sanctioned scalar metadata", async () => {
     command: "echo TOP_SECRET",
     prompt: "TOP_SECRET",
     evidence: { raw: "TOP_SECRET" }
-  });
+  }, { now: () => new Date(baseTime) });
   await appendEvent(root, {
     kind: "step_completed",
     timestamp: "2026-09-02T00:00:01.000Z",
     workflow_id: "wf-1",
     step: 1,
     completed_count: 1
-  });
+  }, { now: () => new Date("2026-09-02T00:00:01.000Z") });
 
   const raw = await readFile(pathsFor(root).eventsPath, "utf8");
   assert.equal(raw.includes("TOP_SECRET"), false);
@@ -482,6 +482,19 @@ test("prepared event batches use exact UTF-8 bytes and permit an exact 1 MiB fit
   assert.equal((await readFile(paths.eventsPath, "utf8")).endsWith(expected), true);
 });
 
+test("prepared event batches replace caller timestamps with one canonical timestamp", () => {
+  const prepared = prepareEventBatch([{
+    kind: "workflow_paused",
+    workflow_id: "wf-time-one",
+    timestamp: "2020-01-01T00:00:00.000Z"
+  }, {
+    kind: "workflow_blocked",
+    workflow_id: "wf-time-two",
+    timestamp: "2030-01-01T00:00:00.000Z"
+  }], { now: () => new Date(baseTime) });
+  assert.deepEqual(prepared.events.map(event => event.timestamp), [baseTime, baseTime]);
+});
+
 test("prepared event batches reject one byte over before mutation and loop short writes", async () => {
   const root = await makeWorkspace();
   const paths = pathsFor(root);
@@ -508,6 +521,124 @@ test("prepared event batches reject one byte over before mutation and loop short
   });
   assert.ok(writeCalls > 1);
   assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(prepared.bytes));
+});
+
+test("pinned batches reject same-inode growth without overwriting at a stale offset", async () => {
+  const root = await makeWorkspace();
+  const paths = pathsFor(root);
+  await mkdir(paths.codexDir, { recursive: true });
+  const prepared = prepareEventBatch([{
+    kind: "workflow_paused",
+    workflow_id: "wf-pinned-growth",
+    status: "paused"
+  }], { now: () => new Date(baseTime) });
+  const prefix = '{"kind":"padding","value":"';
+  const suffix = '"}\n';
+  const paddingLength = (1024 * 1024) - prepared.bytes.length - Buffer.byteLength(prefix + suffix);
+  const original = Buffer.from(prefix + "p".repeat(paddingLength) + suffix);
+  const external = Buffer.from('{"kind":"external_growth"}\n');
+  await writeFile(paths.eventsPath, original);
+  let mutationCalls = 0;
+
+  await assert.rejects(() => withPinnedEventBatch(root, prepared, async () => {
+    mutationCalls += 1;
+  }, {
+    beforeAppend: () => writeFile(paths.eventsPath, external, { flag: "a" })
+  }), error => error.code === "WORKSPACE_PATH_UNSAFE");
+
+  assert.equal(mutationCalls, 1);
+  assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(Buffer.concat([original, external])));
+  assert.doesNotMatch(await readFile(paths.eventsPath, "utf8"), /wf-pinned-growth/);
+});
+
+test("pinned batches reject same-inode truncation without writing the batch", async () => {
+  const root = await makeWorkspace();
+  const paths = pathsFor(root);
+  await mkdir(paths.codexDir, { recursive: true });
+  const prepared = prepareEventBatch([{
+    kind: "workflow_paused",
+    workflow_id: "wf-pinned-truncate",
+    status: "paused"
+  }], { now: () => new Date(baseTime) });
+  await writeFile(paths.eventsPath, '{"kind":"original"}\n');
+  let mutationCalls = 0;
+
+  await assert.rejects(() => withPinnedEventBatch(root, prepared, async () => {
+    mutationCalls += 1;
+  }, {
+    beforeAppend: () => writeFile(paths.eventsPath, "")
+  }), error => error.code === "WORKSPACE_PATH_UNSAFE");
+
+  assert.equal(mutationCalls, 1);
+  assert.equal(await readFile(paths.eventsPath, "utf8"), "");
+});
+
+test("concurrent appendEvent callers serialize the exact boundary", async () => {
+  const root = await makeWorkspace();
+  const paths = pathsFor(root);
+  await mkdir(paths.codexDir, { recursive: true });
+  const event = {
+    kind: "workflow_paused",
+    workflow_id: "w".repeat(256 * 1024),
+    status: "paused"
+  };
+  const eventNow = () => new Date(baseTime);
+  const prepared = prepareEventBatch([event], { now: eventNow });
+  const prefix = '{"kind":"padding","value":"';
+  const suffix = '"}\n';
+  const paddingLength = (1024 * 1024) - prepared.bytes.length - Buffer.byteLength(prefix + suffix);
+  await writeFile(paths.eventsPath, prefix + "p".repeat(paddingLength) + suffix);
+
+  const settled = await Promise.allSettled(
+    Array.from({ length: 8 }, () => appendEvent(root, event, { now: eventNow }))
+  );
+  assert.equal(settled.filter(result => result.status === "fulfilled").length, 1);
+  for (const result of settled.filter(result => result.status === "rejected")) {
+    assert.equal(result.reason.code, "EVENT_LOG_LIMIT");
+  }
+  const final = await readFile(paths.eventsPath);
+  assert.equal(final.length, 1024 * 1024);
+  assert.ok(final.subarray(-prepared.bytes.length).equals(prepared.bytes));
+  assert.doesNotThrow(() => {
+    for (const line of final.toString("utf8").trimEnd().split("\n")) JSON.parse(line);
+  });
+});
+
+test("independent appendEvent processes serialize the exact boundary", async () => {
+  const root = await makeWorkspace();
+  const paths = pathsFor(root);
+  await mkdir(paths.codexDir, { recursive: true });
+  const prepared = prepareEventBatch([{
+    kind: "workflow_paused",
+    workflow_id: "w".repeat(256 * 1024),
+    status: "paused"
+  }], { now: () => new Date(baseTime) });
+  const prefix = '{"kind":"padding","value":"';
+  const suffix = '"}\n';
+  const paddingLength = (1024 * 1024) - prepared.bytes.length - Buffer.byteLength(prefix + suffix);
+  await writeFile(paths.eventsPath, prefix + "p".repeat(paddingLength) + suffix);
+  const children = Array.from({ length: 4 }, () => fork(childMutatePath, [root, "append-event"], {
+    stdio: ["ignore", "ignore", "inherit", "ipc"]
+  }));
+  const exits = children.map(child => once(child, "exit"));
+  try {
+    await Promise.all(children.map(child => nextMessage(child, message => message?.type === "ready")));
+    const results = children.map(child => nextMessage(child, message => message?.type === "result"));
+    for (const child of children) child.send({ type: "start" });
+    const settled = await Promise.all(results);
+    assert.equal(settled.filter(result => result.acquired).length, 1);
+    for (const result of settled.filter(result => !result.acquired)) {
+      assert.equal(result.code, "EVENT_LOG_LIMIT");
+    }
+    await Promise.all(exits);
+  } finally {
+    for (const child of children) {
+      if (child.exitCode === null) child.kill();
+    }
+  }
+  const final = await readFile(paths.eventsPath);
+  assert.equal(final.length, 1024 * 1024);
+  assert.ok(final.subarray(-prepared.bytes.length).equals(prepared.bytes));
 });
 
 test("ordinary event appends cannot grow a ledger beyond 1 MiB", async () => {
