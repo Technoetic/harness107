@@ -64,6 +64,27 @@ async function portedFixture({ acceptance, visualReview = false } = {}) {
   return { root, index: { schema_version: 1, steps } };
 }
 
+function parseStepDocument(content) {
+  const normalized = content.replaceAll("\r\n", "\n");
+  const frontmatterMatch = /^---\n([^]*?)\n---(?:\n|$)/.exec(normalized);
+  assert.ok(frontmatterMatch, "step document is missing frontmatter");
+  const frontmatter = Object.fromEntries(frontmatterMatch[1].split("\n").map((line) => {
+    const separator = line.indexOf(":");
+    assert.notEqual(separator, -1, `invalid frontmatter line: ${line}`);
+    return [line.slice(0, separator).trim(), line.slice(separator + 1).trim()];
+  }));
+  const titleMatches = [...normalized.matchAll(/^# Step (\d+) - (.+)$/gm)];
+
+  return {
+    frontmatter,
+    titles: titleMatches.map((match) => ({
+      number: Number(match[1]),
+      title: match[2]
+    })),
+    referencedSteps: [...normalized.matchAll(/\bStep\s+(\d+)\b/g)].map((match) => Number(match[1]))
+  };
+}
+
 test("map covers every source step with canonical boundaries", async () => {
   const index = await loadIndex(repoRoot);
   const report = validateIndex(index, { repoRoot, requirePorted: false });
@@ -114,7 +135,7 @@ test("preflight batch declares the exact Codex-native step contracts", async () 
           id: "topic-contract",
           kind: "artifact",
           required: true,
-          description: "Records the stable tutorial topic, audience, interaction needs, examples, and constraints.",
+          description: "Verifies the existing immutable tutorial topic input has required fields and matches the stated topic and constraints without modification.",
           path: "step_archive/TOPIC/TOPIC.md"
         },
         {
@@ -142,13 +163,13 @@ test("preflight batch declares the exact Codex-native step contracts", async () 
           id: "required-tool-inventory",
           kind: "check",
           required: true,
-          description: "Confirms every required tool or records a blocking failure after bounded retries."
+          description: "Confirms every required tool is available after at most three permitted attempts; diagnostic failures never satisfy this acceptance."
         },
         {
           id: "optional-tool-disposition",
           kind: "check",
           required: true,
-          description: "Records each optional tool as available, unavailable, or skipped."
+          description: "Records each optional tool as OK or an explicit safe SKIP with a reason."
         }
       ],
       ported: true,
@@ -329,6 +350,81 @@ test("preflight outputs have required artifact evidence and safe step instructio
     assert.doesNotMatch(instructions, /\b(?:SessionStart|UserPromptSubmit|PreToolUse|Stop)\b|\bhooks?\b/i);
     assert.doesNotMatch(instructions, /(?:다음|후속)\s*(?:Step|단계)|\bnext\s+step\b/i);
   }
+});
+
+test("preflight documents bind exact frontmatter and titles to only their current step", async () => {
+  const expected = [
+    { name: "step001", phase: "preflight", number: 1, title: "하네스 프리플라이트 체크" },
+    { name: "step002", phase: "preflight", number: 2, title: "프로젝트 분석 및 Context 전략 수립" },
+    { name: "step003", phase: "preflight", number: 3, title: "Playwright 환경 테스트" },
+    { name: "step004", phase: "preflight", number: 4, title: "@axe-core/playwright 환경 설치" },
+    { name: "step005", phase: "preflight", number: 5, title: "c8 코드 커버리지 환경 설치" }
+  ];
+
+  for (const item of expected) {
+    const content = await readFile(
+      join(repoRoot, "codex", "assets", "steps", `${item.name}.md`),
+      "utf8"
+    );
+    assert.deepEqual(parseStepDocument(content), {
+      frontmatter: { name: item.name, phase: item.phase },
+      titles: [{ number: item.number, title: item.title }],
+      referencedSteps: [item.number]
+    });
+  }
+});
+
+test("step001 treats the topic artifact as immutable and fails closed when it is inadequate", async () => {
+  const content = await readFile(
+    join(repoRoot, "codex", "assets", "steps", "step001.md"),
+    "utf8"
+  );
+  const topicSection = /## 1\. 튜토리얼 주제 점검\n([^]*?)\n## 2\./.exec(content)?.[1];
+
+  assert.ok(topicSection, "step001 is missing its topic-input section");
+  assert.match(topicSection, /읽기 전용\s+입력/);
+  assert.match(topicSection, /절대 수정하지 않는다/);
+  assert.match(topicSection, /누락되었거나[^]*불충분[^]*단계를 실패로 처리/);
+  assert.match(topicSection, /파일 바이트를 변경하지 않은 채[^]*보고서/);
+  assert.doesNotMatch(
+    topicSection,
+    /(?:기록한다|작성한다|생성한다|수정한다|보완한다|정규화한다|갱신한다|덮어쓴다)/
+  );
+  assert.doesNotMatch(
+    topicSection,
+    /\b(?:create|write|edit|amend|update|normalize|overwrite)\b/i
+  );
+  assert.doesNotMatch(
+    topicSection,
+    /(?:기록|작성|생성|보완|정규화|갱신|덮어쓰|업데이트)(?:한다|하라|하세요|해라|하십시오)/
+  );
+  assert.doesNotMatch(topicSection, /수정(?!하지|\s*금지)/);
+});
+
+test("step001 never accepts a diagnostic failure as required-tool evidence", async () => {
+  const index = await loadIndex(repoRoot);
+  const requiredInventory = index.steps[0].acceptance.find(
+    (item) => item.id === "required-tool-inventory"
+  );
+  const content = await readFile(
+    join(repoRoot, "codex", "assets", "steps", "step001.md"),
+    "utf8"
+  );
+
+  assert.deepEqual(requiredInventory, {
+    id: "required-tool-inventory",
+    kind: "check",
+    required: true,
+    description: "Confirms every required tool is available after at most three permitted attempts; diagnostic failures never satisfy this acceptance."
+  });
+  assert.match(content, /필수 도구가 모두\s+실제로 사용 가능/);
+  assert.match(content, /하나라도 사용할 수\s+없으면[^]*`required-tool-inventory`[^]*`ok: true`[^]*제출하지\s+않는다/);
+  assert.match(content, /차단 또는 실패 보고서는 진단 자료일 뿐[^]*수락 증거가 아니다/);
+  assert.match(content, /`SKIP`은 선택 도구에만 허용/);
+  assert.doesNotMatch(
+    content,
+    /`required-tool-inventory`:[^\n]*(?:차단|실패)(?:\s|.){0,80}(?:충족|수락|완료)/
+  );
 });
 
 test("validator rejects provider-specific and stale runtime tokens", () => {
