@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -65,7 +64,7 @@ async function portedFixture({ acceptance, visualReview = false } = {}) {
   return { root, index: { schema_version: 1, steps } };
 }
 
-test("initial map covers every Claude step before runtime work begins", async () => {
+test("map covers every source step with canonical boundaries", async () => {
   const index = await loadIndex(repoRoot);
   const report = validateIndex(index, { repoRoot, requirePorted: false });
 
@@ -76,19 +75,260 @@ test("initial map covers every Claude step before runtime work begins", async ()
   assert.equal(report.steps[0].source, "assets/steps/step001.md");
   assert.equal(report.steps[0].target, "codex/assets/steps/step001.md");
   assert.equal(report.steps.at(-1).next, null);
-  assert.ok(report.steps.every((step) => step.ported === false));
+  assert.ok(report.steps.every((step) => typeof step.ported === "boolean"));
 });
 
 test("index records SHA-256 digests of the unmodified Claude source bytes", async () => {
   const index = await loadIndex(repoRoot);
-  const hashes = await recordSourceHashes(repoRoot, index.steps.slice(0, 2));
+  const hashes = await recordSourceHashes(repoRoot, index.steps.slice(0, 5));
 
-  assert.equal(hashes.step001, "e7fbe24200dee3a8435b87cb16fed16e056be8c75c329bb635adec1df3e31849");
-  assert.equal(hashes.step002, "3138e7a161fe488b3c1777da7e72820d1c5d3faa992380f1cbd73a74103b3e89");
-  assert.equal(
-    existsSync(join(repoRoot, index.steps[0].target)),
-    false
-  );
+  assert.deepEqual(hashes, {
+    step001: "e7fbe24200dee3a8435b87cb16fed16e056be8c75c329bb635adec1df3e31849",
+    step002: "3138e7a161fe488b3c1777da7e72820d1c5d3faa992380f1cbd73a74103b3e89",
+    step003: "403cd2247bdde3081e1e07b4dbb066760365a175847c782fb169f170151ab929",
+    step004: "a262f19f844065a166f179983ff4a6e8414c3b6e347265434bd0626939d9af10",
+    step005: "2d7d31b3e3b0390c58c3d0aac01ea96a697eb6bc18a84fdc981363eba35e1a30"
+  });
+});
+
+test("preflight batch declares the exact Codex-native step contracts", async () => {
+  const report = await validateStepBatch(repoRoot, [1, 2, 3, 4, 5]);
+
+  assert.deepEqual(report.steps, [
+    {
+      number: 1,
+      id: "step001",
+      title: "하네스 프리플라이트 체크",
+      phase: "preflight",
+      source: "assets/steps/step001.md",
+      target: "codex/assets/steps/step001.md",
+      source_sha256: "e7fbe24200dee3a8435b87cb16fed16e056be8c75c329bb635adec1df3e31849",
+      inputs: ["step_archive/TOPIC/TOPIC.md"],
+      outputs: ["step_archive/step001_preflight.md"],
+      requires: [],
+      optional_requires: [],
+      network: true,
+      visual_review: false,
+      acceptance: [
+        {
+          id: "topic-contract",
+          kind: "artifact",
+          required: true,
+          description: "Records the stable tutorial topic, audience, interaction needs, examples, and constraints.",
+          path: "step_archive/TOPIC/TOPIC.md"
+        },
+        {
+          id: "preflight-report",
+          kind: "artifact",
+          required: true,
+          description: "Records required and optional tool availability without storing secrets.",
+          path: "step_archive/step001_preflight.md"
+        },
+        {
+          id: "node-runtime-version",
+          kind: "command",
+          required: true,
+          description: "Confirms that the Node.js runtime is available.",
+          command: "node --version"
+        },
+        {
+          id: "npm-cli-version",
+          kind: "command",
+          required: true,
+          description: "Confirms that the npm CLI is available.",
+          command: "npm --version"
+        },
+        {
+          id: "required-tool-inventory",
+          kind: "check",
+          required: true,
+          description: "Confirms every required tool or records a blocking failure after bounded retries."
+        },
+        {
+          id: "optional-tool-disposition",
+          kind: "check",
+          required: true,
+          description: "Records each optional tool as available, unavailable, or skipped."
+        }
+      ],
+      ported: true,
+      next: "step002"
+    },
+    {
+      number: 2,
+      id: "step002",
+      title: "프로젝트 분석 및 Context 전략 수립",
+      phase: "preflight",
+      source: "assets/steps/step002.md",
+      target: "codex/assets/steps/step002.md",
+      source_sha256: "3138e7a161fe488b3c1777da7e72820d1c5d3faa992380f1cbd73a74103b3e89",
+      inputs: [
+        "step_archive/TOPIC/TOPIC.md",
+        "step_archive/step001_preflight.md"
+      ],
+      outputs: ["step_archive/step002_context전략_chunk1.md"],
+      requires: ["step001"],
+      optional_requires: [],
+      network: false,
+      visual_review: false,
+      acceptance: [
+        {
+          id: "context-strategy-chunk-1",
+          kind: "artifact",
+          required: true,
+          description: "Stores the first bounded context-strategy chunk and a manifest for any additional chunks.",
+          path: "step_archive/step002_context전략_chunk1.md"
+        },
+        {
+          id: "project-scale-recorded",
+          kind: "check",
+          required: true,
+          description: "Records project scale, relevant file counts, and the largest relevant files."
+        },
+        {
+          id: "context-chunks-bounded",
+          kind: "check",
+          required: true,
+          description: "Confirms every declared context-strategy chunk is at most 500 lines."
+        }
+      ],
+      ported: true,
+      next: "step003"
+    },
+    {
+      number: 3,
+      id: "step003",
+      title: "Playwright 환경 테스트",
+      phase: "preflight",
+      source: "assets/steps/step003.md",
+      target: "codex/assets/steps/step003.md",
+      source_sha256: "403cd2247bdde3081e1e07b4dbb066760365a175847c782fb169f170151ab929",
+      inputs: ["step_archive/step001_preflight.md"],
+      outputs: [
+        "step_archive/step003_playwright_test.md",
+        "step_archive/screenshots/step003_playwright_smoke.png"
+      ],
+      requires: ["step001"],
+      optional_requires: [],
+      network: true,
+      visual_review: false,
+      acceptance: [
+        {
+          id: "playwright-chromium-smoke",
+          kind: "command",
+          required: true,
+          description: "Captures a Chromium smoke screenshot of a blank page.",
+          command: "npx playwright screenshot --browser chromium about:blank step_archive/screenshots/step003_playwright_smoke.png"
+        },
+        {
+          id: "playwright-smoke-screenshot",
+          kind: "artifact",
+          required: true,
+          description: "Stores the Chromium smoke-test screenshot.",
+          path: "step_archive/screenshots/step003_playwright_smoke.png"
+        },
+        {
+          id: "playwright-environment-report",
+          kind: "artifact",
+          required: true,
+          description: "Records Playwright and Chromium availability plus the smoke-command outcome.",
+          path: "step_archive/step003_playwright_test.md"
+        }
+      ],
+      ported: true,
+      next: "step004"
+    },
+    {
+      number: 4,
+      id: "step004",
+      title: "@axe-core/playwright 환경 설치",
+      phase: "preflight",
+      source: "assets/steps/step004.md",
+      target: "codex/assets/steps/step004.md",
+      source_sha256: "a262f19f844065a166f179983ff4a6e8414c3b6e347265434bd0626939d9af10",
+      inputs: ["step_archive/step003_playwright_test.md"],
+      outputs: ["step_archive/step004_axe_core_test.md"],
+      requires: ["step003"],
+      optional_requires: [],
+      network: true,
+      visual_review: false,
+      acceptance: [
+        {
+          id: "axe-package-resolves",
+          kind: "command",
+          required: true,
+          description: "Confirms that the accessibility package resolves from the project.",
+          command: "node -e \"require.resolve('@axe-core/playwright')\""
+        },
+        {
+          id: "axe-environment-report",
+          kind: "artifact",
+          required: true,
+          description: "Records accessibility-package availability and compatibility findings.",
+          path: "step_archive/step004_axe_core_test.md"
+        },
+        {
+          id: "axe-playwright-compatibility",
+          kind: "check",
+          required: true,
+          description: "Confirms compatibility with the detected Playwright environment."
+        }
+      ],
+      ported: true,
+      next: "step005"
+    },
+    {
+      number: 5,
+      id: "step005",
+      title: "c8 코드 커버리지 환경 설치",
+      phase: "preflight",
+      source: "assets/steps/step005.md",
+      target: "codex/assets/steps/step005.md",
+      source_sha256: "2d7d31b3e3b0390c58c3d0aac01ea96a697eb6bc18a84fdc981363eba35e1a30",
+      inputs: ["step_archive/step001_preflight.md"],
+      outputs: ["step_archive/step005_c8_test.md"],
+      requires: ["step001"],
+      optional_requires: [],
+      network: true,
+      visual_review: false,
+      acceptance: [
+        {
+          id: "c8-version",
+          kind: "command",
+          required: true,
+          description: "Confirms that the c8 CLI is available.",
+          command: "npx c8 --version"
+        },
+        {
+          id: "c8-environment-report",
+          kind: "artifact",
+          required: true,
+          description: "Records c8 availability and the version-command outcome.",
+          path: "step_archive/step005_c8_test.md"
+        }
+      ],
+      ported: true,
+      next: "step006"
+    }
+  ]);
+});
+
+test("preflight outputs have required artifact evidence and safe step instructions", async () => {
+  const report = await validateStepBatch(repoRoot, [1, 2, 3, 4, 5]);
+
+  for (const step of report.steps) {
+    for (const output of step.outputs) {
+      assert.ok(step.acceptance.some((item) => (
+        item.kind === "artifact" && item.required && item.path === output
+      )), `${step.id} output lacks required artifact evidence: ${output}`);
+    }
+
+    const instructions = await readFile(join(repoRoot, step.target), "utf8");
+    assert.deepEqual(scanForbiddenTokens(instructions), []);
+    assert.doesNotMatch(instructions, /(?:progress|state)\.json|\.harness50-codex/i);
+    assert.doesNotMatch(instructions, /\b(?:SessionStart|UserPromptSubmit|PreToolUse|Stop)\b|\bhooks?\b/i);
+    assert.doesNotMatch(instructions, /(?:다음|후속)\s*(?:Step|단계)|\bnext\s+step\b/i);
+  }
 });
 
 test("validator rejects provider-specific and stale runtime tokens", () => {
@@ -147,12 +387,14 @@ test("index rejects source drift without changing a Codex target", async () => {
   const index = await loadIndex(repoRoot);
   const invalid = structuredClone(index);
   invalid.steps[0].source_sha256 = "0".repeat(64);
+  const targetPath = join(repoRoot, invalid.steps[0].target);
+  const before = await readFile(targetPath);
 
   assert.throws(
     () => validateIndex(invalid, { repoRoot, requirePorted: false }),
     /SOURCE_CHANGED_REVIEW_REQUIRED/
   );
-  assert.equal(existsSync(join(repoRoot, invalid.steps[0].target)), false);
+  assert.deepEqual(await readFile(targetPath), before);
 });
 
 test("unported entries do not require targets but ported entries require complete metadata", async () => {
@@ -253,8 +495,15 @@ test("visual review requires a required screenshot artifact and required check",
 });
 
 test("ported batch validation rejects missing Codex files", async () => {
+  const { root, index } = await portedFixture();
+  await writeFile(
+    join(root, "codex", "assets", "steps", "index.json"),
+    `${JSON.stringify(index)}\n`
+  );
+  await rm(join(root, index.steps[0].target));
+
   await assert.rejects(
-    () => validateStepBatch(repoRoot, [1]),
+    () => validateStepBatch(root, [1]),
     /missing Codex step/
   );
 });
