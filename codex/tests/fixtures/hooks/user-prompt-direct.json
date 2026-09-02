@@ -1,0 +1,6 @@
+{
+  "hook_event_name": "UserPromptSubmit",
+  "cwd": "__WORKSPACE__",
+  "turn_id": "turn-user",
+  "prompt": "다른 버그를 먼저 고쳐줘"
+}

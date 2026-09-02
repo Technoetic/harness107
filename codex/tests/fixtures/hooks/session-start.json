@@ -1,0 +1,5 @@
+{
+  "hook_event_name": "SessionStart",
+  "cwd": "__WORKSPACE__",
+  "source": "startup"
+}

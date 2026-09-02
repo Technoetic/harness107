@@ -1,0 +1,6 @@
+{
+  "hook_event_name": "SessionStart",
+  "cwd": "C:\\Harness50 Workspaces\\fixture",
+  "source": "resume",
+  "session_id": "session-windows"
+}

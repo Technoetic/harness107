@@ -1,0 +1,7 @@
+{
+  "hook_event_name": "Stop",
+  "cwd": "__WORKSPACE__",
+  "turn_id": "turn-1",
+  "stop_hook_active": false,
+  "last_assistant_message": "Step 001 complete"
+}
