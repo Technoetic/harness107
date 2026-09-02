@@ -22,6 +22,7 @@ import {
 const INPUT_LIMIT = 1024 * 1024;
 const IMPORT_ACTION = "repair the Claude state or use a separate workspace";
 const cliPath = fileURLToPath(new URL("../scripts/harness-state.mjs", import.meta.url));
+const jsonIoUrl = new URL("../scripts/lib/json-io.mjs", import.meta.url).href;
 
 function evidence(detail = "verified by CLI") {
   return [{
@@ -88,6 +89,102 @@ async function runCliWithClosedStdout(args) {
       stderr: Buffer.concat(stderr).toString("utf8")
     })));
     child.stdout.destroy();
+  });
+}
+
+async function inspectOutputTimeout(mode) {
+  const script = `
+    import { Writable } from "node:stream";
+    import { writeOutput } from ${JSON.stringify(jsonIoUrl)};
+    const mode = ${JSON.stringify(mode)};
+    const secret = "late output secret";
+    const uncaught = [];
+    const unhandled = [];
+    process.on("uncaughtException", error => uncaught.push(error.message));
+    process.on("unhandledRejection", error => unhandled.push(error?.message ?? String(error)));
+    const terminalEvents = [];
+    let pendingCallback = null;
+    const output = new Writable({
+      write(_chunk, _encoding, callback) {
+        pendingCallback = callback;
+      }
+    });
+    output.on("close", () => terminalEvents.push("close"));
+    const baseline = {
+      error: output.listenerCount("error"),
+      close: output.listenerCount("close"),
+      drain: output.listenerCount("drain")
+    };
+    let rejection = null;
+    try {
+      await writeOutput(output, "fixture", { timeoutMs: 5 });
+    } catch (error) {
+      rejection = { code: error.code, message: error.message };
+    }
+    const rejectedBeforeTerminal = terminalEvents.length === 0;
+    const during = {
+      error: output.listenerCount("error"),
+      close: output.listenerCount("close"),
+      drain: output.listenerCount("drain")
+    };
+    if (mode === "callback-error") pendingCallback(new Error(secret));
+    else if (mode === "emitted-error") output.emit("error", new Error(secret));
+    else if (mode === "close") output.destroy();
+    await new Promise(resolve => setTimeout(resolve, 180));
+    const final = {
+      error: output.listenerCount("error"),
+      close: output.listenerCount("close"),
+      drain: output.listenerCount("drain")
+    };
+    process.stdout.write(JSON.stringify({
+      rejection,
+      rejectedBeforeTerminal,
+      baseline,
+      during,
+      final,
+      destroyed: output.destroyed,
+      terminalEvents,
+      uncaught,
+      unhandled
+    }) + "\\n");
+  `;
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["--input-type=module", "--eval", script], {
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true
+    });
+    const stdout = [];
+    const stderr = [];
+    let outputBytes = 0;
+    let settled = false;
+    const finish = callback => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback();
+    };
+    const collect = (target, chunk) => {
+      outputBytes += chunk.length;
+      if (outputBytes > INPUT_LIMIT) {
+        child.kill();
+        finish(() => reject(new Error("output-timeout fixture exceeded its output limit")));
+        return;
+      }
+      target.push(Buffer.from(chunk));
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(() => reject(new Error("output-timeout fixture timed out")));
+    }, 3000);
+    child.once("error", error => finish(() => reject(error)));
+    child.stdout.on("data", chunk => collect(stdout, chunk));
+    child.stderr.on("data", chunk => collect(stderr, chunk));
+    child.once("close", code => finish(() => resolve({
+      code: code ?? 1,
+      stdout: Buffer.concat(stdout).toString("utf8"),
+      stderr: Buffer.concat(stderr).toString("utf8")
+    })));
   });
 }
 
@@ -404,6 +501,34 @@ test("main rejects an output close before completion and removes its temporary l
     drain: output.listenerCount("drain")
   }, baseline);
 });
+
+for (const fixture of [
+  { mode: "callback-error", label: "delayed callback error" },
+  { mode: "emitted-error", label: "delayed emitted error" },
+  { mode: "close", label: "close after timeout" },
+  { mode: "never", label: "non-terminating write" }
+]) {
+  test(`writeOutput guards ${fixture.label} until bounded transport cleanup`, async () => {
+    const result = await inspectOutputTimeout(fixture.mode);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(result.stderr, "");
+    assert.doesNotMatch(result.stderr, /late output secret|Error:|node:internal|json-io\.mjs/i);
+    const inspection = JSON.parse(result.stdout);
+    assert.deepEqual(inspection.rejection, {
+      code: "OUTPUT_STREAM",
+      message: "output stream failed"
+    });
+    assert.equal(inspection.rejectedBeforeTerminal, true);
+    assert.equal(inspection.during.error, inspection.baseline.error + 1);
+    assert.equal(inspection.during.close, inspection.baseline.close + 1);
+    assert.equal(inspection.during.drain, inspection.baseline.drain + 1);
+    assert.deepEqual(inspection.uncaught, []);
+    assert.deepEqual(inspection.unhandled, []);
+    assert.equal(inspection.destroyed, true);
+    assert.deepEqual(inspection.terminalEvents, ["close"]);
+    assert.deepEqual(inspection.final, inspection.baseline);
+  });
+}
 
 test("main supports injected streams and importing the module does not execute the entrypoint", async () => {
   const root = await makeWorkspace();

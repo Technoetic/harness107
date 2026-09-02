@@ -4,6 +4,8 @@ import { HarnessError } from "./errors.mjs";
 
 const DEFAULT_TIMEOUT_MS = 10000;
 const DEFAULT_OUTPUT_TIMEOUT_MS = 1000;
+const OUTPUT_TERMINATION_GRACE_MS = 100;
+const OUTPUT_DESTROY_FALLBACK_MS = 100;
 
 function fail(code, message) {
   throw new HarnessError(code, message);
@@ -104,7 +106,8 @@ export async function writeOutput(stream, value, {
     stream === null || typeof stream !== "object" ||
     typeof stream.write !== "function" ||
     typeof stream.once !== "function" ||
-    typeof stream.removeListener !== "function"
+    typeof stream.removeListener !== "function" ||
+    typeof stream.destroy !== "function"
   ) {
     fail("OUTPUT_STREAM", "output stream failed");
   }
@@ -117,46 +120,96 @@ export async function writeOutput(stream, value, {
   }
 
   await new Promise((resolve, reject) => {
-    let settled = false;
+    let callerSettled = false;
+    let transportSettled = false;
     let writeReturned = false;
     let callbackComplete = false;
     let needsDrain = false;
     let drained = false;
     let callbackFailure = null;
+    let terminationTimer = null;
+    let destroyFallbackTimer = null;
 
-    const cleanup = () => {
-      clearTimeout(timer);
+    const cleanupTransport = () => {
       if (callbackFailure !== null) clearImmediate(callbackFailure);
+      if (terminationTimer !== null) clearTimeout(terminationTimer);
+      if (destroyFallbackTimer !== null) clearTimeout(destroyFallbackTimer);
       stream.removeListener("error", onError);
       stream.removeListener("close", onClose);
       stream.removeListener("drain", onDrain);
     };
-    const finish = error => {
-      if (settled) return;
-      settled = true;
-      cleanup();
+    const settleCaller = error => {
+      if (callerSettled) return;
+      callerSettled = true;
+      clearTimeout(timeoutTimer);
       if (error === null) resolve();
       else reject(new HarnessError("OUTPUT_STREAM", "output stream failed"));
     };
-    const maybeFinish = () => {
-      if (writeReturned && callbackComplete && (!needsDrain || drained)) finish(null);
+    const finishTransport = () => {
+      if (transportSettled) return;
+      transportSettled = true;
+      cleanupTransport();
     };
-    const onError = () => finish(new Error("output error"));
-    const onClose = () => finish(new Error("output closed"));
+    const destroyTransport = () => {
+      if (transportSettled) return;
+      try {
+        if (!stream.destroyed) stream.destroy();
+      } catch {
+        finishTransport();
+        return;
+      }
+      if (stream.closed === true) {
+        finishTransport();
+        return;
+      }
+      destroyFallbackTimer = setTimeout(() => {
+        if (stream.destroyed) finishTransport();
+      }, OUTPUT_DESTROY_FALLBACK_MS);
+    };
+    const scheduleTermination = () => {
+      if (transportSettled || terminationTimer !== null) return;
+      terminationTimer = setTimeout(destroyTransport, OUTPUT_TERMINATION_GRACE_MS);
+    };
+    const maybeFinish = () => {
+      if (!writeReturned || !callbackComplete || (needsDrain && !drained)) return;
+      settleCaller(null);
+      finishTransport();
+    };
+    const onError = () => {
+      settleCaller(new Error("output error"));
+      try {
+        if (!stream.destroyed) stream.destroy();
+      } catch {
+        // The observed error is already the authoritative terminal event.
+      }
+      finishTransport();
+    };
+    const onClose = () => {
+      settleCaller(new Error("output closed"));
+      finishTransport();
+    };
     const onDrain = () => {
       drained = true;
       maybeFinish();
     };
     const onWrite = error => {
-      if (settled) return;
+      if (transportSettled) return;
       if (error) {
-        callbackFailure = setImmediate(() => finish(error));
+        settleCaller(error);
+        callbackFailure = setImmediate(destroyTransport);
         return;
       }
       callbackComplete = true;
+      if (callerSettled) {
+        finishTransport();
+        return;
+      }
       maybeFinish();
     };
-    const timer = setTimeout(() => finish(new Error("output timeout")), timeoutMs);
+    const timeoutTimer = setTimeout(() => {
+      settleCaller(new Error("output timeout"));
+      scheduleTermination();
+    }, timeoutMs);
 
     stream.once("error", onError);
     stream.once("close", onClose);
@@ -166,7 +219,8 @@ export async function writeOutput(stream, value, {
       writeReturned = true;
       maybeFinish();
     } catch (error) {
-      finish(error);
+      settleCaller(error);
+      finishTransport();
     }
   });
 }
