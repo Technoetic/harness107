@@ -11,7 +11,7 @@ import {
 import { basename, join } from "node:path";
 
 import { HarnessError } from "./errors.mjs";
-import { withRunLock } from "./lock.mjs";
+import { assertRunLockHeld, withRunLock } from "./lock.mjs";
 import { pathsFor } from "./paths.mjs";
 import { parseState } from "./schema.mjs";
 
@@ -55,20 +55,24 @@ function delay(milliseconds) {
   return new Promise(resolve => setTimeout(resolve, milliseconds));
 }
 
-async function renameAtomic(sourcePath, destinationPath) {
+async function renameAtomic(sourcePath, destinationPath, {
+  renameFile,
+  platform,
+  retryDelay
+}) {
   for (let attempt = 0; ; attempt += 1) {
     try {
-      await rename(sourcePath, destinationPath);
+      await renameFile(sourcePath, destinationPath);
       return;
     } catch (error) {
       if (
-        process.platform !== "win32" ||
+        platform !== "win32" ||
         !WINDOWS_RENAME_ERRORS.has(error?.code) ||
         attempt >= WINDOWS_RENAME_RETRIES
       ) {
         throw error;
       }
-      await delay(WINDOWS_RENAME_DELAY_MS);
+      await retryDelay(WINDOWS_RENAME_DELAY_MS);
     }
   }
 }
@@ -133,8 +137,16 @@ export async function readState(workspaceRoot) {
   }
 }
 
-export async function writeStateAtomic(workspaceRoot, state, { beforeRename } = {}) {
+export async function writeStateAtomic(workspaceRoot, state, {
+  beforeRename,
+  renameFile = rename,
+  platform = process.platform,
+  retryDelay = delay
+} = {}) {
   const { codexDir, statePath } = pathsFor(workspaceRoot);
+  if (typeof renameFile !== "function" || typeof retryDelay !== "function") {
+    throw new HarnessError("STATE_WRITE_OPTIONS_INVALID", "renameFile and retryDelay must be functions");
+  }
   const canonicalState = parseState(JSON.stringify(state));
   const serialized = `${JSON.stringify(canonicalState, null, 2)}\n`;
   const temporaryPath = join(codexDir, `.${basename(statePath)}.${process.pid}.${randomUUID()}.tmp`);
@@ -154,7 +166,7 @@ export async function writeStateAtomic(workspaceRoot, state, { beforeRename } = 
       }
       await beforeRename({ temporaryPath, statePath });
     }
-    await renameAtomic(temporaryPath, statePath);
+    await renameAtomic(temporaryPath, statePath, { renameFile, platform, retryDelay });
     renamed = true;
     await flushDirectory(codexDir);
     return canonicalState;
@@ -193,11 +205,17 @@ export async function appendEvent(workspaceRoot, event, { now = () => new Date()
   return sanitized;
 }
 
+/** Must be called from the callback of withRunLock() for this workspace. */
 export async function archiveActiveState(workspaceRoot, {
   reason = "archive",
-  now = () => new Date()
+  now = () => new Date(),
+  renameFile = rename
 } = {}) {
   const { codexDir, backupsDir } = pathsFor(workspaceRoot);
+  assertRunLockHeld(pathsFor(workspaceRoot).lockPath);
+  if (typeof renameFile !== "function") {
+    throw new HarnessError("ARCHIVE_OPTIONS_INVALID", "renameFile must be a function");
+  }
   const timestamp = now();
   if (!(timestamp instanceof Date) || Number.isNaN(timestamp.getTime())) {
     throw new HarnessError("ARCHIVE_OPTIONS_INVALID", "now must return a valid Date");
@@ -213,18 +231,35 @@ export async function archiveActiveState(workspaceRoot, {
       if (!activeNames.has(name)) continue;
       const sourcePath = join(codexDir, name);
       const destinationPath = join(archivePath, name);
-      await rename(sourcePath, destinationPath);
+      await renameFile(sourcePath, destinationPath);
       moved.push({ sourcePath, destinationPath });
     }
     await flushDirectory(codexDir);
     await flushDirectory(backupsDir);
     return archivePath;
   } catch (error) {
-    for (const item of moved.reverse()) {
-      await rename(item.destinationPath, item.sourcePath).catch(() => {});
+    const rollbackErrors = [];
+    for (const item of [...moved].reverse()) {
+      try {
+        await renameFile(item.destinationPath, item.sourcePath);
+      } catch (rollbackError) {
+        rollbackErrors.push({
+          name: basename(item.sourcePath),
+          message: rollbackError?.message ?? String(rollbackError)
+        });
+      }
+    }
+    if (rollbackErrors.length > 0) {
+      throw new HarnessError("ARCHIVE_INTEGRITY_ERROR", "active metadata could not be fully restored", {
+        cause: error?.message ?? String(error),
+        archive_path: archivePath,
+        archived_items: rollbackErrors.map(item => item.name),
+        rollback_errors: rollbackErrors
+      });
     }
     throw error;
   } finally {
-    if (moved.length === 0) await rmdir(archivePath).catch(() => {});
+    const remaining = await readdir(archivePath).catch(() => ["unavailable"]);
+    if (remaining.length === 0) await rmdir(archivePath).catch(() => {});
   }
 }

@@ -1,11 +1,13 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { link, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { link, mkdir, open, readFile, readdir, rename, rmdir, unlink } from "node:fs/promises";
 import { hostname } from "node:os";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 import { HarnessError } from "./errors.mjs";
 
 const RETRY_INTERVAL_MS = 25;
+const lockContext = new AsyncLocalStorage();
 
 function lockTimeout(lockPath, waitMs) {
   return new HarnessError("LOCK_TIMEOUT", "timed out waiting for the workflow lock", {
@@ -14,12 +16,19 @@ function lockTimeout(lockPath, waitMs) {
   });
 }
 
-function validOptions(waitMs, staleMs) {
+function validOptions(waitMs, staleMs, beforeReclaim, afterReclaimTransition, beforeRelease) {
   if (!Number.isFinite(waitMs) || waitMs < 0) {
     throw new HarnessError("LOCK_OPTIONS_INVALID", "waitMs must be a non-negative finite number");
   }
   if (!Number.isFinite(staleMs) || staleMs < 0) {
     throw new HarnessError("LOCK_OPTIONS_INVALID", "staleMs must be a non-negative finite number");
+  }
+  if (
+    typeof beforeReclaim !== "function" ||
+    typeof afterReclaimTransition !== "function" ||
+    typeof beforeRelease !== "function"
+  ) {
+    throw new HarnessError("LOCK_OPTIONS_INVALID", "lock transition hooks must be functions");
   }
 }
 
@@ -41,7 +50,7 @@ function parseLockRecord(raw) {
     typeof record.acquired_at !== "string" ||
     Number.isNaN(Date.parse(record.acquired_at)) ||
     typeof record.token !== "string" ||
-    record.token === ""
+    !/^[A-Za-z0-9_-]+$/.test(record.token)
   ) {
     return null;
   }
@@ -61,64 +70,76 @@ function archiveSuffix(date) {
   return date.toISOString().replace(/[:.]/g, "-");
 }
 
-async function restoreMovedLock(archivedPath, lockPath) {
+function claimName(token) {
+  return `owner-${token}.json`;
+}
+
+async function readObservedLock(lockPath) {
+  let names;
   try {
-    await link(archivedPath, lockPath);
-    await unlink(archivedPath);
+    names = await readdir(lockPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return { absent: true };
+    return null;
+  }
+  const claims = names.filter(name => /^owner-[A-Za-z0-9_-]+\.json$/.test(name));
+  if (claims.length !== 1 || names.length !== 1) return null;
+  const claimPath = join(lockPath, claims[0]);
+  let raw;
+  try {
+    raw = await readFile(claimPath, "utf8");
   } catch {
-    // A new owner won the empty path. Never overwrite it while restoring.
+    return null;
+  }
+  const record = parseLockRecord(raw);
+  if (record === null || claimName(record.token) !== claims[0]) return null;
+  return { absent: false, claimPath, record };
+}
+
+async function restoreClaim(archivedPath, claimPath) {
+  try {
+    await link(archivedPath, claimPath);
+    await unlink(archivedPath);
+    return true;
+  } catch {
+    return false;
   }
 }
 
-async function reclaimIfSafe(lockPath, { staleMs, now }) {
-  let observedRaw;
-  try {
-    observedRaw = await readFile(lockPath, "utf8");
-  } catch (error) {
-    if (error?.code === "ENOENT") return true;
-    return false;
-  }
+async function reclaimIfSafe(lockPath, { staleMs, now, beforeReclaim, afterReclaimTransition }) {
+  const observed = await readObservedLock(lockPath);
+  if (observed?.absent) return true;
+  if (observed === null) return false;
 
-  const record = parseLockRecord(observedRaw);
   const currentTime = now();
   if (
-    record === null ||
     !(currentTime instanceof Date) ||
     Number.isNaN(currentTime.getTime()) ||
-    record.hostname !== hostname() ||
-    currentTime.getTime() - Date.parse(record.acquired_at) <= staleMs ||
-    !processIsProvablyAbsent(record.pid)
+    observed.record.hostname !== hostname() ||
+    currentTime.getTime() - Date.parse(observed.record.acquired_at) <= staleMs ||
+    !processIsProvablyAbsent(observed.record.pid)
   ) {
     return false;
   }
 
-  let latestRaw;
+  await beforeReclaim(observed.record);
+  const archivedPath = `${lockPath}.stale-${archiveSuffix(currentTime)}-${observed.record.token}.json`;
   try {
-    latestRaw = await readFile(lockPath, "utf8");
+    await rename(observed.claimPath, archivedPath);
   } catch (error) {
-    return error?.code === "ENOENT";
+    if (error?.code === "ENOENT") return false;
+    throw error;
   }
-  if (latestRaw !== observedRaw) return false;
+  await afterReclaimTransition(observed.record);
 
-  const archivedPath = `${lockPath}.stale-${archiveSuffix(currentTime)}-${randomUUID()}`;
   try {
-    await rename(lockPath, archivedPath);
+    await rmdir(lockPath);
+    return true;
   } catch (error) {
-    return error?.code === "ENOENT";
-  }
-
-  let movedRaw;
-  try {
-    movedRaw = await readFile(archivedPath, "utf8");
-  } catch {
-    await restoreMovedLock(archivedPath, lockPath);
+    if (error?.code === "ENOENT") return true;
+    await restoreClaim(archivedPath, observed.claimPath);
     return false;
   }
-  if (movedRaw !== observedRaw) {
-    await restoreMovedLock(archivedPath, lockPath);
-    return false;
-  }
-  return true;
 }
 
 async function createLock(lockPath, now) {
@@ -132,24 +153,30 @@ async function createLock(lockPath, now) {
     acquired_at: acquiredAt.toISOString(),
     token: randomUUID()
   };
+  const claimPath = join(lockPath, claimName(record.token));
   let handle;
+  let directoryCreated = false;
   try {
-    handle = await open(lockPath, "wx", 0o600);
+    await mkdir(lockPath, { mode: 0o700 });
+    directoryCreated = true;
+    handle = await open(claimPath, "wx", 0o600);
     await handle.writeFile(`${JSON.stringify(record)}\n`, "utf8");
     await handle.sync();
     await handle.close();
-    return { lockPath, token: record.token };
+    return { lockPath, claimPath, token: record.token, active: true };
   } catch (error) {
-    if (handle) {
-      await handle.close().catch(() => {});
-      await unlink(lockPath).catch(() => {});
+    await handle?.close().catch(() => {});
+    if (directoryCreated) {
+      await unlink(claimPath).catch(() => {});
+      await rmdir(lockPath).catch(() => {});
     }
     throw error;
   }
 }
 
-async function acquireLock(lockPath, { waitMs, staleMs, now }) {
-  validOptions(waitMs, staleMs);
+async function acquireLock(lockPath, options) {
+  const { waitMs, staleMs, now, beforeReclaim, afterReclaimTransition, beforeRelease } = options;
+  validOptions(waitMs, staleMs, beforeReclaim, afterReclaimTransition, beforeRelease);
   await mkdir(dirname(lockPath), { recursive: true });
   const deadline = Date.now() + waitMs;
 
@@ -160,40 +187,62 @@ async function acquireLock(lockPath, { waitMs, staleMs, now }) {
       if (error?.code !== "EEXIST") throw error;
     }
 
-    if (await reclaimIfSafe(lockPath, { staleMs, now })) continue;
+    if (await reclaimIfSafe(lockPath, { staleMs, now, beforeReclaim, afterReclaimTransition })) continue;
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw lockTimeout(lockPath, waitMs);
     await new Promise(resolve => setTimeout(resolve, Math.min(RETRY_INTERVAL_MS, remaining)));
   }
 }
 
-async function releaseLock(owner) {
-  let raw;
+async function releaseLock(owner, beforeRelease) {
+  await beforeRelease(owner);
+  const retiredPath = `${owner.lockPath}.released-${owner.token}.json`;
   try {
-    raw = await readFile(owner.lockPath, "utf8");
+    await rename(owner.claimPath, retiredPath);
   } catch (error) {
     if (error?.code === "ENOENT") return;
     throw error;
   }
-  const record = parseLockRecord(raw);
-  if (record?.token !== owner.token) return;
-  await unlink(owner.lockPath).catch(error => {
+
+  try {
+    await rmdir(owner.lockPath);
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      await restoreClaim(retiredPath, owner.claimPath);
+      throw new HarnessError("LOCK_RELEASE_INTEGRITY_ERROR", "could not remove the owned lock directory", {
+        cause: error.message
+      });
+    }
+  }
+  await unlink(retiredPath).catch(error => {
     if (error?.code !== "ENOENT") throw error;
   });
+}
+
+export function assertRunLockHeld(lockPath) {
+  const owner = lockContext.getStore();
+  if (owner?.lockPath !== lockPath || owner.active !== true) {
+    throw new HarnessError("ARCHIVE_LOCK_REQUIRED", "active-state archival requires the workspace run lock");
+  }
 }
 
 export async function withRunLock(lockPath, fn, {
   waitMs = 5000,
   staleMs = 30000,
-  now = () => new Date()
+  now = () => new Date(),
+  beforeReclaim = async () => {},
+  afterReclaimTransition = async () => {},
+  beforeRelease = async () => {}
 } = {}) {
   if (typeof fn !== "function") {
     throw new HarnessError("LOCK_CALLBACK_INVALID", "lock callback must be a function");
   }
-  const owner = await acquireLock(lockPath, { waitMs, staleMs, now });
+  const options = { waitMs, staleMs, now, beforeReclaim, afterReclaimTransition, beforeRelease };
+  const owner = await acquireLock(lockPath, options);
   try {
-    return await fn();
+    return await lockContext.run(owner, fn);
   } finally {
-    await releaseLock(owner);
+    owner.active = false;
+    await releaseLock(owner, beforeRelease);
   }
 }
