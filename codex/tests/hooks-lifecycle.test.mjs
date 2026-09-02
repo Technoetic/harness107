@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { linkSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
-import { link, lstat, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { handleSessionStart } from "../hooks/session-start.mjs";
@@ -11,6 +11,7 @@ import { handleStop } from "../hooks/stop.mjs";
 import { handleUserPromptSubmit } from "../hooks/user-prompt-submit.mjs";
 import { beginStep, completeStep, initWorkflow } from "../scripts/lib/workflow.mjs";
 import { pathsFor } from "../scripts/lib/paths.mjs";
+import { writeReceiptExclusive } from "../scripts/lib/receipts.mjs";
 import { readState, writeStateAtomic } from "../scripts/lib/state-store.mjs";
 import { runHook } from "./helpers/run-hook.mjs";
 import {
@@ -356,6 +357,7 @@ test("SessionStart missing and completed workflows return the documented empty r
     completed_steps: Array.from({ length: 50 }, (_, index) => index + 1),
     current_attempt: null,
     continuation: null,
+    stop_delivery: null,
     owner: null,
     completed_at: now
   });
@@ -635,6 +637,31 @@ test("a lost Stop output is re-delivered idempotently until its marker is accept
   ).length, 1);
 });
 
+test("marker acceptance is authorized by state when audit telemetry is absent", async () => {
+  const root = await makeWorkspace();
+  const initialized = await init(root, "state-authority-prompt");
+  const stopped = await runHook("stop", {
+    hook_event_name: "Stop",
+    cwd: root,
+    turn_id: "turn-state-authority-request",
+    stop_hook_active: false,
+    last_assistant_message: null
+  });
+  assert.equal(stopped.output.reason, markerFor(initialized.continuation));
+  await writeFile(pathsFor(root).eventsPath, "");
+
+  assertEmptySuccess(await runHook("user-prompt-submit", {
+    hook_event_name: "UserPromptSubmit",
+    cwd: root,
+    turn_id: "turn-state-authority-prompt",
+    prompt: stopped.output.reason
+  }));
+  const state = await readState(root);
+  assert.equal(state.status, "running");
+  assert.equal(state.stop_delivery.accepted, true);
+  assert.equal(state.stop_delivery.requested_turn_id, "turn-state-authority-request");
+});
+
 test("a directly consumed Stop request closes replay and fails the active attempt once", async t => {
   for (const stopHookActive of [false, true]) {
     await t.test(`stop_hook_active=${stopHookActive}`, async () => {
@@ -693,7 +720,120 @@ test("a directly consumed Stop request closes replay and fails the active attemp
   }
 });
 
-test("malformed authoritative lifecycle records fail safe without markers or mutation", async t => {
+test("the exact consumed request turn follows active-loop semantics without double failure", async t => {
+  for (const stopHookActive of [false, true]) {
+    await t.test(`stop_hook_active=${stopHookActive}`, async () => {
+      const root = await makeWorkspace();
+      const initialized = await init(root, `same-turn-${stopHookActive}`);
+      const requestTurn = `turn-same-consumed-${stopHookActive}`;
+      const first = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: requestTurn,
+        stop_hook_active: false,
+        last_assistant_message: null
+      });
+      assert.equal(first.output.decision, "block");
+      const started = await begin(root, await readState(root), `same-turn-attempt-${stopHookActive}`);
+
+      const stopped = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: requestTurn,
+        stop_hook_active: stopHookActive,
+        last_assistant_message: null
+      });
+      const state = await readState(root);
+      if (stopHookActive) {
+        assert.equal(stopped.output.decision, "block");
+        assert.equal(state.current_attempt.id, started.attempt.id);
+        assert.equal(state.current_attempt.failure_recorded, true);
+        assert.equal(state.consecutive_failures, 1);
+        assert.equal(stopped.output.reason, markerFor(state.continuation));
+      } else {
+        assertEmptySuccess(stopped);
+        assert.equal(state.current_attempt.failure_recorded, false);
+        assert.equal(state.consecutive_failures, 0);
+      }
+      const repeated = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: requestTurn,
+        stop_hook_active: stopHookActive,
+        last_assistant_message: null
+      });
+      if (stopHookActive || !state.current_attempt.failure_recorded) assertEmptySuccess(repeated);
+      assert.ok((await readState(root)).consecutive_failures <= 1);
+    });
+  }
+});
+
+test("accepted consumed request turns use the same active-loop rule", async t => {
+  for (const stopHookActive of [false, true]) {
+    await t.test(`stop_hook_active=${stopHookActive}`, async () => {
+      const root = await makeWorkspace();
+      const initialized = await init(root, `accepted-same-turn-${stopHookActive}`);
+      const turnId = `turn-accepted-same-${stopHookActive}`;
+      const first = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: turnId,
+        stop_hook_active: false,
+        last_assistant_message: null
+      });
+      assertEmptySuccess(await runHook("user-prompt-submit", {
+        hook_event_name: "UserPromptSubmit",
+        cwd: root,
+        turn_id: "turn-accept-same",
+        prompt: first.output.reason
+      }));
+      await begin(root, initialized, `accepted-same-attempt-${stopHookActive}`);
+      const stopped = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: turnId,
+        stop_hook_active: stopHookActive,
+        last_assistant_message: null
+      });
+      const state = await readState(root);
+      assert.equal(state.current_attempt.failure_recorded, stopHookActive);
+      assert.equal(state.consecutive_failures, stopHookActive ? 1 : 0);
+      if (stopHookActive) assert.equal(stopped.output.decision, "block");
+      else assertEmptySuccess(stopped);
+    });
+  }
+});
+
+test("receipt-first Stop returns the claimed next-step marker in one call", async () => {
+  const root = await makeWorkspace();
+  const initialized = await init(root, "receipt-first-hook");
+  const started = await begin(root, initialized, "receipt-first-hook-attempt");
+  await writeReceiptExclusive(root, {
+    schema_version: 1,
+    workflow_id: initialized.workflow_id,
+    step: 1,
+    attempt_id: started.attempt.id,
+    provenance: "codex-verified",
+    completed_at: new Date(Math.max(Date.now(), Date.parse(initialized.updated_at) + 2)).toISOString(),
+    summary: "durable receipt before Stop",
+    evidence: [{ acceptance_id: "receipt-first", kind: "check", detail: "durable", ok: true }]
+  });
+  const result = await runHook("stop", {
+    hook_event_name: "Stop",
+    cwd: root,
+    turn_id: "turn-receipt-first-hook",
+    stop_hook_active: true,
+    last_assistant_message: null
+  });
+  const state = await readState(root);
+  assert.equal(result.output.decision, "block");
+  assert.equal(state.current_step, 2);
+  assert.deepEqual(state.completed_steps, [1]);
+  assert.equal(result.output.reason, markerFor(state.continuation));
+  assert.equal(state.stop_delivery.requested_turn_id, "turn-receipt-first-hook");
+});
+
+test("malformed lifecycle telemetry cannot override current state delivery", async t => {
   const cases = [
     ["missing boundary timestamp", lifecycleEvents => {
       delete lifecycleEvents[0].timestamp;
@@ -785,8 +925,6 @@ test("malformed authoritative lifecycle records fail safe without markers or mut
       const lifecycleEvents = await events(root);
       mutate(lifecycleEvents, state);
       await writeRawLifecycleEvents(root, lifecycleEvents);
-      const stateBefore = await readFile(pathsFor(root).statePath);
-      const eventsBefore = await readFile(pathsFor(root).eventsPath);
       const result = await runHook("stop", {
         hook_event_name: "Stop",
         cwd: root,
@@ -794,15 +932,17 @@ test("malformed authoritative lifecycle records fail safe without markers or mut
         stop_hook_active: false,
         last_assistant_message: "secret ledger diagnostic input"
       });
-      assertEmptySuccess(result);
+      assert.deepEqual(result.output, {
+        decision: "block",
+        reason: markerFor(state.continuation)
+      });
       assert.doesNotMatch(result.stdout, /secret|ledger diagnostic/);
-      assert.ok(Buffer.from(await readFile(pathsFor(root).statePath)).equals(stateBefore));
-      assert.ok(Buffer.from(await readFile(pathsFor(root).eventsPath)).equals(eventsBefore));
+      assert.equal((await readState(root)).stop_delivery.requested_turn_id, "turn-malformed-ledger");
     });
   }
 });
 
-test("request records after their current attempt consumption fail safe", async () => {
+test("reordered request telemetry cannot suppress current-attempt handling", async () => {
   const root = await makeWorkspace();
   const initialized = await init(root, "request-after-consume");
   const requested = await runHook("stop", {
@@ -829,21 +969,18 @@ test("request records after their current attempt consumption fail safe", async 
   lifecycleEvents.splice(relocatedConsumed + 1, 0, request);
   assert.ok(consumedIndex > requestIndex);
   await writeRawLifecycleEvents(root, lifecycleEvents);
-  const stateBefore = await readFile(pathsFor(root).statePath);
-  const eventsBefore = await readFile(pathsFor(root).eventsPath);
-
-  assertEmptySuccess(await runHook("stop", {
+  const stopped = await runHook("stop", {
     hook_event_name: "Stop",
     cwd: root,
     turn_id: "turn-after-malformed-order",
     stop_hook_active: false,
     last_assistant_message: null
-  }));
-  assert.ok(Buffer.from(await readFile(pathsFor(root).statePath)).equals(stateBefore));
-  assert.ok(Buffer.from(await readFile(pathsFor(root).eventsPath)).equals(eventsBefore));
+  });
+  assert.equal(stopped.output.decision, "block");
+  assert.equal((await readState(root)).current_attempt.failure_recorded, true);
 });
 
-test("malformed consumed and accepted records cannot authorize active-attempt handling", async t => {
+test("malformed consumed and accepted telemetry cannot suppress active-attempt handling", async t => {
   const cases = [
     ["missing consumed timestamp", lifecycleEvents => {
       const consumed = lifecycleEvents.find(event => event.kind === "continuation_consumed");
@@ -906,18 +1043,15 @@ test("malformed consumed and accepted records cannot authorize active-attempt ha
       const lifecycleEvents = await events(root);
       mutate(lifecycleEvents, state);
       await writeRawLifecycleEvents(root, lifecycleEvents);
-      const stateBefore = await readFile(pathsFor(root).statePath);
-      const eventsBefore = await readFile(pathsFor(root).eventsPath);
-
-      assertEmptySuccess(await runHook("stop", {
+      const stopped = await runHook("stop", {
         hook_event_name: "Stop",
         cwd: root,
         turn_id: "turn-record-shape-stop",
         stop_hook_active: false,
         last_assistant_message: null
-      }));
-      assert.ok(Buffer.from(await readFile(pathsFor(root).statePath)).equals(stateBefore));
-      assert.ok(Buffer.from(await readFile(pathsFor(root).eventsPath)).equals(eventsBefore));
+      });
+      assert.equal(stopped.output.decision, "block");
+      assert.equal((await readState(root)).current_attempt.failure_recorded, true);
     });
   }
 });
@@ -938,7 +1072,7 @@ test("a schema-valid empty Stop turn never publishes a noncanonical request", as
   assert.ok(Buffer.from(await readFile(pathsFor(root).eventsPath)).equals(eventsBefore));
 });
 
-test("event-first Stop requests replay and accept with null or stale legacy state turn IDs", async t => {
+test("state delivery replay and acceptance ignore the legacy stop turn field", async t => {
   for (const legacyTurnId of [null, "legacy-stale-turn"]) {
     await t.test(String(legacyTurnId), async () => {
       const root = await makeWorkspace();
@@ -990,7 +1124,7 @@ test("event-first Stop requests replay and accept with null or stale legacy stat
   }
 });
 
-test("the latest equal-shape continuation boundary excludes stale requests and acceptances", async t => {
+test("state delivery ignores stale same-shape requests and acceptances in telemetry", async t => {
   for (const acceptOldRequest of [false, true]) {
     await t.test(acceptOldRequest ? "accepted stale request" : "pending stale request", async () => {
       const root = await makeWorkspace();
@@ -1019,6 +1153,12 @@ test("the latest equal-shape continuation boundary excludes stale requests and a
       await writeStateAtomic(root, {
         ...prior,
         continuation,
+        stop_delivery: {
+          generation_id: `new-delivery-${acceptOldRequest}`,
+          requested_turn_id: null,
+          accepted: false,
+          allow_active_stop: true
+        },
         last_stop_turn_id: "turn-old-generation"
       });
       await appendRawLifecycleEvent(root, {
@@ -1041,7 +1181,7 @@ test("the latest equal-shape continuation boundary excludes stale requests and a
         decision: "block",
         reason: markerFor(continuation)
       });
-      assert.ok(Buffer.from(await readFile(pathsFor(root).statePath)).equals(stateBeforeStop));
+      assert.ok(!Buffer.from(await readFile(pathsFor(root).statePath)).equals(stateBeforeStop));
       const requests = (await events(root)).filter(event =>
         event.kind === "stop_continuation_requested"
       );
@@ -1071,7 +1211,7 @@ test("the latest equal-shape continuation boundary excludes stale requests and a
   }
 });
 
-test("Stop fails safe when the current continuation boundary is absent or request identity is ambiguous", async t => {
+test("missing or ambiguous telemetry does not suppress a state-authorized Stop request", async t => {
   for (const mode of ["absent-boundary", "ambiguous-request"]) {
     await t.test(mode, async () => {
       const root = await makeWorkspace();
@@ -1096,22 +1236,23 @@ test("Stop fails safe when the current continuation boundary is absent or reques
           turn_id: "turn-ambiguous-two"
         });
       }
-      const stateBefore = await readFile(pathsFor(root).statePath);
-      const eventsBefore = await readFile(pathsFor(root).eventsPath);
-      assertEmptySuccess(await runHook("stop", {
+      const result = await runHook("stop", {
         hook_event_name: "Stop",
         cwd: root,
         turn_id: "turn-ledger-invalid",
         stop_hook_active: false,
         last_assistant_message: null
-      }));
-      assert.ok(Buffer.from(await readFile(pathsFor(root).statePath)).equals(stateBefore));
-      assert.ok(Buffer.from(await readFile(pathsFor(root).eventsPath)).equals(eventsBefore));
+      });
+      assert.deepEqual(result.output, {
+        decision: "block",
+        reason: markerFor(initialized.continuation)
+      });
+      assert.equal((await readState(root)).stop_delivery.requested_turn_id, "turn-ledger-invalid");
     });
   }
 });
 
-test("an independent post-state watcher cannot split Stop continuation publication", async () => {
+test("a post-state telemetry fault leaves authoritative delivery replayable after repair", async () => {
   const root = await makeWorkspace();
   const initialized = await init(root, "post-state-watcher");
   const paths = pathsFor(root);
@@ -1133,19 +1274,25 @@ test("an independent post-state watcher cannot split Stop continuation publicati
   const swap = stateAfter.equals(stateBefore) ? null : await swapper.swap;
   await swapper.stop();
 
-  assert.equal(swap, null);
-  assert.ok(Buffer.from(stateAfter).equals(stateBefore));
-  assert.deepEqual(result, {
+  assert.deepEqual(swap, { type: "swapped" });
+  assert.deepEqual(result, { error_code: "WORKSPACE_PATH_UNSAFE" });
+  const committed = JSON.parse(stateAfter);
+  assert.equal(committed.stop_delivery.requested_turn_id, "turn-post-state-watcher");
+  assert.deepEqual(await receiptSnapshot(root), receiptsBefore);
+  assert.ok((await readFile(swapper.backupPath)).subarray(0, eventsBefore.length).equals(eventsBefore));
+  assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(replacement));
+
+  await unlink(paths.eventsPath);
+  await rename(swapper.backupPath, paths.eventsPath);
+  const replay = await handleStop({
+    turn_id: "turn-post-state-retry",
+    stop_hook_active: false
+  }, { workspaceRoot: root });
+  assert.deepEqual(replay, {
     decision: "block",
     reason: markerFor(initialized.continuation)
   });
-  assert.deepEqual(await receiptSnapshot(root), receiptsBefore);
-  await assert.rejects(readFile(swapper.backupPath), error => error?.code === "ENOENT");
-  const currentEvents = await readFile(paths.eventsPath);
-  assert.ok(!Buffer.from(currentEvents).equals(eventsBefore));
-  assert.equal((await events(root)).filter(event =>
-    event.kind === "stop_continuation_requested"
-  ).length, 1);
+  assert.equal((await readState(root)).stop_delivery.requested_turn_id, "turn-post-state-watcher");
 });
 
 test("Stop rejects unsafe event targets before changing state or receipts", async t => {
@@ -1213,6 +1360,17 @@ test("Stop rejects a full event ledger before changing state or receipts", async
     turn_id: "turn-preflight-capacity",
     stop_hook_active: false
   }, { workspaceRoot: root }), {});
+  const wireResult = await runHook("stop", {
+    hook_event_name: "Stop",
+    cwd: root,
+    turn_id: "turn-preflight-capacity-wire",
+    stop_hook_active: false,
+    last_assistant_message: null
+  });
+  assert.equal(wireResult.code, 0);
+  assert.equal(wireResult.stdout, "{}\n");
+  assert.deepEqual(wireResult.output, {});
+  assert.doesNotMatch(wireResult.stderr, /EVENT_LOG_LIMIT|event log|1048576/);
 
   assert.ok(Buffer.from(await readFile(paths.statePath)).equals(stateBefore));
   assert.deepEqual(await receiptSnapshot(root), receiptsBefore);
@@ -1394,6 +1552,7 @@ test("paused blocked completed corrupt and missing Stop states always release", 
         current_step: null,
         completed_steps: Array.from({ length: 50 }, (_, index) => index + 1),
         continuation: null,
+        stop_delivery: null,
         completed_at: now
       });
     } else {
@@ -1401,6 +1560,7 @@ test("paused blocked completed corrupt and missing Stop states always release", 
         ...state,
         status,
         continuation: null,
+        stop_delivery: null,
         blocked_reason: status === "blocked" ? "TEST_BLOCK" : null
       });
     }

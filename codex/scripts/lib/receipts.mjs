@@ -416,6 +416,7 @@ function blockedReconciliation(state, reason, prefixReceipts = []) {
       consecutive_failures: 0,
       blocked_reason: reason,
       continuation: null,
+      stop_delivery: null,
       imported_from: importedFrom,
       completed_at: null
     }),
@@ -441,6 +442,7 @@ function reconciledState(state, prefixReceipts) {
     current_attempt: recoveredForward ? null : state.current_attempt,
     consecutive_failures: recoveredForward ? 0 : state.consecutive_failures,
     continuation: recoveredForward ? null : state.continuation,
+    stop_delivery: recoveredForward ? null : state.stop_delivery,
     status,
     blocked_reason: clearsBlockedReason ? null : state.blocked_reason,
     completed_at: completed ? prefixReceipts.at(-1).completed_at : null

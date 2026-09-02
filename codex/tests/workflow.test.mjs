@@ -42,6 +42,7 @@ import {
 import { createInitialState, validateState } from "../scripts/lib/schema.mjs";
 import { readState, writeStateAtomic } from "../scripts/lib/state-store.mjs";
 import {
+  acceptStopDelivery,
   beginStep,
   completeStep,
   consumeContinuation,
@@ -49,6 +50,7 @@ import {
   initWorkflow,
   issueContinuation,
   pauseWorkflow,
+  processStop,
   reconcileWorkflow,
   resetWorkflow,
   resumeWorkflow,
@@ -292,9 +294,11 @@ test("anonymous ownership stays null and transfer invalidates attempt and contin
 test("continuations are one-use and bind workflow step and receipt count", () => {
   const issued = issueContinuation(initialState(), { now: baseTime, nonce: "nonce-1" });
   const marker = { ...issued.continuation };
-  assert.equal(consumeContinuation(issued, { marker }).continuation, null);
+  const consumed = consumeContinuation(issued, { marker });
+  assert.equal(consumed.continuation, null);
+  assert.equal(consumed.stop_delivery, null);
   assert.throws(
-    () => consumeContinuation({ ...issued, continuation: null }, { marker }),
+    () => consumeContinuation({ ...issued, continuation: null, stop_delivery: null }, { marker }),
     error => error.code === "CONTINUATION_REPLAY"
   );
   for (const [field, value, code] of [
@@ -311,6 +315,374 @@ test("continuations are one-use and bind workflow step and receipt count", () =>
     () => consumeContinuation(issued, { marker: { ...marker, nonce: "nonce-wrong" } }),
     error => error.code === "CONTINUATION_REPLAY"
   );
+});
+
+test("processStop claims delivery in state and replays it without event authority", async () => {
+  const root = await makeWorkspace();
+  const initialized = await initWorkflow({
+    workspaceRoot: root,
+    topic: "state delivery",
+    now: baseTime,
+    idFactory: ids("workflow-delivery", "nonce-delivery", "generation-delivery")
+  });
+  const first = await processStop({
+    workspaceRoot: root,
+    turnId: "turn-delivery",
+    stopHookActive: false,
+    now: plus(1)
+  });
+  assert.deepEqual(first, { decision: "block", continuation: initialized.continuation });
+  const claimed = await readState(root);
+  assert.deepEqual(claimed.stop_delivery, {
+    generation_id: "generation-delivery",
+    requested_turn_id: "turn-delivery",
+    accepted: false,
+    allow_active_stop: false
+  });
+
+  await writeFile(pathsFor(root).eventsPath, "");
+  assert.deepEqual(await processStop({
+    workspaceRoot: root,
+    turnId: "turn-retry",
+    stopHookActive: false,
+    now: plus(2)
+  }), first);
+  assert.equal((await readState(root)).stop_delivery.requested_turn_id, "turn-delivery");
+});
+
+test("processStop propagates post-commit telemetry path swaps and replays after repair", async () => {
+  const root = await makeWorkspace();
+  const initialized = await initWorkflow({
+    workspaceRoot: root,
+    topic: "projection integrity",
+    now: baseTime,
+    idFactory: ids("workflow-projection", "nonce-projection", "generation-projection")
+  });
+  const paths = pathsFor(root);
+  const held = `${paths.eventsPath}.held-projection`;
+  let callbackCalls = 0;
+  await assert.rejects(() => processStop({
+    workspaceRoot: root,
+    turnId: "turn-projection",
+    stopHookActive: false,
+    now: plus(1),
+    eventBatchOptions: {
+      beforeAppend: async () => {
+        callbackCalls += 1;
+        await rename(paths.eventsPath, held);
+        await writeFile(paths.eventsPath, "outside replacement\n");
+      }
+    }
+  }), error => error.code === "WORKSPACE_PATH_UNSAFE");
+  assert.equal(callbackCalls, 1);
+  const committed = await readState(root);
+  assert.equal(committed.stop_delivery.requested_turn_id, "turn-projection");
+  assert.equal(await readFile(paths.eventsPath, "utf8"), "outside replacement\n");
+
+  await unlink(paths.eventsPath);
+  await rename(held, paths.eventsPath);
+  assert.deepEqual(await processStop({
+    workspaceRoot: root,
+    turnId: "turn-projection-retry",
+    stopHookActive: false,
+    now: plus(2)
+  }), { decision: "block", continuation: initialized.continuation });
+});
+
+test("processStop tolerates an ordinary post-commit telemetry fault and replays from state", async () => {
+  const root = await makeWorkspace();
+  const initialized = await initWorkflow({
+    workspaceRoot: root,
+    topic: "projection availability",
+    now: baseTime,
+    idFactory: ids("workflow-projection-io", "nonce-projection-io", "generation-projection-io")
+  });
+  const result = await processStop({
+    workspaceRoot: root,
+    turnId: "turn-projection-io",
+    stopHookActive: false,
+    now: plus(1),
+    eventBatchOptions: {
+      beforeAppend: async () => {
+        const error = new Error("fixture projection failure");
+        error.code = "EIO";
+        throw error;
+      }
+    }
+  });
+  assert.deepEqual(result, { decision: "block", continuation: initialized.continuation });
+  assert.equal((await readState(root)).stop_delivery.requested_turn_id, "turn-projection-io");
+  assert.deepEqual(await processStop({
+    workspaceRoot: root,
+    turnId: "turn-projection-io-retry",
+    stopHookActive: false,
+    now: plus(2)
+  }), result);
+});
+
+test("acceptStopDelivery atomically accepts only the exact requested state marker", async () => {
+  const root = await makeWorkspace();
+  const initialized = await initWorkflow({
+    workspaceRoot: root,
+    topic: "accept delivery",
+    now: baseTime,
+    idFactory: ids("workflow-accept", "nonce-accept", "generation-accept")
+  });
+  await processStop({ workspaceRoot: root, turnId: "turn-accept", stopHookActive: false, now: plus(1) });
+  const exact = `[HARNESS50_CONTINUE ${JSON.stringify(initialized.continuation)}]`;
+  assert.equal(await acceptStopDelivery({ workspaceRoot: root, prompt: `${exact} trailing`, now: plus(2) }), false);
+  assert.equal((await readState(root)).stop_delivery.accepted, false);
+  assert.equal(await acceptStopDelivery({ workspaceRoot: root, prompt: exact, now: plus(3) }), true);
+  const accepted = await readState(root);
+  assert.equal(accepted.stop_delivery.accepted, true);
+  assert.equal(accepted.stop_delivery.requested_turn_id, "turn-accept");
+  assert.equal(await acceptStopDelivery({ workspaceRoot: root, prompt: exact, now: plus(4) }), false);
+});
+
+test("a consumed same-turn active Stop fails once while its inactive replay releases", async t => {
+  for (const active of [false, true]) {
+    await t.test(`stop_hook_active=${active}`, async () => {
+      const root = await makeWorkspace();
+      const initialized = await initWorkflow({
+        workspaceRoot: root,
+        topic: `same turn ${active}`,
+        now: baseTime,
+        idFactory: ids(`workflow-same-${active}`, `nonce-same-${active}`, `generation-same-${active}`)
+      });
+      await processStop({ workspaceRoot: root, turnId: "turn-same", stopHookActive: false, now: plus(1) });
+      const started = await beginStep({
+        workspaceRoot: root,
+        step: 1,
+        marker: initialized.continuation,
+        now: plus(2),
+        idFactory: ids(`attempt-same-${active}`)
+      });
+      const result = await processStop({
+        workspaceRoot: root,
+        turnId: "turn-same",
+        stopHookActive: active,
+        now: plus(3),
+        idFactory: ids(`nonce-failed-${active}`, `generation-failed-${active}`)
+      });
+      const state = await readState(root);
+      if (active) {
+        assert.equal(result.decision, "block");
+        assert.equal(state.current_attempt.id, started.attempt.id);
+        assert.equal(state.current_attempt.failure_recorded, true);
+        assert.equal(state.consecutive_failures, 1);
+        assert.deepEqual(result.continuation, state.continuation);
+      } else {
+        assert.deepEqual(result, { decision: "release" });
+        assert.equal(state.current_attempt.failure_recorded, false);
+        assert.equal(state.consecutive_failures, 0);
+      }
+    });
+  }
+});
+
+test("processStop recovers a receipt-first step into one claimed next continuation", async () => {
+  const root = await makeWorkspace();
+  const started = await initAndBegin(root);
+  await writeReceiptExclusive(root, {
+    schema_version: 1,
+    workflow_id: started.state.workflow_id,
+    step: 1,
+    attempt_id: started.attempt.id,
+    provenance: "codex-verified",
+    completed_at: plus(2),
+    summary: "durable receipt",
+    evidence: evidenceFor(1)
+  });
+
+  const result = await processStop({
+    workspaceRoot: root,
+    turnId: "turn-receipt-forward",
+    stopHookActive: true,
+    now: plus(3),
+    idFactory: ids("nonce-receipt-forward", "generation-receipt-forward")
+  });
+  const state = await readState(root);
+  assert.equal(result.decision, "block");
+  assert.equal(result.continuation.step, 2);
+  assert.deepEqual(state.completed_steps, [1]);
+  assert.equal(state.current_step, 2);
+  assert.equal(state.stop_delivery.generation_id, "generation-receipt-forward");
+  assert.equal(state.stop_delivery.requested_turn_id, "turn-receipt-forward");
+  assert.equal(state.stop_delivery.allow_active_stop, true);
+});
+
+test("concurrent receipt-first Stops publish one generation without conflicting claims", async () => {
+  const root = await makeWorkspace();
+  const started = await initAndBegin(root);
+  await writeReceiptExclusive(root, {
+    schema_version: 1,
+    workflow_id: started.state.workflow_id,
+    step: 1,
+    attempt_id: started.attempt.id,
+    provenance: "codex-verified",
+    completed_at: plus(2),
+    summary: "concurrent durable receipt",
+    evidence: evidenceFor(1)
+  });
+
+  const results = await Promise.all(["left", "right"].map(label => processStop({
+    workspaceRoot: root,
+    turnId: `turn-receipt-${label}`,
+    stopHookActive: true,
+    now: plus(3),
+    idFactory: ids("nonce-receipt-concurrent", "generation-receipt-concurrent")
+  })));
+  assert.equal(results.filter(result => result.decision === "block").length, 1);
+  assert.equal(results.filter(result => result.decision === "release").length, 1);
+  const state = await readState(root);
+  assert.equal(state.completed_steps.length, 1);
+  assert.equal(state.stop_delivery.generation_id, "generation-receipt-concurrent");
+  assert.ok(["turn-receipt-left", "turn-receipt-right"].includes(state.stop_delivery.requested_turn_id));
+  const requests = (await readEvents(root)).filter(event =>
+    event.kind === "stop_continuation_requested" &&
+    event.generation_id === "generation-receipt-concurrent"
+  );
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].turn_id, state.stop_delivery.requested_turn_id);
+});
+
+test("processStop capacity uses the exact full UTF-8 failure batch before state mutation", async t => {
+  const transitionTime = plus(3);
+  const nextGeneration = "세대-🙂";
+  const nextNonce = "비밀-🙂";
+  const turnId = "정지-turn-🙂";
+  const padding = length => {
+    const prefix = '{"kind":"padding","padding":"';
+    const suffix = '"}\n';
+    return Buffer.from(prefix + "p".repeat(length - Buffer.byteLength(prefix + suffix)) + suffix);
+  };
+  for (const extraByte of [1, 0]) {
+    await t.test(extraByte === 1 ? "one byte short" : "exact fit", async () => {
+      const root = await makeWorkspace();
+      const initialized = await initWorkflow({
+        workspaceRoot: root,
+        topic: "UTF-8 capacity",
+        now: baseTime,
+        idFactory: ids("워크플로-🙂", "초기-nonce", "초기-generation")
+      });
+      const started = await beginStep({
+        workspaceRoot: root,
+        step: 1,
+        marker: initialized.continuation,
+        now: plus(1),
+        idFactory: ids("시도-🙂")
+      });
+      const expectedEvents = [{
+        kind: "step_failed",
+        workflow_id: initialized.workflow_id,
+        step: 1,
+        attempt_id: started.attempt.id,
+        failure_count: 1,
+        consecutive_failures: 1,
+        timestamp: transitionTime
+      }, {
+        kind: "continuation_issued",
+        workflow_id: initialized.workflow_id,
+        step: 1,
+        generation_id: nextGeneration,
+        baseline_receipt_count: 0,
+        timestamp: transitionTime
+      }, {
+        kind: "stop_continuation_requested",
+        workflow_id: initialized.workflow_id,
+        step: 1,
+        turn_id: turnId,
+        generation_id: nextGeneration,
+        baseline_receipt_count: 0,
+        timestamp: transitionTime
+      }];
+      const batch = Buffer.from(expectedEvents.map(event => `${JSON.stringify(event)}\n`).join(""));
+      const paths = pathsFor(root);
+      const originalEvents = await readFile(paths.eventsPath);
+      const targetSize = (1024 * 1024) - batch.length + extraByte;
+      await writeFile(paths.eventsPath, Buffer.concat([
+        originalEvents,
+        padding(targetSize - originalEvents.length)
+      ]));
+      const stateBefore = await readFile(paths.statePath);
+      const receiptsBefore = await readReceipts(root);
+
+      const operation = processStop({
+        workspaceRoot: root,
+        turnId,
+        stopHookActive: true,
+        now: transitionTime,
+        idFactory: ids(nextNonce, nextGeneration)
+      });
+      if (extraByte === 1) {
+        await assert.rejects(operation, error => error.code === "EVENT_LOG_LIMIT");
+        assert.ok(Buffer.from(await readFile(paths.statePath)).equals(stateBefore));
+        assert.deepEqual(await readReceipts(root), receiptsBefore);
+        assert.equal((await readFile(paths.eventsPath)).length, targetSize);
+      } else {
+        const result = await operation;
+        assert.equal(result.decision, "block");
+        assert.equal(result.continuation.nonce, nextNonce);
+        assert.equal((await readFile(paths.eventsPath)).length, 1024 * 1024);
+        assert.equal((await readFile(paths.eventsPath)).subarray(-batch.length).equals(batch), true);
+      }
+    });
+  }
+});
+
+test("a full ledger cannot mutate the third active failure into blocked state", async () => {
+  const root = await makeWorkspace();
+  let state = await initWorkflow({
+    workspaceRoot: root,
+    topic: "third failure capacity",
+    now: baseTime,
+    idFactory: ids("workflow-third-capacity", "nonce-initial", "generation-initial")
+  });
+  for (let failure = 1; failure <= 2; failure += 1) {
+    const started = await beginStep({
+      workspaceRoot: root,
+      step: 1,
+      marker: state.continuation,
+      now: plus(failure * 2 - 1),
+      idFactory: ids(`attempt-${failure}`)
+    });
+    const stopped = await processStop({
+      workspaceRoot: root,
+      turnId: `turn-${failure}`,
+      stopHookActive: true,
+      now: plus(failure * 2),
+      idFactory: ids(`nonce-${failure}`, `generation-${failure}`)
+    });
+    assert.equal(stopped.decision, "block");
+    state = await readState(root);
+    assert.equal(state.current_attempt.id, started.attempt.id);
+  }
+  await beginStep({
+    workspaceRoot: root,
+    step: 1,
+    marker: state.continuation,
+    now: plus(5),
+    idFactory: ids("attempt-3")
+  });
+  const paths = pathsFor(root);
+  const original = await readFile(paths.eventsPath);
+  const prefix = '{"kind":"padding","padding":"';
+  const suffix = '"}\n';
+  const remaining = (1024 * 1024) - original.length - Buffer.byteLength(prefix + suffix);
+  await writeFile(paths.eventsPath, Buffer.concat([
+    original,
+    Buffer.from(prefix + "p".repeat(remaining) + suffix)
+  ]));
+  const stateBefore = await readFile(paths.statePath);
+
+  await assert.rejects(() => processStop({
+    workspaceRoot: root,
+    turnId: "turn-third-full",
+    stopHookActive: true,
+    now: plus(6)
+  }), error => error.code === "EVENT_LOG_LIMIT");
+  assert.ok(Buffer.from(await readFile(paths.statePath)).equals(stateBefore));
+  assert.equal((await readState(root)).consecutive_failures, 2);
 });
 
 test("new workflow atomically creates topic and refuses all recognized shared work", async t => {
@@ -1196,15 +1568,99 @@ test("reconcile advances a receipt crash gap and blocks malformed receipt storag
     summary: "crash gap",
     evidence: evidenceFor(1)
   });
-  const recovered = await reconcileWorkflow({ workspaceRoot: root, now: plus(3) });
+  const recovered = await reconcileWorkflow({
+    workspaceRoot: root,
+    now: plus(3),
+    idFactory: ids("nonce-reconciled", "generation-reconciled")
+  });
   assert.deepEqual(recovered.completed_steps, [1]);
   assert.equal(recovered.current_step, 2);
+  assert.equal(recovered.continuation.nonce, "nonce-reconciled");
+  assert.deepEqual(recovered.stop_delivery, {
+    generation_id: "generation-reconciled",
+    requested_turn_id: null,
+    accepted: false,
+    allow_active_stop: true
+  });
 
   await writeFile(receiptPath(root, 2), "not-json\n", "utf8");
   const blocked = await reconcileWorkflow({ workspaceRoot: root, now: plus(4) });
   assert.equal(blocked.status, "blocked");
   assert.equal(blocked.blocked_reason, "RECEIPT_PARSE_ERROR");
   assert.deepEqual(blocked.completed_steps, [1]);
+});
+
+test("reconcile keeps receipt-forward paused workflows paused without a delivery", async () => {
+  const root = await makeWorkspace();
+  const started = await initAndBegin(root);
+  await pauseWorkflow({ workspaceRoot: root, reason: "human pause", now: plus(2) });
+  await writeReceiptExclusive(root, {
+    schema_version: 1,
+    workflow_id: started.state.workflow_id,
+    step: 1,
+    attempt_id: started.attempt.id,
+    provenance: "codex-verified",
+    completed_at: plus(3),
+    summary: "receipt while paused",
+    evidence: evidenceFor(1)
+  });
+
+  const recovered = await reconcileWorkflow({
+    workspaceRoot: root,
+    now: plus(4),
+    idFactory: () => {
+      throw new Error("paused recovery must not issue a continuation");
+    }
+  });
+  assert.equal(recovered.status, "paused");
+  assert.deepEqual(recovered.completed_steps, [1]);
+  assert.equal(recovered.current_step, 2);
+  assert.equal(recovered.current_attempt, null);
+  assert.equal(recovered.continuation, null);
+  assert.equal(recovered.stop_delivery, null);
+});
+
+test("reconcile completes a receipt-first Step 50 without a delivery", async () => {
+  const root = await makeWorkspace();
+  const pluginRoot = await makePluginFixture();
+  await writeClaudeCompletedPrefix(root, 49);
+  await importClaudeProgress({
+    workspaceRoot: root,
+    pluginRoot,
+    now: () => new Date(baseTime),
+    idFactory: ids("workflow-reconcile-50")
+  });
+  const resumed = await resumeWorkflow({
+    workspaceRoot: root,
+    sessionId: "session-reconcile-50",
+    now: plus(1),
+    idFactory: ids("nonce-reconcile-50", "generation-reconcile-50")
+  });
+  const started = await beginStep({
+    workspaceRoot: root,
+    step: 50,
+    sessionId: "session-reconcile-50",
+    marker: resumed.continuation,
+    now: plus(2),
+    idFactory: ids("attempt-reconcile-50")
+  });
+  await writeReceiptExclusive(root, {
+    schema_version: 1,
+    workflow_id: started.state.workflow_id,
+    step: 50,
+    attempt_id: started.attempt.id,
+    provenance: "codex-verified",
+    completed_at: plus(3),
+    summary: "final receipt before state",
+    evidence: evidenceFor(50)
+  });
+
+  const recovered = await reconcileWorkflow({ workspaceRoot: root, now: plus(4) });
+  assert.equal(recovered.status, "completed");
+  assert.equal(recovered.completed_steps.length, 50);
+  assert.equal(recovered.current_step, null);
+  assert.equal(recovered.continuation, null);
+  assert.equal(recovered.stop_delivery, null);
 });
 
 test("reconcile blocks a mismatched forward attempt without discarding the active attempt", async () => {
@@ -1755,7 +2211,8 @@ test("workflow events contain only allowlisted metadata and never nonce evidence
   const allowedFields = new Set([
     "kind", "timestamp", "workflow_id", "step", "attempt_id", "session_id",
     "status", "error_code", "reason_code", "baseline_receipt_count",
-    "receipt_count", "completed_count", "failure_count", "consecutive_failures"
+    "receipt_count", "completed_count", "failure_count", "consecutive_failures",
+    "generation_id"
   ]);
   for (const event of await readEvents(root)) {
     for (const field of Object.keys(event)) assert.equal(allowedFields.has(field), true, field);

@@ -8,11 +8,17 @@ const STATE_FIELDS = new Set([
   "schema_version", "workflow_id", "status", "total_steps", "current_step",
   "completed_steps", "topic_path", "topic_sha256", "current_attempt",
   "consecutive_failures", "blocked_reason", "owner", "continuation",
-  "imported_from", "last_stop_turn_id", "created_at", "updated_at", "completed_at"
+  "stop_delivery", "imported_from", "last_stop_turn_id", "created_at", "updated_at", "completed_at"
 ]);
 const CURRENT_ATTEMPT_FIELDS = new Set(["id", "step", "session_id", "started_at", "failure_recorded"]);
 const OWNER_FIELDS = new Set(["session_id", "lease_updated_at"]);
 const CONTINUATION_FIELDS = new Set(["workflow_id", "step", "nonce", "issued_at", "baseline_receipt_count"]);
+const STOP_DELIVERY_FIELDS = new Set([
+  "generation_id",
+  "requested_turn_id",
+  "accepted",
+  "allow_active_stop"
+]);
 const IMPORTED_FROM_FIELDS = new Set(["kind", "source_sha256", "imported_at", "prefix_length", "warnings"]);
 
 function invalid(message, details = {}) {
@@ -106,6 +112,34 @@ function validateContinuation(value, state) {
   }
 }
 
+function validateStopDelivery(value, state) {
+  if (value === null) {
+    if (state.status === "running" && (state.continuation !== null || state.current_attempt !== null)) {
+      invalid("live continuation generations require stop_delivery", { field: "stop_delivery" });
+    }
+    return;
+  }
+  if (!isPlainObject(value)) invalid("stop_delivery must be null or an object", { field: "stop_delivery" });
+  requireExactFields(value, STOP_DELIVERY_FIELDS, "stop_delivery");
+  requireString(value.generation_id, "stop_delivery.generation_id");
+  requireNullableString(value.requested_turn_id, "stop_delivery.requested_turn_id");
+  if (typeof value.accepted !== "boolean") {
+    invalid("stop_delivery.accepted must be boolean", { field: "stop_delivery.accepted" });
+  }
+  if (typeof value.allow_active_stop !== "boolean") {
+    invalid("stop_delivery.allow_active_stop must be boolean", { field: "stop_delivery.allow_active_stop" });
+  }
+  if (value.accepted && value.requested_turn_id === null) {
+    invalid("accepted stop delivery requires requested_turn_id", { field: "stop_delivery.accepted" });
+  }
+  if (state.status !== "running") {
+    invalid("stop_delivery requires a live running generation", { field: "stop_delivery" });
+  }
+  if (state.continuation === null && state.current_attempt === null) {
+    invalid("stop_delivery requires a continuation or current attempt", { field: "stop_delivery" });
+  }
+}
+
 function validateImportedFrom(value, completedStepCount) {
   if (value === null) return;
   if (!isPlainObject(value)) invalid("imported_from must be null or an object", { field: "imported_from" });
@@ -188,6 +222,7 @@ export function validateState(state) {
   }
   validateCurrentAttempt(state.current_attempt, state.current_step);
   validateContinuation(state.continuation, state);
+  validateStopDelivery(state.stop_delivery, state);
   return state;
 }
 
@@ -226,6 +261,7 @@ export function createInitialState({ workflowId, workspaceRoot, topicSha256, now
     blocked_reason: null,
     owner: null,
     continuation: null,
+    stop_delivery: null,
     imported_from: null,
     last_stop_turn_id: null,
     created_at: now,

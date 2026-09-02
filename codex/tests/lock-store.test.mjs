@@ -15,7 +15,9 @@ import {
   appendEvent,
   archiveActiveState,
   mutateState,
+  prepareEventBatch,
   readState,
+  withPinnedEventBatch,
   writeStateAtomic
 } from "../scripts/lib/state-store.mjs";
 import { makeWorkspace } from "./helpers/workspace.mjs";
@@ -442,6 +444,83 @@ test("event append keeps only sanctioned scalar metadata", async () => {
       completed_count: 1
     }
   ]);
+});
+
+test("prepared event batches use exact UTF-8 bytes and permit an exact 1 MiB fit", async () => {
+  const root = await makeWorkspace();
+  const paths = pathsFor(root);
+  await mkdir(paths.codexDir, { recursive: true });
+  const prepared = prepareEventBatch([{
+    kind: "stop_continuation_requested",
+    workflow_id: "workflow-한글",
+    step: 1,
+    turn_id: "turn-🙂",
+    generation_id: "generation-한글",
+    baseline_receipt_count: 0
+  }], { now: () => new Date(baseTime) });
+  const expected = `${JSON.stringify({
+    kind: "stop_continuation_requested",
+    workflow_id: "workflow-한글",
+    step: 1,
+    turn_id: "turn-🙂",
+    generation_id: "generation-한글",
+    baseline_receipt_count: 0,
+    timestamp: baseTime
+  })}\n`;
+  assert.equal(prepared.bytes.length, Buffer.byteLength(expected, "utf8"));
+
+  const prefix = '{"kind":"padding","value":"';
+  const suffix = '"}\n';
+  const paddingLength = (1024 * 1024) - prepared.bytes.length - Buffer.byteLength(prefix + suffix);
+  await writeFile(paths.eventsPath, prefix + "a".repeat(paddingLength) + suffix);
+  let mutationCalls = 0;
+  await withPinnedEventBatch(root, prepared, async () => {
+    mutationCalls += 1;
+  });
+  assert.equal(mutationCalls, 1);
+  assert.equal((await readFile(paths.eventsPath)).length, 1024 * 1024);
+  assert.equal((await readFile(paths.eventsPath, "utf8")).endsWith(expected), true);
+});
+
+test("prepared event batches reject one byte over before mutation and loop short writes", async () => {
+  const root = await makeWorkspace();
+  const paths = pathsFor(root);
+  await mkdir(paths.codexDir, { recursive: true });
+  const prepared = prepareEventBatch([{
+    kind: "workflow_paused",
+    workflow_id: "wf-short-write",
+    status: "paused"
+  }], { now: () => new Date(baseTime) });
+  await writeFile(paths.eventsPath, Buffer.alloc((1024 * 1024) - prepared.bytes.length + 1, 0x20));
+  let mutationCalls = 0;
+  await assert.rejects(() => withPinnedEventBatch(root, prepared, async () => {
+    mutationCalls += 1;
+  }), error => error.code === "EVENT_LOG_LIMIT");
+  assert.equal(mutationCalls, 0);
+
+  await writeFile(paths.eventsPath, "");
+  let writeCalls = 0;
+  await withPinnedEventBatch(root, prepared, async () => {}, {
+    writeChunk: async (handle, buffer, offset, length, position) => {
+      writeCalls += 1;
+      return handle.write(buffer, offset, Math.min(length, 3), position);
+    }
+  });
+  assert.ok(writeCalls > 1);
+  assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(prepared.bytes));
+});
+
+test("ordinary event appends cannot grow a ledger beyond 1 MiB", async () => {
+  const root = await makeWorkspace();
+  const paths = pathsFor(root);
+  await mkdir(paths.codexDir, { recursive: true });
+  await writeFile(paths.eventsPath, Buffer.alloc(1024 * 1024, 0x20));
+  const before = await readFile(paths.eventsPath);
+  await assert.rejects(
+    () => appendEvent(root, { kind: "workflow_paused", workflow_id: "wf-full" }),
+    error => error.code === "EVENT_LOG_LIMIT"
+  );
+  assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(before));
 });
 
 test("active metadata is archived under backups with a sanitized directory name", async () => {

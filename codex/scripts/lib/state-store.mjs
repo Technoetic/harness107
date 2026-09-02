@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   mkdir,
+  lstat,
   open,
   readFile,
   readdir,
@@ -18,6 +19,7 @@ import { parseState } from "./schema.mjs";
 const WINDOWS_RENAME_ERRORS = new Set(["EACCES", "EBUSY", "EPERM"]);
 const WINDOWS_RENAME_RETRIES = 8;
 const WINDOWS_RENAME_DELAY_MS = 25;
+export const EVENT_LOG_LIMIT = 1024 * 1024;
 const ACTIVE_METADATA = [
   "state.json",
   "receipts",
@@ -48,8 +50,10 @@ const SAFE_EVENT_FIELDS = new Set([
   "codex_verified_count",
   "failure_count",
   "consecutive_failures",
+  "generation_id",
   "source_preserved"
 ]);
+const preparedEventBatches = new WeakSet();
 
 function delay(milliseconds) {
   return new Promise(resolve => setTimeout(resolve, milliseconds));
@@ -115,6 +119,106 @@ function sanitizeEvent(event, now) {
     throw new HarnessError("EVENT_INVALID", "event timestamp must be an ISO-8601 string");
   }
   return sanitized;
+}
+
+function sameNode(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function requirePreparedBatch(prepared) {
+  if (!preparedEventBatches.has(prepared)) {
+    throw new HarnessError("EVENT_INVALID", "event batch must be prepared canonically");
+  }
+}
+
+export function prepareEventBatch(events, { now = () => new Date() } = {}) {
+  if (!Array.isArray(events) || events.length === 0) {
+    throw new HarnessError("EVENT_INVALID", "event batch must be a non-empty array");
+  }
+  if (typeof now !== "function") {
+    throw new HarnessError("EVENT_INVALID", "now must be a function");
+  }
+  const timestamp = now();
+  if (!(timestamp instanceof Date) || Number.isNaN(timestamp.getTime())) {
+    throw new HarnessError("EVENT_INVALID", "now must return a valid Date");
+  }
+  const clock = () => new Date(timestamp);
+  const values = events.map(event => Object.freeze(sanitizeEvent(event, clock)));
+  const bytes = Buffer.from(values.map(event => `${JSON.stringify(event)}\n`).join(""), "utf8");
+  const prepared = Object.freeze({
+    events: Object.freeze(values),
+    bytes
+  });
+  preparedEventBatches.add(prepared);
+  return prepared;
+}
+
+async function writeAll(handle, bytes, position, writeChunk) {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const result = await writeChunk(handle, bytes, offset, bytes.length - offset, position + offset);
+    if (!Number.isInteger(result?.bytesWritten) || result.bytesWritten <= 0) {
+      throw new HarnessError("EVENT_WRITE_FAILED", "event batch write made no progress");
+    }
+    offset += result.bytesWritten;
+  }
+}
+
+async function defaultWriteChunk(handle, buffer, offset, length, position) {
+  return handle.write(buffer, offset, length, position);
+}
+
+export async function withPinnedEventBatch(workspaceRoot, prepared, mutation, {
+  writeChunk = defaultWriteChunk,
+  beforeAppend = async () => {}
+} = {}) {
+  requirePreparedBatch(prepared);
+  if (
+    typeof mutation !== "function" ||
+    typeof writeChunk !== "function" ||
+    typeof beforeAppend !== "function"
+  ) {
+    throw new HarnessError("EVENT_INVALID", "event batch callbacks must be functions");
+  }
+  const { eventsPath } = pathsFor(workspaceRoot);
+  let original;
+  try {
+    original = await lstat(eventsPath, { bigint: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log must already exist");
+    }
+    throw error;
+  }
+  if (original.isSymbolicLink() || !original.isFile() || original.nlink !== 1n) {
+    throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log must be an unaliased regular file");
+  }
+  let handle;
+  try {
+    handle = await open(eventsPath, "r+");
+    const opened = await handle.stat({ bigint: true });
+    if (!opened.isFile() || opened.nlink !== 1n || !sameNode(original, opened)) {
+      throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log changed before batch mutation");
+    }
+    if (opened.size + BigInt(prepared.bytes.length) > BigInt(EVENT_LOG_LIMIT)) {
+      throw new HarnessError("EVENT_LOG_LIMIT", "event log exceeds the byte limit");
+    }
+    const result = await mutation();
+    await beforeAppend();
+    const current = await lstat(eventsPath, { bigint: true });
+    if (current.isSymbolicLink() || !current.isFile() || current.nlink !== 1n || !sameNode(original, current)) {
+      throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log changed during batch mutation");
+    }
+    await writeAll(handle, prepared.bytes, Number(opened.size), writeChunk);
+    await handle.sync();
+    const final = await lstat(eventsPath, { bigint: true });
+    if (final.isSymbolicLink() || !final.isFile() || final.nlink !== 1n || !sameNode(original, final)) {
+      throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log changed during batch append");
+    }
+    return result;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
 }
 
 function archiveReason(value) {
@@ -192,17 +296,23 @@ export async function mutateState(workspaceRoot, mutation, lockOptions = {}) {
 
 export async function appendEvent(workspaceRoot, event, { now = () => new Date() } = {}) {
   const { codexDir, eventsPath } = pathsFor(workspaceRoot);
-  const sanitized = sanitizeEvent(event, now);
-  const line = `${JSON.stringify(sanitized)}\n`;
+  const prepared = prepareEventBatch([event], { now });
   await mkdir(codexDir, { recursive: true });
-  const handle = await open(eventsPath, "a", 0o600);
+  const handle = await open(eventsPath, "a+", 0o600);
   try {
-    await handle.write(line, null, "utf8");
+    const opened = await handle.stat({ bigint: true });
+    if (!opened.isFile() || opened.nlink !== 1n) {
+      throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log must be an unaliased regular file");
+    }
+    if (opened.size + BigInt(prepared.bytes.length) > BigInt(EVENT_LOG_LIMIT)) {
+      throw new HarnessError("EVENT_LOG_LIMIT", "event log exceeds the byte limit");
+    }
+    await writeAll(handle, prepared.bytes, Number(opened.size), defaultWriteChunk);
     await handle.sync();
   } finally {
     await handle.close();
   }
-  return sanitized;
+  return prepared.events[0];
 }
 
 /** Must be called from the callback of withRunLock() for this workspace. */

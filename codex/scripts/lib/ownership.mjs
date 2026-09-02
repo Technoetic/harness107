@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { HarnessError } from "./errors.mjs";
 import { validateState } from "./schema.mjs";
@@ -120,12 +120,16 @@ export function renewOwner(rawState, { sessionId = null, now } = {}) {
 export function transferOwner(rawState, {
   sessionId = null,
   now,
-  nonce
+  nonce,
+  generationId = randomUUID()
 } = {}) {
   const state = validateState(rawState);
   const requestedSession = session(sessionId);
   if (typeof nonce !== "string" || nonce.trim() === "") {
     fail("CONTINUATION_INVALID", "a fresh continuation nonce is required for transfer");
+  }
+  if (typeof generationId !== "string" || generationId.trim() === "") {
+    fail("CONTINUATION_INVALID", "a fresh stop delivery generation is required for transfer");
   }
   if (state.status === "completed" || state.current_step === null) {
     fail("WORKFLOW_STATE", "a completed workflow cannot transfer ownership");
@@ -155,6 +159,13 @@ export function transferOwner(rawState, {
       nonce: generationNonce,
       issued_at: issuedAt,
       baseline_receipt_count: state.completed_steps.length
-    }
+    },
+    stop_delivery: {
+      generation_id: generationId,
+      requested_turn_id: null,
+      accepted: false,
+      allow_active_stop: false
+    },
+    last_stop_turn_id: null
   });
 }

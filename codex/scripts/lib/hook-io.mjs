@@ -1,7 +1,6 @@
-import { lstat, open, readFile, realpath } from "node:fs/promises";
+import { lstat, open, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { TextDecoder } from "node:util";
 
 import { HarnessError } from "./errors.mjs";
 import { readJsonInput, writeOutput } from "./json-io.mjs";
@@ -59,7 +58,8 @@ const SAFE_HOOK_EVENT_FIELDS = new Set([
   "status",
   "reason_code",
   "baseline_receipt_count",
-  "completed_count"
+  "completed_count",
+  "generation_id"
 ]);
 const preparedHookEvents = new WeakSet();
 
@@ -493,210 +493,6 @@ export async function validateHookEvent(raw, expectedName) {
 
 export function continuationMarker(continuation) {
   return `[HARNESS50_CONTINUE ${JSON.stringify(continuation)}]`;
-}
-
-export async function readLifecycleEvents(workspaceRoot) {
-  const eventsPath = join(workspaceRoot, "step_archive", ".harness50-codex", "events.jsonl");
-  let bytes;
-  try {
-    bytes = await readFile(eventsPath);
-  } catch (error) {
-    if (error?.code === "ENOENT") return [];
-    fail("HOOK_INTERNAL", "hook failed safely");
-  }
-  if (bytes.length > HOOK_INPUT_LIMIT) fail("HOOK_INTERNAL", "hook failed safely");
-  let text;
-  try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    fail("HOOK_INTERNAL", "hook failed safely");
-  }
-  if (text === "") return [];
-  if (!text.endsWith("\n") || text.includes("\r")) fail("HOOK_INTERNAL", "hook failed safely");
-  try {
-    return text.slice(0, -1).split("\n").map(line => {
-      const event = JSON.parse(line);
-      if (event === null || typeof event !== "object" || Array.isArray(event)) throw new Error();
-      return event;
-    });
-  } catch {
-    fail("HOOK_INTERNAL", "hook failed safely");
-  }
-}
-
-function matchesCurrentContinuation(event, state) {
-  return event.workflow_id === state.workflow_id &&
-    event.step === state.current_step &&
-    event.baseline_receipt_count === state.completed_steps.length;
-}
-
-const CONTINUATION_DECISION_EVENTS = new Set([
-  "continuation_issued",
-  "continuation_consumed",
-  "stop_continuation_requested",
-  "continuation_prompt_accepted"
-]);
-
-function nonEmptyLedgerId(value) {
-  return typeof value === "string" && value.length > 0;
-}
-
-function canonicalLedgerTimestamp(value) {
-  if (typeof value !== "string") return false;
-  const milliseconds = Date.parse(value);
-  return Number.isFinite(milliseconds) && new Date(milliseconds).toISOString() === value;
-}
-
-function boundedLedgerInteger(value, minimum, maximum) {
-  return Number.isInteger(value) && value >= minimum && value <= maximum;
-}
-
-function canonicalContinuationDecisionEvent(event) {
-  if (event === null || typeof event !== "object" || Array.isArray(event)) return false;
-  if (!CONTINUATION_DECISION_EVENTS.has(event.kind)) return true;
-  if (
-    !nonEmptyLedgerId(event.workflow_id) ||
-    !canonicalLedgerTimestamp(event.timestamp) ||
-    !boundedLedgerInteger(event.step, 1, 50) ||
-    !boundedLedgerInteger(event.baseline_receipt_count, 0, 50)
-  ) {
-    return false;
-  }
-  if (event.kind === "continuation_consumed") return nonEmptyLedgerId(event.attempt_id);
-  if (
-    event.kind === "stop_continuation_requested" ||
-    event.kind === "continuation_prompt_accepted"
-  ) {
-    return nonEmptyLedgerId(event.turn_id);
-  }
-  return true;
-}
-
-export function currentContinuationLedgerGeneration(events, state) {
-  if (!Array.isArray(events) || state === null || typeof state !== "object") return null;
-  if (events.some(event => !canonicalContinuationDecisionEvent(event))) return null;
-  let latestWorkflowBoundary = -1;
-  let matchingBoundary = -1;
-  let currentConsumptionIndex = null;
-  if (state.continuation !== null && state.continuation !== undefined) {
-    if (
-      state.continuation.workflow_id !== state.workflow_id ||
-      state.continuation.step !== state.current_step ||
-      state.continuation.baseline_receipt_count !== state.completed_steps.length
-    ) {
-      return null;
-    }
-    for (let index = 0; index < events.length; index += 1) {
-      const event = events[index];
-      if (event.kind !== "continuation_issued" || event.workflow_id !== state.workflow_id) continue;
-      latestWorkflowBoundary = index;
-      if (
-        matchesCurrentContinuation(event, state) &&
-        event.timestamp === state.continuation.issued_at
-      ) {
-        matchingBoundary = index;
-      }
-    }
-  } else if (state.current_attempt !== null && state.current_attempt !== undefined) {
-    const consumed = [];
-    for (let index = 0; index < events.length; index += 1) {
-      const event = events[index];
-      if (
-        event.kind === "continuation_consumed" &&
-        event.workflow_id === state.workflow_id &&
-        event.step === state.current_step &&
-        event.baseline_receipt_count === state.completed_steps.length &&
-        event.attempt_id === state.current_attempt.id
-      ) {
-        consumed.push(index);
-      }
-    }
-    if (consumed.length !== 1) return null;
-    currentConsumptionIndex = consumed[0];
-    for (let index = 0; index < events.length; index += 1) {
-      const event = events[index];
-      if (event.kind !== "continuation_issued" || event.workflow_id !== state.workflow_id) continue;
-      latestWorkflowBoundary = index;
-      if (index < currentConsumptionIndex && matchesCurrentContinuation(event, state)) {
-        matchingBoundary = index;
-      }
-    }
-  } else {
-    return null;
-  }
-  if (matchingBoundary < 0 || matchingBoundary !== latestWorkflowBoundary) return null;
-
-  const requests = [];
-  const acceptances = [];
-  const consumptions = [];
-  for (let index = matchingBoundary + 1; index < events.length; index += 1) {
-    const event = events[index];
-    if (!CONTINUATION_DECISION_EVENTS.has(event.kind) || event.workflow_id !== state.workflow_id) {
-      continue;
-    }
-    if (event.kind === "continuation_issued" || !matchesCurrentContinuation(event, state)) return null;
-    if (event.kind === "stop_continuation_requested") requests.push({ event, index });
-    if (event.kind === "continuation_prompt_accepted") acceptances.push({ event, index });
-    if (event.kind === "continuation_consumed") consumptions.push({ event, index });
-  }
-  if (requests.length > 1 || acceptances.length > 1 || consumptions.length > 1) return null;
-  const requestRecord = requests[0] ?? null;
-  const acceptanceRecord = acceptances[0] ?? null;
-  const consumptionRecord = consumptions[0] ?? null;
-  if (state.continuation !== null && consumptionRecord !== null) return null;
-  if (
-    state.continuation === null &&
-    (consumptionRecord === null || consumptionRecord.index !== currentConsumptionIndex)
-  ) {
-    return null;
-  }
-  if (acceptanceRecord !== null && (
-    requestRecord === null ||
-    acceptanceRecord.index <= requestRecord.index ||
-    acceptanceRecord.event.turn_id !== requestRecord.event.turn_id
-  )) {
-    return null;
-  }
-  if (
-    requestRecord !== null &&
-    consumptionRecord !== null &&
-    consumptionRecord.index <= requestRecord.index
-  ) {
-    return null;
-  }
-  if (
-    acceptanceRecord !== null &&
-    consumptionRecord !== null &&
-    acceptanceRecord.index >= consumptionRecord.index
-  ) {
-    return null;
-  }
-  const accepted = acceptanceRecord !== null;
-  const consumed = consumptionRecord !== null;
-  return Object.freeze({
-    boundaryIndex: matchingBoundary,
-    request: requestRecord?.event ?? null,
-    requestIndex: requestRecord?.index ?? null,
-    accepted,
-    consumed,
-    closed: accepted || (requestRecord !== null && consumed)
-  });
-}
-
-export function stopTurnWasRequested(events, workflowId, turnId) {
-  return events.some(event =>
-    event.kind === "stop_continuation_requested" &&
-    event.workflow_id === workflowId &&
-    event.turn_id === turnId
-  );
-}
-
-export function stopTurnWasAccepted(events, state, turnId = state.last_stop_turn_id) {
-  return events.some(event =>
-    event.kind === "continuation_prompt_accepted" &&
-    event.workflow_id === state.workflow_id &&
-    event.turn_id === turnId
-  );
 }
 
 function publicError(error) {

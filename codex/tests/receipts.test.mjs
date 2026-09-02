@@ -643,6 +643,12 @@ test("state-ahead outranks a receipt gap and rebases incompatible state metadata
       issued_at: baseTime,
       baseline_receipt_count: 2
     },
+    stop_delivery: {
+      generation_id: "generation-3",
+      requested_turn_id: "turn-3",
+      accepted: true,
+      allow_active_stop: true
+    },
     imported_from: {
       kind: "claude-progress",
       source_sha256: "b".repeat(64),
@@ -659,6 +665,7 @@ test("state-ahead outranks a receipt gap and rebases incompatible state metadata
   assert.equal(result.state.current_step, 2);
   assert.equal(result.state.current_attempt, null);
   assert.equal(result.state.continuation, null);
+  assert.equal(result.state.stop_delivery, null);
   assert.equal(result.state.consecutive_failures, 0);
   assert.equal(result.state.imported_from.prefix_length, 1);
   assert.deepEqual(result.diagnostics, [{ code: "STATE_AHEAD_OF_RECEIPTS" }]);
@@ -682,6 +689,12 @@ test("receipt-first recovery advances state and clears stale attempt metadata", 
       nonce: "nonce-1",
       issued_at: baseTime,
       baseline_receipt_count: 0
+    },
+    stop_delivery: {
+      generation_id: "generation-1",
+      requested_turn_id: "turn-1",
+      accepted: true,
+      allow_active_stop: false
     }
   });
   const result = reconcileReceipts(state, [receiptFor(1)]);
@@ -691,6 +704,7 @@ test("receipt-first recovery advances state and clears stale attempt metadata", 
   assert.equal(result.state.status, "running");
   assert.equal(result.state.current_attempt, null);
   assert.equal(result.state.continuation, null);
+  assert.equal(result.state.stop_delivery, null);
   assert.equal(result.state.consecutive_failures, 0);
   assert.equal(result.state.completed_at, null);
   assert.deepEqual(result.diagnostics, []);

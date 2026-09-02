@@ -35,7 +35,9 @@ import { createInitialState, validateState } from "./schema.mjs";
 import {
   appendEvent,
   archiveActiveState,
+  prepareEventBatch,
   readState,
+  withPinnedEventBatch,
   writeStateAtomic
 } from "./state-store.mjs";
 
@@ -440,13 +442,22 @@ function markerFields(marker) {
   return marker;
 }
 
-export function issueContinuation(rawState, { now, nonce = randomUUID() } = {}) {
+export function issueContinuation(rawState, {
+  now,
+  nonce = randomUUID(),
+  generationId = randomUUID(),
+  allowActiveStop = true
+} = {}) {
   const clock = clockFrom(now);
   const state = assertMonotonicClock(validateState(rawState), clock);
   if (state.status !== "running" || state.current_step === null) {
     fail("WORKFLOW_STATE", "continuations require a running incomplete workflow");
   }
   requireText(nonce, "nonce", "CONTINUATION_INVALID");
+  requireText(generationId, "generationId", "CONTINUATION_INVALID");
+  if (typeof allowActiveStop !== "boolean") {
+    fail("CONTINUATION_INVALID", "allowActiveStop must be boolean");
+  }
   const issuedAt = clock.iso;
   return validateState({
     ...state,
@@ -456,7 +467,14 @@ export function issueContinuation(rawState, { now, nonce = randomUUID() } = {}) 
       nonce,
       issued_at: issuedAt,
       baseline_receipt_count: state.completed_steps.length
-    }
+    },
+    stop_delivery: {
+      generation_id: generationId,
+      requested_turn_id: null,
+      accepted: false,
+      allow_active_stop: allowActiveStop
+    },
+    last_stop_turn_id: null
   });
 }
 
@@ -481,7 +499,11 @@ export function consumeContinuation(rawState, { marker } = {}) {
   ) {
     fail("CONTINUATION_REPLAY", "continuation nonce is invalid or stale");
   }
-  return validateState({ ...state, continuation: null });
+  return validateState({
+    ...state,
+    continuation: null,
+    stop_delivery: state.current_attempt === null ? null : state.stop_delivery
+  });
 }
 
 async function assertNoInitConflict(workspaceRoot, paths) {
@@ -601,6 +623,7 @@ export async function initWorkflow({
     );
     const workflowId = await guardedId(idFactory, "workflow ID", guard);
     const nonce = await guardedId(idFactory, "continuation nonce", guard);
+    const generationId = await guardedId(idFactory, "stop delivery generation ID", guard);
     const topicPath = join(paths.workspaceRoot, ...TOPIC_RELATIVE_PATH.split("/"));
     const createdTopic = await guardedOperation(
       guard,
@@ -613,7 +636,12 @@ export async function initWorkflow({
       topicSha256: createdTopic.sha256,
       now: clock.iso
     });
-    state = issueContinuation(state, { now: clock.iso, nonce });
+    state = issueContinuation(state, {
+      now: clock.iso,
+      nonce,
+      generationId,
+      allowActiveStop: false
+    });
     try {
       state = await guardedWriteState(paths.workspaceRoot, state, guard);
     } catch (error) {
@@ -637,6 +665,7 @@ export async function initWorkflow({
       kind: "continuation_issued",
       workflow_id: state.workflow_id,
       step: state.current_step,
+      generation_id: state.stop_delivery.generation_id,
       baseline_receipt_count: state.completed_steps.length
     }], clock, guard);
     return state;
@@ -671,6 +700,7 @@ export async function beginStep({
       assertOwner(state, { sessionId: requestedSession, now: clock.iso });
     }
     const continuationGeneration = state.continuation;
+    const stopDeliveryGeneration = state.stop_delivery;
     try {
       state = consumeContinuation(state, { marker });
       await assertMutationGuard(guard);
@@ -709,6 +739,7 @@ export async function beginStep({
     state = validateState({
       ...state,
       current_attempt: attempt,
+      stop_delivery: stopDeliveryGeneration,
       updated_at: clock.iso
     });
     state = await guardedWriteState(paths.workspaceRoot, state, guard);
@@ -717,6 +748,7 @@ export async function beginStep({
       workflow_id: state.workflow_id,
       step,
       attempt_id: attempt.id,
+      generation_id: stopDeliveryGeneration.generation_id,
       ...(requestedSession === null ? {} : { session_id: requestedSession }),
       baseline_receipt_count: state.completed_steps.length
     }], clock, guard);
@@ -860,10 +892,11 @@ export async function completeStep({
       consecutive_failures: 0,
       blocked_reason: null,
       continuation: null,
+      stop_delivery: null,
       updated_at: clock.iso,
       completed_at: completed ? receipt.completed_at : null
     });
-    if (!completed) state = issueContinuation(state, { now: clock.iso });
+    if (!completed) state = issueContinuation(state, { now: clock.iso, allowActiveStop: true });
     state = await guardedWriteState(paths.workspaceRoot, state, guard);
     const events = [{
       kind: "step_completed",
@@ -877,6 +910,7 @@ export async function completeStep({
         kind: "continuation_issued",
         workflow_id: state.workflow_id,
         step: state.current_step,
+        generation_id: state.stop_delivery.generation_id,
         baseline_receipt_count: state.completed_steps.length
       });
     }
@@ -915,9 +949,10 @@ export async function failStep({
       consecutive_failures: failureCount,
       blocked_reason: blocked ? "THREE_CONSECUTIVE_FAILURES" : null,
       continuation: null,
+      stop_delivery: blocked ? null : state.stop_delivery,
       updated_at: clock.iso
     });
-    if (!blocked) state = issueContinuation(state, { now: clock.iso });
+    if (!blocked) state = issueContinuation(state, { now: clock.iso, allowActiveStop: true });
     state = await guardedWriteState(paths.workspaceRoot, state, guard);
     const events = [{
       kind: "step_failed",
@@ -941,6 +976,7 @@ export async function failStep({
         kind: "continuation_issued",
         workflow_id: state.workflow_id,
         step,
+        generation_id: state.stop_delivery.generation_id,
         baseline_receipt_count: state.completed_steps.length
       });
     }
@@ -969,6 +1005,7 @@ export async function pauseWorkflow({
       ...state,
       status: "paused",
       continuation: null,
+      stop_delivery: null,
       updated_at: clock.iso
     });
     state = await guardedWriteState(paths.workspaceRoot, state, guard);
@@ -995,9 +1032,12 @@ export async function resumeWorkflow({
     let state = assertMonotonicClock(await requireState(paths.workspaceRoot, guard), clock);
     if (state.status === "completed") fail("WORKFLOW_STATE", "a completed workflow cannot resume");
     const nonce = await guardedId(idFactory, "continuation nonce", guard);
+    const generationId = await guardedId(idFactory, "stop delivery generation ID", guard);
     state = validateState({
       ...state,
       status: "running",
+      current_attempt: null,
+      stop_delivery: null,
       blocked_reason: null,
       consecutive_failures: 0,
       completed_at: null,
@@ -1006,7 +1046,8 @@ export async function resumeWorkflow({
     state = transferOwner(state, {
       sessionId: requestedSession,
       now: clock.iso,
-      nonce
+      nonce,
+      generationId
     });
     state = await guardedWriteState(paths.workspaceRoot, state, guard);
     await appendEvents(paths.workspaceRoot, [
@@ -1021,6 +1062,7 @@ export async function resumeWorkflow({
         kind: "continuation_issued",
         workflow_id: state.workflow_id,
         step: state.current_step,
+        generation_id: state.stop_delivery.generation_id,
         baseline_receipt_count: state.completed_steps.length
       }
     ], clock, guard);
@@ -1030,6 +1072,270 @@ export async function resumeWorkflow({
 
 function receiptValidationError(error) {
   return typeof error?.code === "string" && RECEIPT_VALIDATION_CODES.has(error.code);
+}
+
+async function reconcileUnderGuard(paths, clock, guard, before, idFactory) {
+  let result;
+  try {
+    const receipts = assertReceiptClock(
+      await guardedReadReceipts(paths.workspaceRoot, guard),
+      clock
+    );
+    const authority = authoritativeReceiptPrefix(before, receipts);
+    if (authority.code !== null) {
+      result = {
+        state: blockForReceiptError(before, authority.code, authority.prefix, {
+          preserveAttempt: authority.preserveAttempt
+        }),
+        diagnostics: [{ code: authority.code }]
+      };
+    } else {
+      result = reconcileReceipts(before, receipts);
+    }
+  } catch (error) {
+    if (!receiptValidationError(error)) throw error;
+    const prefixReceipts = await trustedReceiptPrefix(paths.workspaceRoot, before, guard);
+    assertReceiptClock(prefixReceipts, clock);
+    result = {
+      state: blockForReceiptError(before, error.code, prefixReceipts),
+      diagnostics: [{ code: error.code }]
+    };
+  }
+  let state = result.state;
+  if (state.owner !== null && ownerLeaseExpired(state.owner, clock.iso)) {
+    state = validateState({ ...state, owner: null });
+  }
+  const recoveredForward = state.completed_steps.length > before.completed_steps.length;
+  if (
+    recoveredForward &&
+    state.status === "running" &&
+    state.current_step !== null &&
+    state.continuation === null
+  ) {
+    const nonce = await guardedId(idFactory, "continuation nonce", guard);
+    const generationId = await guardedId(idFactory, "stop delivery generation ID", guard);
+    state = issueContinuation(state, {
+      now: clock.iso,
+      nonce,
+      generationId,
+      allowActiveStop: true
+    });
+  }
+  const changed = !sameJson(state, before);
+  if (changed) state = validateState({ ...state, updated_at: clock.iso });
+  return { state, changed, recoveredForward, diagnostics: result.diagnostics };
+}
+
+function stopRequestEvent(state, turnId) {
+  return {
+    kind: "stop_continuation_requested",
+    workflow_id: state.workflow_id,
+    step: state.current_step,
+    turn_id: turnId,
+    generation_id: state.stop_delivery.generation_id,
+    baseline_receipt_count: state.completed_steps.length
+  };
+}
+
+async function commitStopTransition(paths, guard, clock, before, state, events, eventBatchOptions = {}) {
+  const changed = !sameJson(before, state);
+  if (events.length === 0) {
+    return changed ? guardedWriteState(paths.workspaceRoot, state, guard) : state;
+  }
+  const prepared = prepareEventBatch(events, { now: clock.now });
+  let stateCommitted = false;
+  try {
+    return await withPinnedEventBatch(paths.workspaceRoot, prepared, async () => {
+      if (!changed) return state;
+      const written = await guardedWriteState(paths.workspaceRoot, state, guard);
+      stateCommitted = true;
+      return written;
+    }, eventBatchOptions);
+  } catch (error) {
+    if (!stateCommitted) throw error;
+    if (error?.code === "WORKSPACE_PATH_UNSAFE" || error?.code === "HOOK_WORKSPACE_UNSAFE") throw error;
+    // State is the control authority. Telemetry projection may be repaired or omitted.
+    return state;
+  }
+}
+
+export async function acceptStopDelivery({
+  workspaceRoot,
+  prompt,
+  now = () => new Date()
+} = {}) {
+  if (typeof prompt !== "string") fail("STOP_INVALID", "prompt must be a string");
+  return withMutation(workspaceRoot, now, async (paths, clock, guard) => {
+    const state = assertMonotonicClock(await requireState(paths.workspaceRoot, guard), clock);
+    const delivery = state.stop_delivery;
+    if (
+      state.status !== "running" ||
+      state.continuation === null ||
+      delivery === null ||
+      delivery.requested_turn_id === null ||
+      delivery.accepted ||
+      prompt !== `[HARNESS50_CONTINUE ${JSON.stringify(state.continuation)}]`
+    ) {
+      return false;
+    }
+    const accepted = await guardedWriteState(paths.workspaceRoot, validateState({
+      ...state,
+      stop_delivery: { ...delivery, accepted: true },
+      updated_at: clock.iso
+    }), guard);
+    try {
+      await appendEvents(paths.workspaceRoot, [{
+        kind: "continuation_prompt_accepted",
+        workflow_id: accepted.workflow_id,
+        step: accepted.current_step,
+        turn_id: accepted.stop_delivery.requested_turn_id,
+        generation_id: accepted.stop_delivery.generation_id,
+        baseline_receipt_count: accepted.completed_steps.length
+      }], clock, guard);
+    } catch (error) {
+      if (error?.code === "WORKSPACE_PATH_UNSAFE") throw error;
+      // Delivery state is authoritative; audit projection failure cannot undo acceptance.
+    }
+    return true;
+  });
+}
+
+export async function processStop({
+  workspaceRoot,
+  turnId,
+  stopHookActive,
+  now = () => new Date(),
+  idFactory = randomUUID,
+  eventBatchOptions = {}
+} = {}) {
+  requireText(turnId, "turnId", "STOP_INVALID");
+  if (typeof stopHookActive !== "boolean") fail("STOP_INVALID", "stopHookActive must be boolean");
+  requireFactory(idFactory);
+  return withMutation(workspaceRoot, now, async (paths, clock, guard) => {
+    const before = assertMonotonicClock(await requireState(paths.workspaceRoot, guard), clock);
+    const reconciliation = await reconcileUnderGuard(paths, clock, guard, before, idFactory);
+    let state = reconciliation.state;
+    const events = [];
+    if (reconciliation.changed && state.status === "blocked") {
+      events.push({
+        kind: "workflow_blocked",
+        workflow_id: state.workflow_id,
+        step: state.current_step,
+        status: "blocked",
+        reason_code: state.blocked_reason
+      });
+    }
+    if (reconciliation.recoveredForward && state.status === "running") {
+      events.push({
+        kind: "continuation_issued",
+        workflow_id: state.workflow_id,
+        step: state.current_step,
+        generation_id: state.stop_delivery.generation_id,
+        baseline_receipt_count: state.completed_steps.length
+      });
+    }
+
+    if (state.status !== "running") {
+      await commitStopTransition(paths, guard, clock, before, state, events, eventBatchOptions);
+      return { decision: "release" };
+    }
+
+    if (state.continuation !== null) {
+      const delivery = state.stop_delivery;
+      if (delivery.requested_turn_id !== null) {
+        if (delivery.accepted || stopHookActive) {
+          await commitStopTransition(paths, guard, clock, before, state, events, eventBatchOptions);
+          return { decision: "release" };
+        }
+        await commitStopTransition(paths, guard, clock, before, state, events, eventBatchOptions);
+        return { decision: "block", continuation: state.continuation };
+      }
+      if (stopHookActive && !delivery.allow_active_stop) {
+        await commitStopTransition(paths, guard, clock, before, state, events, eventBatchOptions);
+        return { decision: "release" };
+      }
+      state = validateState({
+        ...state,
+        stop_delivery: { ...delivery, requested_turn_id: turnId }
+      });
+      events.push(stopRequestEvent(state, turnId));
+      state = await commitStopTransition(paths, guard, clock, before, state, events, eventBatchOptions);
+      return { decision: "block", continuation: state.continuation };
+    }
+
+    if (state.current_attempt === null || state.stop_delivery === null) {
+      await commitStopTransition(paths, guard, clock, before, state, events, eventBatchOptions);
+      return { decision: "release" };
+    }
+    if (
+      state.stop_delivery.requested_turn_id === turnId &&
+      !stopHookActive
+    ) {
+      await commitStopTransition(paths, guard, clock, before, state, events, eventBatchOptions);
+      return { decision: "release" };
+    }
+    if (state.current_attempt.failure_recorded) {
+      await commitStopTransition(paths, guard, clock, before, state, events, eventBatchOptions);
+      return { decision: "release" };
+    }
+
+    const attempt = state.current_attempt;
+    state = renewAttemptOwner(state, attempt, clock);
+    const failureCount = state.consecutive_failures + 1;
+    const blocked = failureCount >= 3;
+    state = validateState({
+      ...state,
+      status: blocked ? "blocked" : "running",
+      current_attempt: { ...attempt, failure_recorded: true },
+      consecutive_failures: failureCount,
+      blocked_reason: blocked ? "THREE_CONSECUTIVE_FAILURES" : null,
+      continuation: null,
+      stop_delivery: blocked ? null : state.stop_delivery,
+      updated_at: clock.iso
+    });
+    events.push({
+      kind: "step_failed",
+      workflow_id: state.workflow_id,
+      step: attempt.step,
+      attempt_id: attempt.id,
+      failure_count: failureCount,
+      consecutive_failures: failureCount
+    });
+    if (blocked) {
+      events.push({
+        kind: "workflow_blocked",
+        workflow_id: state.workflow_id,
+        step: attempt.step,
+        status: "blocked",
+        reason_code: "THREE_CONSECUTIVE_FAILURES",
+        consecutive_failures: failureCount
+      });
+      await commitStopTransition(paths, guard, clock, before, state, events, eventBatchOptions);
+      return { decision: "release" };
+    }
+    const nonce = await guardedId(idFactory, "continuation nonce", guard);
+    const generationId = await guardedId(idFactory, "stop delivery generation ID", guard);
+    state = issueContinuation(state, {
+      now: clock.iso,
+      nonce,
+      generationId,
+      allowActiveStop: true
+    });
+    state = validateState({
+      ...state,
+      stop_delivery: { ...state.stop_delivery, requested_turn_id: turnId }
+    });
+    events.push({
+      kind: "continuation_issued",
+      workflow_id: state.workflow_id,
+      step: state.current_step,
+      generation_id: state.stop_delivery.generation_id,
+      baseline_receipt_count: state.completed_steps.length
+    });
+    events.push(stopRequestEvent(state, turnId));
+    state = await commitStopTransition(paths, guard, clock, before, state, events, eventBatchOptions);
+    return { decision: "block", continuation: state.continuation };
+  });
 }
 
 function receiptAuthorityCode(state, receipt) {
@@ -1150,6 +1456,7 @@ function blockForReceiptError(state, code, prefixReceipts = [], { preserveAttemp
     completed_steps: completedSteps,
     current_attempt: canPreserveAttempt ? state.current_attempt : null,
     continuation: null,
+    stop_delivery: null,
     blocked_reason: code,
     imported_from: importedFrom,
     completed_at: null
@@ -1158,43 +1465,16 @@ function blockForReceiptError(state, code, prefixReceipts = [], { preserveAttemp
 
 export async function reconcileWorkflow({
   workspaceRoot,
-  now = () => new Date()
+  now = () => new Date(),
+  idFactory = randomUUID
 } = {}) {
+  requireFactory(idFactory);
   return withMutation(workspaceRoot, now, async (paths, clock, guard) => {
     const before = assertMonotonicClock(await requireState(paths.workspaceRoot, guard), clock);
-    let result;
-    try {
-      const receipts = assertReceiptClock(
-        await guardedReadReceipts(paths.workspaceRoot, guard),
-        clock
-      );
-      const authority = authoritativeReceiptPrefix(before, receipts);
-      if (authority.code !== null) {
-        result = {
-          state: blockForReceiptError(before, authority.code, authority.prefix, {
-            preserveAttempt: authority.preserveAttempt
-          }),
-          diagnostics: [{ code: authority.code }]
-        };
-      } else {
-        result = reconcileReceipts(before, receipts);
-      }
-    } catch (error) {
-      if (!receiptValidationError(error)) throw error;
-      const prefixReceipts = await trustedReceiptPrefix(paths.workspaceRoot, before, guard);
-      assertReceiptClock(prefixReceipts, clock);
-      result = {
-        state: blockForReceiptError(before, error.code, prefixReceipts),
-        diagnostics: [{ code: error.code }]
-      };
-    }
+    const result = await reconcileUnderGuard(paths, clock, guard, before, idFactory);
     let state = result.state;
-    if (state.owner !== null && ownerLeaseExpired(state.owner, clock.iso)) {
-      state = validateState({ ...state, owner: null });
-    }
-    const changed = !sameJson(state, before);
+    const changed = result.changed;
     if (changed) {
-      state = validateState({ ...state, updated_at: clock.iso });
       state = await guardedWriteState(paths.workspaceRoot, state, guard);
       if (state.status === "blocked") {
         await appendEvents(paths.workspaceRoot, [{
@@ -1203,6 +1483,14 @@ export async function reconcileWorkflow({
           step: state.current_step,
           status: "blocked",
           reason_code: state.blocked_reason
+        }], clock, guard);
+      } else if (result.recoveredForward && state.status === "running") {
+        await appendEvents(paths.workspaceRoot, [{
+          kind: "continuation_issued",
+          workflow_id: state.workflow_id,
+          step: state.current_step,
+          generation_id: state.stop_delivery.generation_id,
+          baseline_receipt_count: state.completed_steps.length
         }], clock, guard);
       }
     }

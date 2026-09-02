@@ -48,6 +48,12 @@ function stateWithCanonicalMetadata() {
       issued_at: now,
       baseline_receipt_count: 1
     },
+    stop_delivery: {
+      generation_id: "delivery-2",
+      requested_turn_id: null,
+      accepted: false,
+      allow_active_stop: true
+    },
     imported_from: {
       kind: "claude-progress",
       source_sha256: "b".repeat(64),
@@ -125,6 +131,7 @@ test("initial state has the canonical first-step values", () => {
     blocked_reason: null,
     owner: null,
     continuation: null,
+    stop_delivery: null,
     imported_from: null,
     last_stop_turn_id: null,
     created_at: now,
@@ -196,10 +203,50 @@ test("state rejects unknown fields in each nested canonical record", () => {
     { ...state, current_attempt: { ...state.current_attempt, unexpected: true } },
     { ...state, owner: { ...state.owner, unexpected: true } },
     { ...state, continuation: { ...state.continuation, unexpected: true } },
+    { ...state, stop_delivery: { ...state.stop_delivery, unexpected: true } },
     { ...state, imported_from: { ...state.imported_from, unexpected: true } }
   ];
 
   for (const invalidState of invalidStates) assert.throws(() => validateState(invalidState));
+});
+
+test("state requires a canonical stop delivery for every live continuation generation", () => {
+  const state = stateWithCanonicalMetadata();
+
+  assert.doesNotThrow(() => validateState(state));
+  assert.throws(() => validateState({ ...state, stop_delivery: null }));
+  assert.throws(() => validateState({
+    ...state,
+    continuation: null,
+    current_attempt: null
+  }));
+  assert.throws(() => validateState({ ...state, stop_delivery: { ...state.stop_delivery, generation_id: "" } }));
+  assert.throws(() => validateState({ ...state, stop_delivery: { ...state.stop_delivery, requested_turn_id: 7 } }));
+  assert.throws(() => validateState({ ...state, stop_delivery: { ...state.stop_delivery, accepted: "false" } }));
+  assert.throws(() => validateState({ ...state, stop_delivery: { ...state.stop_delivery, allow_active_stop: "true" } }));
+  assert.throws(() => validateState({
+    ...state,
+    stop_delivery: { ...state.stop_delivery, accepted: true, requested_turn_id: null }
+  }));
+});
+
+test("consumed attempts retain delivery while terminal states clear it", () => {
+  const state = stateWithCanonicalMetadata();
+  const consumed = { ...state, continuation: null };
+  assert.doesNotThrow(() => validateState(consumed));
+  assert.throws(() => validateState({ ...consumed, stop_delivery: null }));
+  assert.throws(() => validateState({ ...state, status: "paused" }));
+
+  const completedSteps = Array.from({ length: 50 }, (_, index) => index + 1);
+  assert.throws(() => validateState({
+    ...state,
+    status: "completed",
+    current_step: null,
+    completed_steps: completedSteps,
+    current_attempt: null,
+    continuation: null,
+    completed_at: now
+  }));
 });
 
 test("state reconciles continuation and import counts to its completed prefix", () => {
