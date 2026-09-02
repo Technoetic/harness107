@@ -1269,7 +1269,7 @@ test("research instructions block missing mandatory evidence and trace every fac
   assert.doesNotMatch(step18, /임의(?:의|로)[^]*(?:API|계약)/);
 });
 
-test("research instructions use safe one-step provider-neutral role contracts", async () => {
+test("research instructions use safe one-step provider-neutral contracts", async () => {
   const report = await validateStepBatch(repoRoot, [16, 17, 18, 19, 20, 21, 22, 23, 24]);
 
   for (const step of report.steps) {
@@ -1280,17 +1280,101 @@ test("research instructions use safe one-step provider-neutral role contracts", 
     assert.doesNotMatch(content, /(?:다음|후속)\s*(?:Step|단계)|\bnext\s+step\b/i);
     assert.doesNotMatch(content, /별도 (?:작업자|검증자)를 사용했다고 (?:기록|주장)/);
   }
+});
 
-  for (const number of [16, 17, 18, 19, 20, 22, 23, 24]) {
+test("every research step defines concrete independent roles and an honest sequential fallback", async () => {
+  const roleContracts = [
+    {
+      number: 16,
+      worker: /조사 질문별 수집 역할/,
+      reviewer: /수집 결과를 원본과 대조하는 독립 검토\s*역할/
+    },
+    {
+      number: 17,
+      worker: /API 수집 역할/,
+      reviewer: /응답 원본으로 확인하는 독립 검토\s*역할/
+    },
+    {
+      number: 18,
+      worker: /계약 문서별 수집 역할/,
+      reviewer: /계약 항목을 원본에 대조하는 독립 검토\s*역할/
+    },
+    {
+      number: 19,
+      worker: /저장소별 수집 역할/,
+      reviewer: /정적 분석을 원본 파일에 대조하는 독립 검토\s*역할/
+    },
+    {
+      number: 20,
+      worker: /특성별 후보 수집 역할/,
+      reviewer: /등재·관련성을 원본에 대조하는 독립 검토\s*역할/
+    },
+    {
+      number: 21,
+      worker: /결정적 의존성 검사 작업자/,
+      reviewer: /보고서를\s*수정하지 않는 독립 검증자/
+    },
+    {
+      number: 22,
+      worker: /선정 사이트별 수집 역할/,
+      reviewer: /원본·스크린샷을 실제로 확인하는 독립 검토\s*역할/
+    },
+    {
+      number: 23,
+      worker: /수집 증거를 축별로 분석하는 역할/,
+      reviewer: /결론을 원본에 대조하는 독립 검토\s*역할/
+    },
+    {
+      number: 24,
+      worker: /23단계 분석을 만든 역할/,
+      reviewer: /구분된 독립 검증자 역할/
+    }
+  ];
+
+  for (const { number, worker, reviewer } of roleContracts) {
     const id = `step${String(number).padStart(3, "0")}`;
     const content = await readFile(join(repoRoot, "codex", "assets", "steps", `${id}.md`), "utf8");
     const roleSection = /## 실행 역할\n([^]*?)(?=\n## )/.exec(content)?.[1];
     assert.ok(roleSection, `${id} is missing its provider-neutral role contract`);
-    assert.match(roleSection, /수집[^]*독립 검토/);
-    assert.match(roleSection, /위임 기능을 사용할 수 없으면[^]*순서대로 수행/);
-    assert.match(roleSection, /별도 역할을 위임했다고 기록하지 않는다/);
-    assert.match(roleSection, /정상 권한 확인/);
+    const normalizedRole = roleSection.replace(/\s+/g, " ").trim();
+    assert.match(normalizedRole, worker, `${id} is missing its concrete worker role`);
+    assert.match(normalizedRole, reviewer, `${id} is missing its independent reviewer role`);
+    assert.match(normalizedRole, /위임 기능을 사용할 수 없으면[^]*현재 실행자가[^]*순서대로 수행/);
+    assert.match(normalizedRole, /별도 역할을 위임했다고 기록하지 않는다/);
+    assert.match(normalizedRole, /정상 권한 확인/);
   }
+
+  const step21 = await readFile(join(repoRoot, "codex", "assets", "steps", "step021.md"), "utf8");
+  const step21RoleSection = /## 실행 역할\n([^]*?)(?=\n## )/.exec(step21)?.[1];
+  assert.ok(step21RoleSection, "step021 role checks must stay inside its role section");
+  const step21Roles = step21RoleSection.replace(/\s+/g, " ").trim();
+  assert.match(step21Roles, /동일한 입력[^]*1단계 완료 영수증[^]*프로젝트 manifest[^]*독립적으로 재확인/);
+  assert.match(step21Roles, /결정적 명령[^]*독립적으로 재실행/);
+  assert.match(step21Roles, /독립 검증자[^]*(?:상태 )?보고서[^]*수정하지 않/);
+  assert.match(step21Roles, /병렬 실행[^]*위임 기능을 사용할 수 없으면[^]*역할을 명확히 분리[^]*순서대로 수행/);
+  assert.match(step21Roles, /자동 승인[^]*권한 우회[^]*금지/);
+});
+
+test("step017 persists one successful API response and closes step019 provenance", async () => {
+  const report = await validateStepBatch(repoRoot, [17, 19]);
+  const [githubResearch] = report.steps;
+  const step17 = await readFile(join(repoRoot, "codex", "assets", "steps", "step017.md"), "utf8");
+  const step19 = await readFile(join(repoRoot, "codex", "assets", "steps", "step019.md"), "utf8");
+  const persistedRaw = "step_archive/research-raw-step017-github-api.json";
+
+  assert.deepEqual(githubResearch.outputs.filter((path) => path.includes("github-api")), [persistedRaw]);
+  assert.match(step17, /최대 세 개의[^.\n]*검색어 후보[^]*우선순위/);
+  assert.match(step17, /한 번에 하나씩[^]*각 후보당 최대 한 번[^]*총 최대 세 번/);
+  assert.match(step17, /첫 HTTP 성공 응답[^]*수정하지 않은 JSON 바이트[^]*저장[^]*즉시[^]*추가 API\s*요청[^]*중단/);
+  assert.match(step17, /성공 응답은 정확히 하나만[^]*보존/);
+  assert.match(step17, /후보 선정과 모든 사실 주장[^]*오직[^]*보존된 성공 응답/);
+  assert.match(step17, /실패 시도[^]*요청 URL[^]*HTTP 상태[^]*rate-limit[^]*공개 metadata[^]*manifest/);
+  assert.match(step17, /실패 응답[^]*(?:사실|후보)[^]*사용하지 않는다/);
+  assert.match(step17, /성공 응답이 없으면[^]*최대 세 번[^]*완료하지 않는다/);
+  assert.doesNotMatch(step17, /각 검색어[^]*공개 검색 API에 실제로\s*요청한다/);
+
+  assert.match(step19, /오직 `step_archive\/research-raw-step017-github-api\.json`에 보존된[^]*성공 응답[^]*후보만[^]*복제/);
+  assert.match(step19, /실패 시도 metadata[^]*보존되지 않은 응답[^]*(?:후보|클론)[^]*사용하지 않는다/);
 });
 
 test("visual research requires screenshots and actual inspection for steps 022 through 024", async () => {
