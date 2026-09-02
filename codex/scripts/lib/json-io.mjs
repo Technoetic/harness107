@@ -3,6 +3,7 @@ import { TextDecoder } from "node:util";
 import { HarnessError } from "./errors.mjs";
 
 const DEFAULT_TIMEOUT_MS = 10000;
+const DEFAULT_OUTPUT_TIMEOUT_MS = 1000;
 
 function fail(code, message) {
   throw new HarnessError(code, message);
@@ -94,4 +95,78 @@ export async function readJsonInput(stream, maxBytes, {
   });
 
   return decodeJson(chunks);
+}
+
+export async function writeOutput(stream, value, {
+  timeoutMs = DEFAULT_OUTPUT_TIMEOUT_MS
+} = {}) {
+  if (
+    stream === null || typeof stream !== "object" ||
+    typeof stream.write !== "function" ||
+    typeof stream.once !== "function" ||
+    typeof stream.removeListener !== "function"
+  ) {
+    fail("OUTPUT_STREAM", "output stream failed");
+  }
+  if (typeof value !== "string") fail("OUTPUT_STREAM", "output stream failed");
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+    fail("OUTPUT_STREAM", "output stream failed");
+  }
+  if (stream.destroyed || stream.writableEnded || stream.writable === false) {
+    fail("OUTPUT_STREAM", "output stream failed");
+  }
+
+  await new Promise((resolve, reject) => {
+    let settled = false;
+    let writeReturned = false;
+    let callbackComplete = false;
+    let needsDrain = false;
+    let drained = false;
+    let callbackFailure = null;
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      if (callbackFailure !== null) clearImmediate(callbackFailure);
+      stream.removeListener("error", onError);
+      stream.removeListener("close", onClose);
+      stream.removeListener("drain", onDrain);
+    };
+    const finish = error => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error === null) resolve();
+      else reject(new HarnessError("OUTPUT_STREAM", "output stream failed"));
+    };
+    const maybeFinish = () => {
+      if (writeReturned && callbackComplete && (!needsDrain || drained)) finish(null);
+    };
+    const onError = () => finish(new Error("output error"));
+    const onClose = () => finish(new Error("output closed"));
+    const onDrain = () => {
+      drained = true;
+      maybeFinish();
+    };
+    const onWrite = error => {
+      if (settled) return;
+      if (error) {
+        callbackFailure = setImmediate(() => finish(error));
+        return;
+      }
+      callbackComplete = true;
+      maybeFinish();
+    };
+    const timer = setTimeout(() => finish(new Error("output timeout")), timeoutMs);
+
+    stream.once("error", onError);
+    stream.once("close", onClose);
+    stream.once("drain", onDrain);
+    try {
+      needsDrain = stream.write(value, onWrite) === false;
+      writeReturned = true;
+      maybeFinish();
+    } catch (error) {
+      finish(error);
+    }
+  });
 }

@@ -2,7 +2,7 @@ import { pathToFileURL } from "node:url";
 
 import { HarnessError } from "./lib/errors.mjs";
 import { importClaudeProgress } from "./lib/importer.mjs";
-import { readJsonInput } from "./lib/json-io.mjs";
+import { readJsonInput, writeOutput } from "./lib/json-io.mjs";
 import { sanitizeEvidence } from "./lib/receipts.mjs";
 import {
   beginStep,
@@ -77,7 +77,8 @@ const CLI_MESSAGES = new Map([
   ["STEP_RANGE", "step must be an integer from 1 through 50"],
   ["INPUT_MODE", "structured input must use --input -"],
   ["INPUT_SHAPE", "input JSON has an invalid shape"],
-  ["INPUT_TYPE", "input JSON contains an invalid value type"]
+  ["INPUT_TYPE", "input JSON contains an invalid value type"],
+  ["OUTPUT_STREAM", "output stream failed"]
 ]);
 
 const OPERATIONS = Object.freeze({
@@ -192,11 +193,11 @@ export function parseArgs(argv) {
     index += 1;
   }
 
+  if ("step" in flags) flags.step = parseStep(flags.step);
   for (const name of schema.required) {
     if (!(name in flags)) fail("FLAG_REQUIRED");
   }
   if ("input" in flags && flags.input !== "-") fail("INPUT_MODE");
-  if ("step" in flags) flags.step = parseStep(flags.step);
   for (const name of ["workspace", "plugin-root", "attempt", "session", "reason"]) {
     if (name in flags && flags[name].trim() === "") fail("FLAG_VALUE");
   }
@@ -259,7 +260,7 @@ export async function main(argv, {
     : null;
   const input = parseInput(command, rawInput);
   const result = await dispatch(command, flags, input);
-  stdout.write(`${JSON.stringify(result)}\n`);
+  await writeOutput(stdout, `${JSON.stringify(result)}\n`);
   return 0;
 }
 
@@ -295,7 +296,7 @@ if (isDirectEntrypoint()) {
       },
       error => {
         process.exitCode = 1;
-        process.stderr.write(errorDocument(error));
+        return writeOutput(process.stderr, errorDocument(error)).catch(() => {});
       }
     );
 }

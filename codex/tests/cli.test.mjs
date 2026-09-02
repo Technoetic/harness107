@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { Readable, PassThrough, Writable } from "node:stream";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { main } from "../scripts/harness-state.mjs";
 import { readJsonInput } from "../scripts/lib/json-io.mjs";
@@ -19,6 +21,7 @@ import {
 
 const INPUT_LIMIT = 1024 * 1024;
 const IMPORT_ACTION = "repair the Claude state or use a separate workspace";
+const cliPath = fileURLToPath(new URL("../scripts/harness-state.mjs", import.meta.url));
 
 function evidence(detail = "verified by CLI") {
   return [{
@@ -57,6 +60,35 @@ async function writeImportErrorFixture(root, overrides = {}) {
     ...overrides
   };
   await writeFile(path, `${JSON.stringify(artifact)}\n`, "utf8");
+}
+
+async function runCliWithClosedStdout(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [cliPath, ...args], {
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true
+    });
+    const stderr = [];
+    let settled = false;
+    const finish = callback => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback();
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      finish(() => reject(new Error("closed-stdout CLI timed out")));
+    }, 5000);
+    child.once("error", error => finish(() => reject(error)));
+    child.stderr.on("data", chunk => stderr.push(Buffer.from(chunk)));
+    child.once("close", code => finish(() => resolve({
+      code: code ?? 1,
+      stderr: Buffer.concat(stderr).toString("utf8")
+    })));
+    child.stdout.destroy();
+  });
 }
 
 test("show emits one JSON document and no diagnostic noise", async () => {
@@ -181,6 +213,25 @@ test("argument validation rejects malformed command lines deterministically", as
   }
 });
 
+test("a supplied step is validated before an unrelated required input flag", async () => {
+  const root = await makeWorkspace();
+  const cases = [
+    { value: "51", code: "STEP_RANGE" },
+    { value: "0", code: "STEP_RANGE" },
+    { value: "-1", code: "STEP_RANGE" },
+    { value: "1.0", code: "STEP_INTEGER" },
+    { value: "1e2", code: "STEP_INTEGER" },
+    { value: "9007199254740993", code: "STEP_INTEGER" }
+  ];
+  for (const fixture of cases) {
+    const result = await runCli([
+      "begin", "--workspace", root, "--step", fixture.value
+    ]);
+    assert.equal(parseFailure(result).code, fixture.code);
+    assert.equal(existsSync(join(root, "step_archive")), false);
+  }
+});
+
 test("input validation rejects empty malformed non-object unknown and mistyped JSON before mutation", async () => {
   const fixtures = [
     { input: "", code: "INPUT_EMPTY" },
@@ -241,10 +292,21 @@ test("stdin is byte-bounded and preserves UTF-8 characters split across chunks",
   assert.equal((await readJsonInput(Readable.from([exact]), INPUT_LIMIT)).value.length, INPUT_LIMIT - prefix - suffix);
 
   const root = await makeWorkspace();
-  const oversized = `{"topic":"${"x".repeat(INPUT_LIMIT)}"}`;
-  const result = await runCli(["init", "--workspace", root, "--input", "-"], { input: oversized });
+  const oversized = Buffer.from(`{"topic":"${"x".repeat(INPUT_LIMIT)}"}`);
+  const chunks = [];
+  for (let offset = 0; offset < oversized.length; offset += 16384) {
+    chunks.push(oversized.subarray(offset, offset + 16384));
+  }
+  const result = await runCli(["init", "--workspace", root, "--input", "-"], { input: chunks });
   assert.equal(parseFailure(result).code, "INPUT_TOO_LARGE");
   assert.equal(existsSync(join(root, "step_archive")), false);
+});
+
+test("runCli settles cleanly when an early-exit child closes stdin during large writes", async () => {
+  for (let iteration = 0; iteration < 5; iteration += 1) {
+    const result = await runCli(["show"], { input: Buffer.alloc(INPUT_LIMIT) });
+    assert.equal(parseFailure(result).code, "FLAG_REQUIRED");
+  }
 });
 
 test("stdin stream failures and stalled streams become stable bounded errors", async () => {
@@ -283,6 +345,64 @@ test("errors never echo input, secrets, environment values, or stack traces", as
   ], { input: `{"topic":"${secret}"` });
   parseFailure(malformed);
   assert.doesNotMatch(malformed.stderr, new RegExp(secret));
+});
+
+test("a closed process stdout becomes one sanitized error without a raw EPIPE stack", async () => {
+  const root = await makeWorkspace();
+  const result = await runCliWithClosedStdout(["show", "--workspace", root]);
+  assert.notEqual(result.code, 0);
+  assert.equal(result.stderr, "{\"error\":{\"code\":\"OUTPUT_STREAM\",\"message\":\"output stream failed\"}}\n");
+  assert.doesNotMatch(result.stderr, /EPIPE|node:internal|harness-state\.mjs|file:\/|Error:/i);
+});
+
+test("main rejects asynchronous output errors and removes its temporary listeners", async () => {
+  const root = await makeWorkspace();
+  const output = new Writable({
+    write(_chunk, _encoding, callback) {
+      setImmediate(() => callback(new Error("asynchronous output secret")));
+    }
+  });
+  const retainedErrorListener = () => {};
+  output.on("error", retainedErrorListener);
+  const baseline = {
+    error: output.listenerCount("error"),
+    close: output.listenerCount("close"),
+    drain: output.listenerCount("drain")
+  };
+  await assert.rejects(
+    () => main(["show", "--workspace", root], { stdout: output }),
+    error => error.code === "OUTPUT_STREAM" && !error.message.includes("secret")
+  );
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual({
+    error: output.listenerCount("error"),
+    close: output.listenerCount("close"),
+    drain: output.listenerCount("drain")
+  }, baseline);
+  output.removeListener("error", retainedErrorListener);
+});
+
+test("main rejects an output close before completion and removes its temporary listeners", async () => {
+  const root = await makeWorkspace();
+  const output = new Writable({
+    write(_chunk, _encoding, _callback) {
+      setImmediate(() => this.destroy());
+    }
+  });
+  const baseline = {
+    error: output.listenerCount("error"),
+    close: output.listenerCount("close"),
+    drain: output.listenerCount("drain")
+  };
+  await assert.rejects(
+    () => main(["show", "--workspace", root], { stdout: output }),
+    error => error.code === "OUTPUT_STREAM"
+  );
+  assert.deepEqual({
+    error: output.listenerCount("error"),
+    close: output.listenerCount("close"),
+    drain: output.listenerCount("drain")
+  }, baseline);
 });
 
 test("main supports injected streams and importing the module does not execute the entrypoint", async () => {
