@@ -71,7 +71,7 @@ const FILE_MUTATORS = new Set([
 ]);
 const NESTED_SHELLS = new Set(["bash", "dash", "sh", "zsh"]);
 const POWERSHELLS = new Set(["powershell", "pwsh"]);
-const WRAPPERS = new Set(["builtin", "call", "command", "doas", "exec", "nohup", "sudo"]);
+const WRAPPERS = new Set(["builtin", "call", "command", "doas", "exec", "nice", "nohup", "sudo", "time"]);
 const POWERSHELL_ALIASES = new Map([
   ["ac", "add-content"],
   ["clc", "clear-content"],
@@ -171,6 +171,21 @@ const POWERSHELL_COMMON_PARAMETERS = [
   "warningaction",
   "warningvariable"
 ];
+const POWERSHELL_COMMON_ALIASES = new Map([
+  ["cf", "confirm"],
+  ["db", "debug"],
+  ["ea", "erroraction"],
+  ["ev", "errorvariable"],
+  ["infa", "informationaction"],
+  ["iv", "informationvariable"],
+  ["ob", "outbuffer"],
+  ["ov", "outvariable"],
+  ["pv", "pipelinevariable"],
+  ["vb", "verbose"],
+  ["wa", "warningaction"],
+  ["wi", "whatif"],
+  ["wv", "warningvariable"]
+]);
 function powerShellParameterSet(...specific) {
   return new Set([...POWERSHELL_COMMON_PARAMETERS, ...specific]);
 }
@@ -403,7 +418,7 @@ function hasDynamicShellSyntax(command, index, token, quote) {
     return token !== "" || /^\{[^{}]*,[^{}]*\}/.test(command.slice(index));
   }
   if (character === "@") return token === "" && /[A-Za-z_(]/.test(next);
-  return character === "~" && token === "" && (next === "" || /[+\-\\/]/.test(next));
+  return character === "~" && token === "";
 }
 
 function lexShell(command) {
@@ -540,7 +555,7 @@ function lexShell(command) {
       tokenDynamic = false;
       tokens.push(command[index + 1] === ">" ? ">>" : ">");
       dynamicTokens.push(false);
-      if (command[index + 1] === ">") index += 1;
+      if (command[index + 1] === ">" || command[index + 1] === "|") index += 1;
       index += 1;
       continue;
     }
@@ -552,7 +567,7 @@ function lexShell(command) {
         index += 1;
         continue;
       }
-      if (next !== undefined && /[\s'"\\$`;&|>(){}>]/.test(next)) {
+      if (next !== undefined && /[\s'"\\/$`;&|>(){}>]/.test(next)) {
         token += next;
         index += 2;
         continue;
@@ -610,6 +625,15 @@ function commandAfterCmd(tokens) {
   return null;
 }
 
+function timeValueOption(token) {
+  const match = /^-[apqv]*([fo])([\s\S]*)$/.exec(token);
+  if (match === null) return null;
+  return {
+    attached: match[2] === "" ? null : match[2],
+    name: match[1] === "o" ? "output" : "format"
+  };
+}
+
 function wrapperCommandStart(tokens, executable) {
   const optionsWithValues = executable === "sudo"
     ? new Set(["-c", "--chdir", "-g", "--group", "-h", "--host", "-p", "--prompt", "-r", "--role", "-t", "--type", "-u", "--user"])
@@ -617,11 +641,21 @@ function wrapperCommandStart(tokens, executable) {
       ? new Set(["-u"])
       : executable === "exec"
         ? new Set(["-a"])
-        : new Set();
+        : executable === "nice"
+          ? new Set(["-n", "--adjustment"])
+          : executable === "time"
+            ? new Set(["-f", "--format", "-o", "--output"])
+            : new Set();
   let index = 1;
   while (index < tokens.length) {
     const token = tokens[index];
     if (token === "--") return index + 1;
+    if (["--help", "--version"].includes(token)) return -1;
+    const timeOption = executable === "time" ? timeValueOption(token) : null;
+    if (timeOption !== null) {
+      index += timeOption.attached === null ? 2 : 1;
+      continue;
+    }
     if (optionsWithValues.has(token.toLowerCase())) {
       index += 2;
       continue;
@@ -632,7 +666,11 @@ function wrapperCommandStart(tokens, executable) {
         ? /^-u.+/i.test(token)
         : executable === "exec"
           ? /^-a.+/.test(token)
-          : false;
+          : executable === "nice"
+            ? /^-n.+/.test(token) || /^--adjustment=/.test(token)
+            : executable === "time"
+              ? /^--(?:format|output)=/.test(token)
+              : false;
     if (hasAttachedValue) {
       index += 1;
       continue;
@@ -654,6 +692,7 @@ function envCommandParts(tokens, dynamicTokens) {
     let expanded = false;
     while (index < expandedTokens.length) {
       const token = expandedTokens[index];
+      if (["--help", "--version"].includes(token)) return null;
       if (token === "--") {
         return {
           tokens: expandedTokens.slice(index + 1),
@@ -664,11 +703,11 @@ function envCommandParts(tokens, dynamicTokens) {
         index += 1;
         continue;
       }
-      if (["-u", "--unset", "-C", "--chdir"].includes(token)) {
+      if (["-a", "--argv0", "-u", "--unset", "-C", "--chdir"].includes(token)) {
         index += 2;
         continue;
       }
-      if (/^(?:-u.+|-C.+|--(?:unset|chdir)=.+)$/.test(token)) {
+      if (/^(?:-a.+|-u.+|-C.+|--(?:argv0|unset|chdir)=.+)$/.test(token)) {
         index += 1;
         continue;
       }
@@ -835,6 +874,9 @@ function collectParsedInvocation(parsed, invocations, depth, variables = new Map
       invocation.dynamicCommand ||= nested.dynamic;
       collectInvocations(nested.command, invocations, depth + 1);
     }
+  } else if (executable === "git") {
+    const nested = gitAliasCommand(tokens);
+    if (nested !== null) collectInvocations(nested, invocations, depth + 1);
   } else {
     const parts = executable === "env" ? envCommandParts(tokens, dynamicTokens) : null;
     const start = WRAPPERS.has(executable) ? wrapperCommandStart(tokens, executable) : -1;
@@ -883,12 +925,45 @@ function isSystemDestructive(tokens) {
   return false;
 }
 
+const GUARDED_GIT_BUILTINS = new Set([
+  "branch",
+  "checkout",
+  "clean",
+  "help",
+  "push",
+  "reset",
+  "restore",
+  "status",
+  "switch",
+  "version"
+]);
+
+function recordGitConfig(value, aliases) {
+  const match = /^alias\.([^=]+)=([\s\S]*)$/i.exec(value);
+  if (match !== null && match[1] !== "") aliases.set(match[1].toLowerCase(), match[2]);
+}
+
 function gitSubcommand(tokens) {
   if (executableName(tokens[0]) !== "git") return null;
+  const aliases = new Map();
   let index = 1;
   while (index < tokens.length) {
     const token = tokens[index];
-    if (token === "-C" || token === "-c" || token === "--git-dir" || token === "--work-tree") {
+    if (["-h", "--help", "-v", "--version"].includes(token)) {
+      return { inert: true, aliases, name: null, args: [] };
+    }
+    if (token === "-c") {
+      if (index + 1 < tokens.length) recordGitConfig(tokens[index + 1], aliases);
+      index += 2;
+      continue;
+    }
+    const attachedConfig = /^-c([\s\S]+)$/.exec(token);
+    if (attachedConfig !== null) {
+      recordGitConfig(attachedConfig[1], aliases);
+      index += 1;
+      continue;
+    }
+    if (token === "-C" || token === "--git-dir" || token === "--work-tree") {
       index += 2;
       continue;
     }
@@ -896,9 +971,31 @@ function gitSubcommand(tokens) {
       index += 1;
       continue;
     }
-    return { name: token.toLowerCase(), args: tokens.slice(index + 1) };
+    return { inert: false, aliases, name: token.toLowerCase(), args: tokens.slice(index + 1) };
   }
   return null;
+}
+
+function quoteShellLiteral(value) {
+  return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+function gitAliasCommand(tokens) {
+  const parsed = gitSubcommand(tokens);
+  if (
+    parsed === null ||
+    parsed.inert ||
+    parsed.name === null ||
+    GUARDED_GIT_BUILTINS.has(parsed.name)
+  ) return null;
+  const body = parsed.aliases.get(parsed.name)?.trimStart();
+  if (body === undefined || body === "") return null;
+  const suffix = parsed.args.map(quoteShellLiteral).join(" ");
+  if (body.startsWith("!")) return `${body.slice(1)}${suffix === "" ? "" : ` ${suffix}`}`;
+  const configs = [...parsed.aliases]
+    .map(([name, value]) => `-c ${quoteShellLiteral(`alias.${name}=${value}`)}`)
+    .join(" ");
+  return `git${configs === "" ? "" : ` ${configs}`} ${body}${suffix === "" ? "" : ` ${suffix}`}`;
 }
 
 async function checkoutArgumentIsPath(argument, workspaceRoot) {
@@ -916,9 +1013,11 @@ async function checkoutArgumentIsPath(argument, workspaceRoot) {
 
 async function isGitDestructive(tokens, workspaceRoot) {
   const subcommand = gitSubcommand(tokens);
-  if (subcommand === null) return false;
+  if (subcommand === null || subcommand.inert || subcommand.name === null) return false;
   const { name, args } = subcommand;
-  if (args.some(argument => argument === "-h" || argument === "--help")) return false;
+  const separator = args.indexOf("--");
+  const optionArguments = separator < 0 ? args : args.slice(0, separator);
+  if (optionArguments.some(argument => argument === "-h" || argument === "--help")) return false;
   if (name === "reset" && args.includes("--hard")) return true;
   if (name === "clean") {
     return args.some(argument => /^-[^-]*f/i.test(argument)) || args.includes("--force");
@@ -928,6 +1027,7 @@ async function isGitDestructive(tokens, workspaceRoot) {
       (/^-[^-]/.test(argument) && argument.slice(1).includes("f")) ||
       (/^-[^-]/.test(argument) && argument.slice(1).includes("d")) ||
       argument.startsWith("+") ||
+      /^:.+/.test(argument) ||
       /^--force(?:-with-lease|-if-includes)?(?:=|$)/i.test(argument) ||
       ["--delete", "--mirror", "--prune"].includes(argument)
     );
@@ -972,6 +1072,7 @@ async function isGitDestructive(tokens, workspaceRoot) {
   if (name === "branch") {
     return args.some(argument =>
       argument === "-D" ||
+      (/^-[^-]*D/.test(argument)) ||
       (/^-[^-]*[MC]/.test(argument)) ||
       argument === "--force" ||
       (/^-[^-]/.test(argument) && argument.slice(1).includes("f"))
@@ -999,6 +1100,8 @@ function parsedPowerShellParameter(token) {
 function resolvedPowerShellParameter(parameter, executable) {
   const available = POWERSHELL_COMMAND_PARAMETERS.get(executable);
   if (available === undefined) return null;
+  const alias = POWERSHELL_COMMON_ALIASES.get(parameter.name);
+  if (alias !== undefined && available.has(alias)) return { ...parameter, name: alias };
   const matches = [...available].filter(name => name.startsWith(parameter.name));
   if (matches.length !== 1) return null;
   return { ...parameter, name: matches[0] };
@@ -1014,6 +1117,8 @@ function powerShellWildcard(value) {
 
 function powerShellFileCandidates(tokens, dynamicTokens, executable) {
   const explicit = [];
+  const copySources = [];
+  const copyDestinations = [];
   const positional = [];
   for (let index = 1; index < tokens.length; index += 1) {
     const token = tokens[index];
@@ -1025,14 +1130,19 @@ function powerShellFileCandidates(tokens, dynamicTokens, executable) {
     const parameter = resolvedPowerShellParameter(parsedParameter, executable);
     if (parameter === null) return [];
     if (POWERSHELL_PATH_PARAMETERS.has(parameter.name)) {
+      const target = executable === "copy-item" && parameter.name === "destination"
+        ? copyDestinations
+        : executable === "copy-item" && ["literalpath", "path"].includes(parameter.name)
+          ? copySources
+          : explicit;
       if (parameter.attached !== null && parameter.attached !== "") {
-        explicit.push(candidate(
+        target.push(candidate(
           parameter.attached,
           dynamicTokens[index] || (parameter.name !== "literalpath" && powerShellWildcard(parameter.attached))
         ));
       } else if (index + 1 < tokens.length) {
         const value = tokens[index + 1];
-        explicit.push(candidate(
+        target.push(candidate(
           value,
           dynamicTokens[index + 1] || (parameter.name !== "literalpath" && powerShellWildcard(value))
         ));
@@ -1042,7 +1152,7 @@ function powerShellFileCandidates(tokens, dynamicTokens, executable) {
     }
     if (POWERSHELL_VALUE_PARAMETERS.has(parameter.name)) {
       if (parameter.attached === null) {
-        if (index + 1 >= tokens.length) return [];
+        if (index + 1 >= tokens.length) break;
         index += 1;
       }
       continue;
@@ -1052,8 +1162,21 @@ function powerShellFileCandidates(tokens, dynamicTokens, executable) {
   if (POWERSHELL_CONTENT_COMMANDS.has(executable)) {
     return explicit.length > 0 ? explicit : positional.slice(0, 1);
   }
+  if (executable === "copy-item") {
+    if (copyDestinations.length > 0) return copyDestinations;
+    if (copySources.length > 0 && positional.length > 0) return positional.slice(-1);
+    return positional.length > 1 ? positional.slice(-1) : [];
+  }
   const positionalLimit = ["copy-item", "move-item", "rename-item"].includes(executable) ? 2 : positional.length;
   return [...explicit, ...positional.slice(0, positionalLimit)];
+}
+
+function targetDirectoryOption(token) {
+  const long = /^--target-directory(?:=([\s\S]+))?$/.exec(token);
+  if (long !== null) return { attached: long[1] ?? null };
+  const short = /^-[abdfHilLnprRuvxZ]*t([\s\S]*)$/.exec(token);
+  if (short !== null) return { attached: short[1] === "" ? null : short[1] };
+  return null;
 }
 
 function fileCandidates(tokens, dynamicTokens) {
@@ -1062,7 +1185,37 @@ function fileCandidates(tokens, dynamicTokens) {
     return powerShellFileCandidates(tokens, dynamicTokens, executable);
   }
   const candidates = [];
+  if (executable === "time") {
+    for (let index = 1; index < tokens.length; index += 1) {
+      const token = tokens[index];
+      const shortOption = timeValueOption(token);
+      if (shortOption !== null) {
+        if (shortOption.name === "output") {
+          if (shortOption.attached !== null) {
+            candidates.push(candidate(shortOption.attached, dynamicTokens[index]));
+          } else if (index + 1 < tokens.length) {
+            candidates.push(candidate(tokens[index + 1], dynamicTokens[index + 1]));
+          }
+        }
+        if (shortOption.attached === null) index += 1;
+        continue;
+      }
+      const attached = /^(?:-o|--output=)([\s\S]+)$/.exec(token);
+      if (attached !== null) {
+        candidates.push(candidate(attached[1], dynamicTokens[index]));
+        continue;
+      }
+      if (token === "-o" || token === "--output") {
+        if (index + 1 < tokens.length) candidates.push(candidate(tokens[index + 1], dynamicTokens[index + 1]));
+        break;
+      }
+      if (token === "--") break;
+      if (!token.startsWith("-") || token === "-") break;
+    }
+  }
   if (FILE_MUTATORS.has(executable)) {
+    const positionals = [];
+    const targetDirectories = [];
     let optionsEnded = false;
     for (let index = 1; index < tokens.length; index += 1) {
       const token = tokens[index];
@@ -1071,14 +1224,18 @@ function fileCandidates(tokens, dynamicTokens) {
         continue;
       }
       if (!optionsEnded && ["cp", "mv"].includes(executable)) {
-        const attachedTarget = /^(?:-t|--target-directory=)(.+)$/.exec(token);
-        if (attachedTarget !== null) {
-          candidates.push(candidate(attachedTarget[1], dynamicTokens[index]));
+        const targetOption = targetDirectoryOption(token);
+        if (targetOption !== null) {
+          if (targetOption.attached !== null) {
+            targetDirectories.push(candidate(targetOption.attached, dynamicTokens[index]));
+          } else if (index + 1 < tokens.length) {
+            targetDirectories.push(candidate(tokens[index + 1], dynamicTokens[index + 1]));
+            index += 1;
+          }
           continue;
         }
-        if (token === "-t" || token === "--target-directory") {
+        if (token === "-S" || token === "--suffix") {
           if (index + 1 < tokens.length) {
-            candidates.push(candidate(tokens[index + 1], dynamicTokens[index + 1]));
             index += 1;
           }
           continue;
@@ -1092,10 +1249,21 @@ function fileCandidates(tokens, dynamicTokens) {
       if (!optionsEnded && token.startsWith("-") && token !== "-") continue;
       if (!optionsEnded && ["del", "erase", "rd"].includes(executable) && CMD_SWITCHES.has(token.toLowerCase())) continue;
       if (!optionsEnded && CMD_FILE_SWITCHES.get(executable)?.has(token.toLowerCase())) continue;
-      candidates.push(candidate(
+      positionals.push(candidate(
         token,
         dynamicTokens[index] || (["del", "erase"].includes(executable) && powerShellWildcard(token))
       ));
+    }
+    if (["cp", "copy"].includes(executable)) {
+      candidates.push(...(
+        targetDirectories.length > 0
+          ? targetDirectories
+          : positionals.length > 1
+            ? positionals.slice(-1)
+            : []
+      ));
+    } else {
+      candidates.push(...targetDirectories, ...positionals);
     }
   }
   for (let index = 0; index < tokens.length - 1; index += 1) {
@@ -1197,11 +1365,12 @@ async function physicalRisk(pathApi, root, target) {
   return null;
 }
 
-async function analyzeTarget(value, workspaceRoot, { patch = false, dynamic } = {}) {
+async function analyzeTarget(value, workspaceRoot, { patch = false, dynamic, cleanupGlob = false } = {}) {
   if (typeof value !== "string" || value.trim() === "" || value.includes("\0")) {
     return patch ? "patch-outside-workspace" : "dynamic-target";
   }
-  if (windowsAmbiguity(value)) {
+  const rootUsesWindows = windowsPath(workspaceRoot);
+  if ((rootUsesWindows || /^(?:[A-Za-z]:|\\\\)/.test(value)) && windowsAmbiguity(value)) {
     return patch ? "patch-outside-workspace" : "dynamic-target";
   }
   let targetText = value.trim();
@@ -1212,10 +1381,18 @@ async function analyzeTarget(value, workspaceRoot, { patch = false, dynamic } = 
   ) {
     targetText = targetText.slice(1, -1);
   }
-  const rootUsesWindows = windowsPath(workspaceRoot);
+  if (targetText.startsWith("\\/")) {
+    targetText = `.harness50-literal-backslash/${targetText.slice(2)}`;
+  }
   const pathApi = rootUsesWindows ? win32 : posix;
   const root = pathApi.resolve(workspaceRoot);
+  const home = homedir();
   let targetDynamic = dynamic;
+  if (targetDynamic === true && /^~(?:[\\/]|$)/.test(targetText)) {
+    const suffix = targetText.slice(1).replace(/^[\\/]+/, "");
+    targetText = suffix === "" ? home : pathApi.join(home, suffix);
+    targetDynamic = false;
+  }
   if (targetDynamic === true && /^~\+(?:[\\/]|$)/.test(targetText)) {
     const suffix = targetText.slice(2).replace(/^[\\/]+/, "");
     targetText = suffix === "" ? root : pathApi.join(root, suffix);
@@ -1241,13 +1418,19 @@ async function analyzeTarget(value, workspaceRoot, { patch = false, dynamic } = 
   if (normalizedTarget === normalizedRoot || isOutside(pathApi, root, resolvedTarget)) {
     return patch ? "patch-outside-workspace" : "protected-root";
   }
-  const home = homedir();
   if (windowsPath(home) === rootUsesWindows) {
     const normalizedHome = comparable(pathApi, pathApi.resolve(home));
     if (normalizedTarget === normalizedHome) return patch ? "patch-outside-workspace" : "protected-root";
   }
   if (isSensitivePath(targetText) || isSensitivePath(pathApi.relative(root, resolvedTarget))) {
     return patch ? "patch-sensitive-path" : "sensitive-path";
+  }
+  const cleanupMatch = /^[^*?\[\]{}$%!]+[\\/]\*$/.exec(targetText);
+  if (targetDynamic === true && cleanupGlob && cleanupMatch !== null) {
+    const cleanupBase = pathApi.resolve(root, targetText.slice(0, -2));
+    if (comparable(pathApi, cleanupBase) !== normalizedRoot && !isOutside(pathApi, root, cleanupBase)) {
+      targetDynamic = false;
+    }
   }
   if (targetDynamic === true || (targetDynamic === undefined && dynamicTarget(targetText))) {
     return patch ? "patch-outside-workspace" : "dynamic-target";
@@ -1276,8 +1459,9 @@ async function classifyShell(command, workspaceRoot) {
     if (receivesPipeline && FILE_MUTATORS.has(fileMutationName(tokens[0])) && candidates.length === 0) {
       rules.push("dynamic-target");
     }
+    const cleanupGlob = ["remove-item", "ri", "rm", "rmdir"].includes(fileMutationName(tokens[0]));
     for (const { value, dynamic } of candidates) {
-      const risk = await analyzeTarget(value, workspaceRoot, { dynamic });
+      const risk = await analyzeTarget(value, workspaceRoot, { dynamic, cleanupGlob });
       if (risk !== null) rules.push(risk);
     }
   }

@@ -279,6 +279,48 @@ test("copy and move destination options remain protected without treating option
   }
 });
 
+test("copy inspects only destinations while move also protects source boundaries", async context => {
+  const root = await makeWorkspace();
+  for (const command of [
+    "cp ./safe -vt../outside",
+    "cp -avt../outside ./safe",
+    "cp -t../outside -av ./safe",
+    "mv ./safe -vt../outside",
+    "mv -vt../outside ./safe",
+    "cp ./safe ../outside/copy",
+    "copy /Y ./safe ../outside/copy",
+    "Copy-Item -Path ./safe -Destination ../outside/copy",
+    "Copy-Item -Path ./safe ../outside/copy",
+    "mv ../outside/source ./moved",
+    "move /Y ../outside/source ./moved",
+    "Move-Item -Path ../outside/source -Destination ./moved"
+  ]) {
+    await context.test(command, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny("protected-root"));
+    });
+  }
+  for (const command of [
+    "cp ../outside/source ./copy",
+    "cp ../outside/one ../outside/two ./copy",
+    "cp -t ./copy ../outside/source",
+    "copy /Y ../outside/source ./copy",
+    "copy /Y ../outside/* ./copy",
+    "Copy-Item -Path ../outside/source -Destination ./copy",
+    "Copy-Item -Path ../outside/* -Destination ./copy",
+    "Copy-Item -Path ../outside/source ./copy",
+    "Copy-Item ../outside/source ./copy",
+    "cp ../outside/source",
+    "copy /Y ../outside/source",
+    "mv ./safe ./moved",
+    "move /Y ./safe ./moved",
+    "Move-Item -Path ./safe -Destination ./moved"
+  ]) {
+    await context.test(`safe: ${command}`, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), {});
+    });
+  }
+});
+
 test("escaped executable names, assignments, and execution wrappers cannot hide destructive commands", async () => {
   const root = await makeWorkspace();
   const cases = [
@@ -302,6 +344,46 @@ test("escaped executable names, assignments, and execution wrappers cannot hide 
     {}
   );
   assert.deepEqual(await inspect("env -u NAME npm test", { workspaceRoot: root }), {});
+});
+
+test("env argv0 time and nice wrappers expose the command after their options", async context => {
+  const root = await makeWorkspace();
+  for (const command of [
+    "env -a custom rm -rf /",
+    "env --argv0=custom rm -rf /",
+    "env --argv0 custom rm -rf /",
+    "env -S \"-a custom rm -rf /\"",
+    "time rm -rf /",
+    "time -p rm -rf /",
+    "time -o ./timing rm -rf /",
+    "time -o ../outside.timing npm test",
+    "time -ao ../outside.timing npm test",
+    "nice rm -rf /",
+    "nice -n 5 rm -rf /",
+    "nice --adjustment=5 git reset --hard"
+  ]) {
+    await context.test(command, async () => {
+      const rule = command.includes("git reset") ? "git-destructive" : "protected-root";
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny(rule));
+    });
+  }
+  for (const command of [
+    "env -a custom npm test",
+    "env -S \"-a custom npm test\"",
+    "env --help rm -rf /",
+    "env --version rm -rf /",
+    "time -p npm test",
+    "time -o ./timing npm test",
+    "time -ao ./timing npm test",
+    "nice -n 5 npm test",
+    "nice --adjustment=5 npm test",
+    "nice --help rm -rf /",
+    "nice --version rm -rf /"
+  ]) {
+    await context.test(`safe: ${command}`, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), {});
+    });
+  }
 });
 
 test("dynamic substitutions and implicit pipeline targets fail closed without blocking explicit safe paths", async () => {
@@ -427,6 +509,58 @@ test("bounded static shell expansions cannot hide an executable or protected tar
   }
 });
 
+test("tilde expansion redirection and cleanup globs preserve their path boundaries", async context => {
+  const root = await makeWorkspace();
+  const dangerous = [
+    ["rm -rf ~", "protected-root"],
+    ["rm -rf ~/Documents", "protected-root"],
+    ["rm -rf ~root", "dynamic-target"],
+    ["rm -rf ~root/tmp", "dynamic-target"],
+    ["rm -rf \\/", "protected-root"],
+    ["printf x >| C:/", "protected-root"],
+    ["printf x >| ../outside.txt", "protected-root"],
+    ["rm -rf .git/*", "sensitive-path"],
+    ["rm -rf ../outside/*", "protected-root"],
+    ["rm -rf ./*", "dynamic-target"],
+    ["rm -rf ./dist/../*", "dynamic-target"],
+    ["Remove-Item -Recurse -Force ./*", "dynamic-target"],
+    ["Remove-Item -Recurse -Force .git/*", "sensitive-path"]
+  ];
+  for (const [command, rule] of dangerous) {
+    await context.test(command, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny(rule));
+    });
+  }
+  for (const command of [
+    "rm -rf '~'",
+    "rm -rf '~root'",
+    "rm -rf \"~root/tmp\"",
+    "rm -rf ~+/dist",
+    "rm -rf ./dist/*",
+    "Remove-Item -Recurse -Force ./dist/*",
+    "rm -rf '\\/'",
+    "rm -rf \"\\\\/\"",
+    "rm -rf '{root,dist}'",
+    "printf x >| ./notes.txt"
+  ]) {
+    await context.test(`safe: ${command}`, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), {});
+    });
+  }
+  await context.test("POSIX quoted braces remain literal path data", async () => {
+    assert.deepEqual(
+      await inspect("rm -rf '{/,./dist}'", { workspaceRoot: "/tmp/harness50-workspace" }),
+      {}
+    );
+  });
+  await context.test("Windows retains its trailing-dot ambiguity for the same literal", async () => {
+    assert.deepEqual(
+      await inspect("rm -rf '{/,./dist}'", { workspaceRoot: root }),
+      expectedDeny("dynamic-target")
+    );
+  });
+});
+
 test("git worktree replacement and force variants deny without treating ordinary branch switches as path checkout", async () => {
   const root = await makeWorkspace();
   for (const command of [
@@ -538,6 +672,63 @@ test("Git forced refs magic pathspecs and destructive remote flags deny while he
   }
 });
 
+test("Git deletion refspecs and clustered force-delete flags remain destructive", async context => {
+  const root = await makeWorkspace();
+  for (const command of [
+    "git push origin :main",
+    "git push origin :refs/heads/main",
+    "git push origin -- :main",
+    "git branch -vD old",
+    "git branch -qD old",
+    "git branch -avD old"
+  ]) {
+    await context.test(command, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny("git-destructive"));
+    });
+  }
+  for (const command of [
+    "git push origin main",
+    "git push origin main:main",
+    "git push origin :",
+    "git push origin -- main",
+    "git branch -vd merged-feature",
+    "git branch -qd merged-feature"
+  ]) {
+    await context.test(`safe: ${command}`, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), {});
+    });
+  }
+});
+
+test("Git option boundaries and visible inline aliases retain their destructive semantics", async context => {
+  const root = await makeWorkspace();
+  for (const [command, rule] of [
+    ["git restore -- --help", "git-destructive"],
+    ["git checkout HEAD -- --help", "git-destructive"],
+    ["git -c alias.wipe='reset --hard' wipe", "git-destructive"],
+    ["git -c alias.wipe='clean -fdx' wipe", "git-destructive"],
+    ["git -c alias.wipe='!rm -rf /' wipe", "protected-root"],
+    ["git -calias.wipe='reset --hard' wipe", "git-destructive"]
+  ]) {
+    await context.test(command, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny(rule));
+    });
+  }
+  for (const command of [
+    "git --help reset --hard",
+    "git --version reset --hard",
+    "git -c color.ui=always status",
+    "git -c alias.view='status --short' view",
+    "git -c alias.status='reset --hard' status",
+    "git restore --help README.md",
+    "git checkout --help README.md"
+  ]) {
+    await context.test(`safe: ${command}`, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), {});
+    });
+  }
+});
+
 test("PowerShell content data is not classified as a path while explicit targets remain protected", async () => {
   const root = await makeWorkspace();
   for (const command of [
@@ -615,6 +806,46 @@ test("PowerShell resolves only unambiguous command parameter abbreviations", asy
     "Set-Content -Val x -Pat ./notes.txt",
     "Copy-Item -Pat ./safe -Dest ./copy",
     "Tee-Object -Fi ./notes.txt"
+  ]) {
+    await context.test(`safe: ${command}`, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), {});
+    });
+  }
+});
+
+test("PowerShell common parameter aliases preserve previously parsed path targets", async context => {
+  const root = await makeWorkspace();
+  const dangerous = [
+    ["Remove-Item C:/ -ea", "protected-root"],
+    ["Remove-Item C:/ -ev", "protected-root"],
+    ["Set-Content .git/config -wa", "sensitive-path"],
+    ["Rename-Item .git git-old -ea", "sensitive-path"],
+    ["Remove-Item C:/ -ea SilentlyContinue", "protected-root"],
+    ["Remove-Item C:/ -ev errors", "protected-root"],
+    ["Remove-Item C:/ -wa SilentlyContinue", "protected-root"],
+    ["Remove-Item C:/ -wv warnings", "protected-root"],
+    ["Remove-Item C:/ -ov output", "protected-root"],
+    ["Remove-Item C:/ -ob 1", "protected-root"],
+    ["Remove-Item C:/ -pv item", "protected-root"],
+    ["Remove-Item C:/ -infa Continue", "protected-root"],
+    ["Remove-Item C:/ -iv info", "protected-root"],
+    ["Remove-Item C:/ -vb", "protected-root"],
+    ["Remove-Item C:/ -db", "protected-root"],
+    ["Remove-Item C:/ -wi", "protected-root"],
+    ["Remove-Item C:/ -cf:false", "protected-root"]
+  ];
+  for (const [command, rule] of dangerous) {
+    await context.test(command, async () => {
+      assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny(rule));
+    });
+  }
+  for (const command of [
+    "Remove-Item ./dist -ea SilentlyContinue",
+    "Remove-Item ./dist -ev errors",
+    "Set-Content ./notes.txt -wa SilentlyContinue",
+    "Rename-Item ./old ./new -ea Stop",
+    "Remove-Item ./dist -vb -db -wi -cf:false",
+    "Set-Content -Pa .git/config -Val x"
   ]) {
     await context.test(`safe: ${command}`, async () => {
       assert.deepEqual(await inspect(command, { workspaceRoot: root }), {});
@@ -705,7 +936,6 @@ test("destructive targets protect roots, home, workspace boundaries, metadata, a
     "rm -rf $TARGET",
     "rm -rf ${TARGET}",
     "rm -rf %TEMP%",
-    "rm -rf ./build/*",
     "rm -rf C:relative",
     "rm -rf \\\\?\\C:\\workspace",
     "rm -rf C:\\workspace\\file.txt:stream",
