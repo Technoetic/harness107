@@ -285,6 +285,30 @@ function mutationControlPaths(paths) {
   ];
 }
 
+function finalControlFiles(paths) {
+  return [
+    join(paths.workspaceRoot, ...TOPIC_RELATIVE_PATH.split("/")),
+    paths.statePath,
+    paths.eventsPath,
+    paths.importErrorPath
+  ];
+}
+
+async function assertUnaliasedControlFiles(paths) {
+  for (const path of finalControlFiles(paths)) {
+    let value;
+    try {
+      value = await lstat(path, { bigint: true });
+    } catch (error) {
+      if (error?.code === "ENOENT") continue;
+      throw error;
+    }
+    if (value.isSymbolicLink() || !value.isFile() || value.nlink !== 1n) {
+      fail("WORKSPACE_PATH_UNSAFE", "workflow control files must be unaliased regular files");
+    }
+  }
+}
+
 async function captureMutationGuard(paths) {
   const stablePaths = [
     paths.workspaceRoot,
@@ -307,6 +331,7 @@ async function assertMutationGuard(guard, extraPaths = []) {
     ...mutationControlPaths(paths),
     ...extraPaths
   ]);
+  await assertUnaliasedControlFiles(paths);
   for (const [path, expected] of identities) {
     let current;
     try {
@@ -1042,7 +1067,23 @@ function authoritativeReceiptPrefix(state, receipts) {
   const prefix = [];
   for (const receipt of receipts) {
     const expectedStep = prefix.length + 1;
-    if (receipt.step !== expectedStep || receipt.workflow_id !== state.workflow_id) break;
+    if (receipt.step !== expectedStep) {
+      if (receipt.step > expectedStep) {
+        return {
+          prefix,
+          code: "RECEIPT_GAP",
+          preserveAttempt: state.current_step === expectedStep && state.current_attempt !== null
+        };
+      }
+      break;
+    }
+    if (receipt.workflow_id !== state.workflow_id) {
+      return {
+        prefix,
+        code: "RECEIPT_WORKFLOW_MISMATCH",
+        preserveAttempt: receipt.step === state.current_step && state.current_attempt !== null
+      };
+    }
     const code = receiptAuthorityCode(state, receipt);
     if (code !== null) {
       return {
@@ -1137,13 +1178,6 @@ export async function reconcileWorkflow({
         };
       } else {
         result = reconcileReceipts(before, receipts);
-        const recoveredForward = result.state.completed_steps.length > before.completed_steps.length;
-        if (recoveredForward && before.owner !== null && ownerLeaseExpired(before.owner, clock.iso)) {
-          result = {
-            ...result,
-            state: validateState({ ...result.state, owner: null })
-          };
-        }
       }
     } catch (error) {
       if (!receiptValidationError(error)) throw error;
@@ -1155,6 +1189,9 @@ export async function reconcileWorkflow({
       };
     }
     let state = result.state;
+    if (state.owner !== null && ownerLeaseExpired(state.owner, clock.iso)) {
+      state = validateState({ ...state, owner: null });
+    }
     const changed = !sameJson(state, before);
     if (changed) {
       state = validateState({ ...state, updated_at: clock.iso });
