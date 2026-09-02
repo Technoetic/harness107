@@ -2846,7 +2846,7 @@ test("implementation batch declares the exact Codex-native evidence contracts", 
         "step_archive/step034_knip베이스라인.md",
         "step_archive/step037_구현manifest.md"
       ],
-      outputs: ["step_archive/step038_smoke_test.md", "step_archive/outputs/trust5_r1.md"],
+      outputs: ["step_archive/step038_smoke_test.md", "step_archive/outputs/trust5_r1.md", "dist/index.html"],
       requires: ["step031", "step033", "step034", "step037"],
       optional_requires: [],
       network: false,
@@ -3248,5 +3248,789 @@ test("step038 section checks reject optional builds, empty HTML, skipped cycles,
   for (const [name, mutation] of Object.entries(mutations)) {
     assert.notEqual(mutation, original, `step038 mutation did not change content: ${name}`);
     assert.throws(() => assertStep38GateContract(mutation), undefined, `step038 mutation escaped: ${name}`);
+  }
+});
+
+const REVIEW_BUILD_COMMAND_PATTERN = "^(?:npm run|pnpm(?: run)?|yarn(?: run)?|bun run) (?:build|[A-Za-z0-9][A-Za-z0-9:_-]*build[A-Za-z0-9:_-]*)$";
+
+const EXPECTED_REVIEW_ACCEPTANCE_DESCRIPTIONS = {
+  step039: {
+    "layout-desktop-screenshot": "Stores the final 1920x1080 layout verification capture after any fixes.",
+    "layout-tablet-screenshot": "Stores the final 768x1024 layout verification capture after any fixes.",
+    "layout-mobile-screenshot": "Stores the final 390x844 layout verification capture after any fixes.",
+    "layout-verification-report": "Stores every bounded independent layout review round and the final evidenced verdict.",
+    "exact-layout-viewports": "Confirms captures use exactly the declared desktop, tablet, and mobile viewports.",
+    "design-responsive-accessibility": "Confirms design fidelity, responsive behavior, and accessibility are all independently checked.",
+    "independent-layout-verifier": "Confirms the non-modifying verifier is distinct from the layout remediator.",
+    "visual-inspection-required": "Confirms the verifier actually opens every final screenshot and deterministic checks never replace visual inspection.",
+    "bounded-pass-loop": "Requires an evidenced PASS within five rounds with no unresolved Critical or Important finding."
+  },
+  step040: {
+    "comparison-desktop-screenshot": "Stores the final desktop implementation capture compared with persisted research.",
+    "comparison-tablet-screenshot": "Stores the final tablet implementation capture compared with persisted research.",
+    "comparison-mobile-screenshot": "Stores the final mobile implementation capture compared with persisted research.",
+    "research-comparison-report": "Stores every bounded independent eight-axis comparison round and final verdict.",
+    "persisted-research-only": "Confirms comparison uses only persisted Step 22 through 24 evidence and performs no new browsing.",
+    "eight-axis-comparison": "Confirms all eight declared design axes are compared at every required viewport.",
+    "comparison-traceability": "Traces every judgment and remediation to exact persisted evidence and observed screenshot regions.",
+    "independent-comparison-verifier": "Confirms the non-modifying verifier is distinct from the comparison remediator.",
+    "visual-inspection-required": "Confirms persisted and implementation screenshots are actually opened rather than inferred from files or checks.",
+    "bounded-pass-loop": "Requires an evidenced PASS within five rounds with no unresolved Critical or Important finding."
+  },
+  step041: {
+    "javascript-modularization-report": "Stores module boundaries, behavior checks, async lifecycle evidence, build results, and independent review.",
+    "project-build-command": "Runs the exact non-optional build script declared by the project manifest.",
+    "external-javascript-modules": "Confirms JavaScript lives in external src/js modules with no inline script implementation.",
+    "class-boundaries": "Confirms cohesive Class boundaries and lightweight constructors preserve the selected architecture.",
+    "async-lifecycle": "Confirms async initialization, start, I/O, concurrency, yielding, cancellation, and error handling.",
+    "behavior-preservation": "Confirms behavior, accessibility, and the current dist HTML boundary remain intact after modularization.",
+    "independent-javascript-verifier": "Confirms a non-modifying independent verifier checks source, behavior, build, and report evidence."
+  },
+  step042: {
+    "css-separation-report": "Stores CSS responsibility boundaries, reference order, responsive and accessibility checks, build results, and independent review.",
+    "project-build-command": "Runs the exact non-optional build script declared by the project manifest.",
+    "external-css-files": "Confirms styles live in responsibility-based src/css files with no style element or style attribute.",
+    "stylesheet-order-and-references": "Confirms stylesheet order, tokens, breakpoints, and HTML references remain correct.",
+    "css-accessibility-preserved": "Confirms focus, reduced motion, contrast, and responsive behavior remain intact.",
+    "independent-css-verifier": "Confirms a non-modifying independent verifier checks CSS boundaries, behavior, build, and report evidence."
+  },
+  step043: {
+    "awwwards-applied-screenshot": "Stores the final implementation capture after evidence-bound Awwwards remediation.",
+    "awwwards-verification-report": "Stores every bounded independent Awwwards comparison round and the final evidenced verdict.",
+    "persisted-research-only": "Confirms review uses only persisted Step 22 through 24 research and performs no new browsing.",
+    "minimal-evidence-bound-remediation": "Confirms changes are minimal and trace only to observed evidence, using CSS before necessary visualization JavaScript or HTML.",
+    "independent-awwwards-verifier": "Confirms the non-modifying verifier is distinct from the Awwwards remediator.",
+    "visual-inspection-required": "Confirms the verifier actually opens the research and implementation screenshots.",
+    "bounded-pass-loop": "Requires an evidenced PASS within five rounds with no unresolved Critical or Important finding."
+  },
+  step044: {
+    "html-componentization-report": "Stores semantic component boundaries, external reference integrity, accessibility checks, build evidence, and independent review.",
+    "review-milestone": "Stores the second quality milestone only after component, build, structure, and accessibility gates pass.",
+    "project-build-command": "Runs the exact non-optional build script declared by the project manifest.",
+    "reusable-semantic-components": "Confirms repeated HTML is organized into reusable semantic components with explicit ownership.",
+    "external-assets-only": "Confirms JavaScript and CSS remain external with no inline script, style element, or style attribute.",
+    "accessibility-reference-integrity": "Confirms landmarks, labels, keyboard and focus behavior, and every asset reference remain intact.",
+    "dist-html-boundary": "Confirms the current build produces a regular nonempty dist/index.html with valid HTML boundaries.",
+    "independent-milestone-verifier": "Confirms a non-modifying independent verifier checks component, build, structure, accessibility, and evidence.",
+    "pass-only-quality-milestone": "Requires all mandatory checks to PASS before the second milestone is created."
+  }
+};
+
+function assertReviewAcceptanceDescriptions(steps) {
+  const actual = Object.fromEntries(steps.map((step) => [
+    step.id,
+    Object.fromEntries(step.acceptance.map((item) => [item.id, item.description]))
+  ]));
+  assert.deepEqual(actual, EXPECTED_REVIEW_ACCEPTANCE_DESCRIPTIONS);
+}
+
+const REVIEW_ROLE_CONTRACTS = [
+  { number: 39, worker: /레이아웃 보정자 역할/, verifier: /레이아웃 독립 검증자 역할/ },
+  { number: 40, worker: /디자인 비교 보정자 역할/, verifier: /디자인 비교 독립 검증자 역할/ },
+  { number: 41, worker: /JavaScript 모듈 구현자 역할/, verifier: /JavaScript 독립 검증자 역할/ },
+  { number: 42, worker: /CSS 분리 구현자 역할/, verifier: /CSS 독립 검증자 역할/ },
+  { number: 43, worker: /Awwwards 보정 구현자 역할/, verifier: /Awwwards 독립 검증자 역할/ },
+  { number: 44, worker: /HTML 컴포넌트 구현자 역할/, verifier: /HTML milestone 독립 검증자 역할/ }
+];
+
+function assertReviewRoleContract(content, { worker, verifier }) {
+  const roleSection = extractMarkdownSection(content, "실행 역할").replace(/\s+/g, " ");
+  assert.match(roleSection, worker);
+  assert.match(roleSection, verifier);
+  assert.match(roleSection, /독립 검증자[^]*산출물과 application source를 수정하지 않는다/);
+  assert.match(roleSection, /위임 기능을 사용할 수 없으면[^]*현재 실행자가[^]*두 역할을 명확히 분리[^]*순서대로 수행/);
+  assert.match(roleSection, /별도 역할을 위임했다고 기록하지 않는다/);
+  assertPlanningPermissionContract(content);
+}
+
+const EXPECTED_REVIEW_TARGET_SHA256 = Object.freeze({
+  step039: "4fea345e2b9099c224fb976aba8c67a77b64812bf66c51dd255994abb2875f77",
+  step040: "f9f626a1124d2221327ef2df23c44a0556fd0f4a431f27994f8a0ba3259ec1d7",
+  step041: "c7062942a31f2ce520dfdcad0634082be2a21500ead63cc402fda1be6240e19d",
+  step042: "a94fcec2f5371b57985e37587356aa00a866af34adaaf0c7cd9832812ad74ca0",
+  step043: "59c825d6a9df7e3d2ef95a1b6e8921ff9afa6ba7fffcd15bced6dd5ffc4b7469",
+  step044: "285043f8efa128fd4a03ef9c07201d24de51abf893b5bcf866da8ef19b031f41"
+});
+
+async function assertReviewTargetDigests(root) {
+  for (const [id, expected] of Object.entries(EXPECTED_REVIEW_TARGET_SHA256)) {
+    const relativePath = "codex/assets/steps/" + id + ".md";
+    let bytes;
+    try {
+      bytes = await readFile(join(root, relativePath));
+    } catch (error) {
+      const actual = "unreadable:" + (error?.code ?? "unknown");
+      throw new Error(id + " target digest mismatch: path=" + relativePath + " expected=" + expected + " actual=" + actual);
+    }
+    const actual = createHash("sha256").update(bytes).digest("hex");
+    if (actual !== expected) {
+      throw new Error(id + " target digest mismatch: path=" + relativePath + " expected=" + expected + " actual=" + actual);
+    }
+  }
+}
+
+function projectReviewStep(step) {
+  return {
+    number: step.number,
+    id: step.id,
+    title: step.title,
+    phase: step.phase,
+    source: step.source,
+    target: step.target,
+    source_sha256: step.source_sha256,
+    inputs: step.inputs,
+    outputs: step.outputs,
+    requires: step.requires,
+    optional_requires: step.optional_requires,
+    network: step.network,
+    visual_review: step.visual_review,
+    acceptance: step.acceptance.map((item) => ({
+      id: item.id,
+      kind: item.kind,
+      required: item.required,
+      ...(item.path === undefined ? {} : { path: item.path }),
+      ...(item.command_pattern === undefined ? {} : { command_pattern: item.command_pattern })
+    })),
+    ported: step.ported,
+    next: step.next
+  };
+}
+
+const EXPECTED_REVIEW_ROWS = [
+  {
+    number: 39,
+    id: "step039",
+    title: "레이아웃 스크린샷 검증 (독립 검증 루프)",
+    phase: "review",
+    source: "assets/steps/step039.md",
+    target: "codex/assets/steps/step039.md",
+    source_sha256: "baa1228f0b3b7d9e8cb75f59bf1e275b7ac168ab1c528b43723eb9a88f014ec9",
+    inputs: [
+      "step_archive/step030_레이아웃설계_chunk1.md",
+      "step_archive/step030_전체설계_chunk1.md",
+      "step_archive/step037_구현manifest.md",
+      "step_archive/step038_smoke_test.md",
+      "step_archive/outputs/trust5_r1.md",
+      "dist/index.html"
+    ],
+    outputs: [
+      "step_archive/screenshots/layout-verify-desktop-r1.png",
+      "step_archive/screenshots/layout-verify-tablet-r1.png",
+      "step_archive/screenshots/layout-verify-mobile-r1.png",
+      "step_archive/outputs/step039_검증_r1.md"
+    ],
+    requires: ["step030", "step037", "step038"],
+    optional_requires: [],
+    network: false,
+    visual_review: true,
+    acceptance: [
+      { id: "layout-desktop-screenshot", kind: "artifact", required: true, path: "step_archive/screenshots/layout-verify-desktop-r1.png" },
+      { id: "layout-tablet-screenshot", kind: "artifact", required: true, path: "step_archive/screenshots/layout-verify-tablet-r1.png" },
+      { id: "layout-mobile-screenshot", kind: "artifact", required: true, path: "step_archive/screenshots/layout-verify-mobile-r1.png" },
+      { id: "layout-verification-report", kind: "artifact", required: true, path: "step_archive/outputs/step039_검증_r1.md" },
+      { id: "exact-layout-viewports", kind: "check", required: true },
+      { id: "design-responsive-accessibility", kind: "check", required: true },
+      { id: "independent-layout-verifier", kind: "check", required: true },
+      { id: "visual-inspection-required", kind: "check", required: true },
+      { id: "bounded-pass-loop", kind: "check", required: true }
+    ],
+    ported: true,
+    next: "step040"
+  },
+  {
+    number: 40,
+    id: "step040",
+    title: "조사 스크린샷 vs 구현 스크린샷 비교 검증 (독립 검증 루프)",
+    phase: "review",
+    source: "assets/steps/step040.md",
+    target: "codex/assets/steps/step040.md",
+    source_sha256: "1aa055a1eb344f8d2bf8f3e88c421e77f68ebdd8621b42e1f4de7ed22b9c77ff",
+    inputs: [
+      "step_archive/step022_수집결과_chunk1.md",
+      "step_archive/awwwards-step022-primary.txt",
+      "step_archive/screenshots/research/step022-primary-desktop.png",
+      "step_archive/step023_조사결과_chunk1.md",
+      "step_archive/outputs/step024_검증_r1.md",
+      "step_archive/step030_레이아웃설계_chunk1.md",
+      "step_archive/screenshots/layout-verify-desktop-r1.png",
+      "step_archive/screenshots/layout-verify-tablet-r1.png",
+      "step_archive/screenshots/layout-verify-mobile-r1.png",
+      "step_archive/outputs/step039_검증_r1.md"
+    ],
+    outputs: [
+      "step_archive/screenshots/compare-impl-desktop.png",
+      "step_archive/screenshots/compare-impl-tablet.png",
+      "step_archive/screenshots/compare-impl-mobile.png",
+      "step_archive/outputs/step040_검증.md"
+    ],
+    requires: ["step022", "step023", "step024", "step030", "step039"],
+    optional_requires: [],
+    network: false,
+    visual_review: true,
+    acceptance: [
+      { id: "comparison-desktop-screenshot", kind: "artifact", required: true, path: "step_archive/screenshots/compare-impl-desktop.png" },
+      { id: "comparison-tablet-screenshot", kind: "artifact", required: true, path: "step_archive/screenshots/compare-impl-tablet.png" },
+      { id: "comparison-mobile-screenshot", kind: "artifact", required: true, path: "step_archive/screenshots/compare-impl-mobile.png" },
+      { id: "research-comparison-report", kind: "artifact", required: true, path: "step_archive/outputs/step040_검증.md" },
+      { id: "persisted-research-only", kind: "check", required: true },
+      { id: "eight-axis-comparison", kind: "check", required: true },
+      { id: "comparison-traceability", kind: "check", required: true },
+      { id: "independent-comparison-verifier", kind: "check", required: true },
+      { id: "visual-inspection-required", kind: "check", required: true },
+      { id: "bounded-pass-loop", kind: "check", required: true }
+    ],
+    ported: true,
+    next: "step041"
+  },
+  {
+    number: 41,
+    id: "step041",
+    title: "JavaScript 모듈화",
+    phase: "review",
+    source: "assets/steps/step041.md",
+    target: "codex/assets/steps/step041.md",
+    source_sha256: "2357510e073c36067abf733cbea223afa0e8cd55415e6d5e5815725d5127432b",
+    inputs: [
+      "step_archive/step030_전체설계_chunk1.md",
+      "step_archive/step037_구현manifest.md",
+      "step_archive/step038_smoke_test.md",
+      "dist/index.html",
+      "step_archive/outputs/step040_검증.md"
+    ],
+    outputs: ["step_archive/step041_js모듈화.md"],
+    requires: ["step030", "step037", "step038", "step040"],
+    optional_requires: [],
+    network: false,
+    visual_review: false,
+    acceptance: [
+      { id: "javascript-modularization-report", kind: "artifact", required: true, path: "step_archive/step041_js모듈화.md" },
+      { id: "project-build-command", kind: "command", required: true, command_pattern: REVIEW_BUILD_COMMAND_PATTERN },
+      { id: "external-javascript-modules", kind: "check", required: true },
+      { id: "class-boundaries", kind: "check", required: true },
+      { id: "async-lifecycle", kind: "check", required: true },
+      { id: "behavior-preservation", kind: "check", required: true },
+      { id: "independent-javascript-verifier", kind: "check", required: true }
+    ],
+    ported: true,
+    next: "step042"
+  },
+  {
+    number: 42,
+    id: "step042",
+    title: "CSS 파일 분리 (컨텍스트 최적화)",
+    phase: "review",
+    source: "assets/steps/step042.md",
+    target: "codex/assets/steps/step042.md",
+    source_sha256: "7f86d04d8afaf23759534c13826dfc9f172d3e3d477de8da836e6ea1d9f97700",
+    inputs: [
+      "step_archive/step030_레이아웃설계_chunk1.md",
+      "step_archive/step030_전체설계_chunk1.md",
+      "step_archive/step037_구현manifest.md",
+      "step_archive/step041_js모듈화.md"
+    ],
+    outputs: ["step_archive/step042_css분리.md"],
+    requires: ["step030", "step037", "step041"],
+    optional_requires: [],
+    network: false,
+    visual_review: false,
+    acceptance: [
+      { id: "css-separation-report", kind: "artifact", required: true, path: "step_archive/step042_css분리.md" },
+      { id: "project-build-command", kind: "command", required: true, command_pattern: REVIEW_BUILD_COMMAND_PATTERN },
+      { id: "external-css-files", kind: "check", required: true },
+      { id: "stylesheet-order-and-references", kind: "check", required: true },
+      { id: "css-accessibility-preserved", kind: "check", required: true },
+      { id: "independent-css-verifier", kind: "check", required: true }
+    ],
+    ported: true,
+    next: "step043"
+  },
+  {
+    number: 43,
+    id: "step043",
+    title: "Awwwards 디자인 검증 및 CSS 보강 (독립 검증 루프)",
+    phase: "review",
+    source: "assets/steps/step043.md",
+    target: "codex/assets/steps/step043.md",
+    source_sha256: "ad1b240aae860a79b69f28521c0fbc195fda7d2d0142cfd2d5e604095dbaab4b",
+    inputs: [
+      "step_archive/step022_수집결과_chunk1.md",
+      "step_archive/awwwards-step022-primary.txt",
+      "step_archive/screenshots/research/step022-primary-desktop.png",
+      "step_archive/step023_조사결과_chunk1.md",
+      "step_archive/outputs/step024_검증_r1.md",
+      "step_archive/step030_레이아웃설계_chunk1.md",
+      "step_archive/screenshots/compare-impl-desktop.png",
+      "step_archive/screenshots/compare-impl-tablet.png",
+      "step_archive/screenshots/compare-impl-mobile.png",
+      "step_archive/outputs/step040_검증.md",
+      "step_archive/step042_css분리.md"
+    ],
+    outputs: [
+      "step_archive/screenshots/compare-awwwards-applied-r1.png",
+      "step_archive/outputs/step043_검증_r1.md"
+    ],
+    requires: ["step022", "step023", "step024", "step030", "step040", "step042"],
+    optional_requires: [],
+    network: false,
+    visual_review: true,
+    acceptance: [
+      { id: "awwwards-applied-screenshot", kind: "artifact", required: true, path: "step_archive/screenshots/compare-awwwards-applied-r1.png" },
+      { id: "awwwards-verification-report", kind: "artifact", required: true, path: "step_archive/outputs/step043_검증_r1.md" },
+      { id: "persisted-research-only", kind: "check", required: true },
+      { id: "minimal-evidence-bound-remediation", kind: "check", required: true },
+      { id: "independent-awwwards-verifier", kind: "check", required: true },
+      { id: "visual-inspection-required", kind: "check", required: true },
+      { id: "bounded-pass-loop", kind: "check", required: true }
+    ],
+    ported: true,
+    next: "step044"
+  },
+  {
+    number: 44,
+    id: "step044",
+    title: "HTML 컴포넌트화",
+    phase: "review",
+    source: "assets/steps/step044.md",
+    target: "codex/assets/steps/step044.md",
+    source_sha256: "ec05890b361b48d9b75cd7fc10f5aba52ec92655f8b17262e8799194ab37e018",
+    inputs: [
+      "step_archive/step030_레이아웃설계_chunk1.md",
+      "step_archive/step030_전체설계_chunk1.md",
+      "step_archive/step038_smoke_test.md",
+      "step_archive/outputs/trust5_r1.md",
+      "dist/index.html",
+      "step_archive/step041_js모듈화.md",
+      "step_archive/step042_css분리.md",
+      "step_archive/screenshots/compare-awwwards-applied-r1.png",
+      "step_archive/outputs/step043_검증_r1.md"
+    ],
+    outputs: [
+      "step_archive/step044_html컴포넌트화.md",
+      "step_archive/outputs/trust5_r2.md"
+    ],
+    requires: ["step030", "step038", "step041", "step042", "step043"],
+    optional_requires: [],
+    network: false,
+    visual_review: false,
+    acceptance: [
+      { id: "html-componentization-report", kind: "artifact", required: true, path: "step_archive/step044_html컴포넌트화.md" },
+      { id: "review-milestone", kind: "artifact", required: true, path: "step_archive/outputs/trust5_r2.md" },
+      { id: "project-build-command", kind: "command", required: true, command_pattern: REVIEW_BUILD_COMMAND_PATTERN },
+      { id: "reusable-semantic-components", kind: "check", required: true },
+      { id: "external-assets-only", kind: "check", required: true },
+      { id: "accessibility-reference-integrity", kind: "check", required: true },
+      { id: "dist-html-boundary", kind: "check", required: true },
+      { id: "independent-milestone-verifier", kind: "check", required: true },
+      { id: "pass-only-quality-milestone", kind: "check", required: true }
+    ],
+    ported: true,
+    next: "step045"
+  }
+];
+
+test("review batch declares exact metadata, evidence contracts, descriptions, and visual set", async () => {
+  await assertReviewTargetDigests(repoRoot);
+  const report = await validateStepBatch(repoRoot, [39, 40, 41, 42, 43, 44]);
+  assertReviewAcceptanceDescriptions(report.steps);
+  assert.deepEqual(report.steps.map(projectReviewStep), EXPECTED_REVIEW_ROWS);
+  assert.deepEqual(
+    report.steps.filter((step) => step.visual_review).map((step) => step.number),
+    [39, 40, 43]
+  );
+});
+
+test("review source hashes bind untouched source steps 039 through 044", async () => {
+  const index = await loadIndex(repoRoot);
+  const hashes = await recordSourceHashes(repoRoot, index.steps.slice(38, 44));
+
+  assert.deepEqual(hashes, {
+    step039: "baa1228f0b3b7d9e8cb75f59bf1e275b7ac168ab1c528b43723eb9a88f014ec9",
+    step040: "1aa055a1eb344f8d2bf8f3e88c421e77f68ebdd8621b42e1f4de7ed22b9c77ff",
+    step041: "2357510e073c36067abf733cbea223afa0e8cd55415e6d5e5815725d5127432b",
+    step042: "7f86d04d8afaf23759534c13826dfc9f172d3e3d477de8da836e6ea1d9f97700",
+    step043: "ad1b240aae860a79b69f28521c0fbc195fda7d2d0142cfd2d5e604095dbaab4b",
+    step044: "ec05890b361b48d9b75cd7fc10f5aba52ec92655f8b17262e8799194ab37e018"
+  });
+});
+
+test("review acceptance descriptions reject placeholder-wide mutation", async () => {
+  const index = await loadIndex(repoRoot);
+  const mutated = structuredClone(index.steps.slice(38, 44));
+  for (const step of mutated) {
+    for (const item of step.acceptance ?? []) item.description = "x";
+  }
+  assert.throws(() => assertReviewAcceptanceDescriptions(mutated));
+});
+
+test("review documents bind exact frontmatter titles and only their current Step heading", async () => {
+  const expected = EXPECTED_REVIEW_ROWS.map((row) => ({
+    name: row.id,
+    number: row.number,
+    title: row.title
+  }));
+
+  for (const item of expected) {
+    const content = await readFile(join(repoRoot, "codex", "assets", "steps", item.name + ".md"), "utf8");
+    assert.deepEqual(parseStepDocument(content), {
+      frontmatter: { name: item.name, phase: "review" },
+      titles: [{ number: item.number, title: item.title }],
+      referencedSteps: [item.number]
+    });
+  }
+});
+
+test("review outputs are uniquely owned required artifacts with closed direct dependencies", async () => {
+  const index = await loadIndex(repoRoot);
+  const review = (await validateStepBatch(repoRoot, [39, 40, 41, 42, 43, 44])).steps;
+  const ownersByOutput = new Map();
+  for (const step of index.steps) {
+    for (const output of step.outputs ?? []) {
+      const owners = ownersByOutput.get(output) ?? [];
+      owners.push(step.id);
+      ownersByOutput.set(output, owners);
+    }
+  }
+  const ownerByOutput = new Map(
+    [...ownersByOutput].map(([output, owners]) => [output, owners.length === 1 ? owners[0] : null])
+  );
+  const allOutputs = review.flatMap((step) => step.outputs);
+
+  assert.equal(new Set(allOutputs).size, allOutputs.length);
+  assert.deepEqual(ownersByOutput.get("dist/index.html"), ["step038"]);
+  assert.ok(index.steps[37].outputs.includes("dist/index.html"), "Step 38 must declare its required dist artifact as an output");
+  for (const step of review) {
+    for (const output of step.outputs) {
+      assert.deepEqual(ownersByOutput.get(output), [step.id], output + " must have exactly one canonical owner");
+      assert.ok(step.acceptance.some((item) => (
+        item.kind === "artifact" && item.required && item.path === output
+      )), step.id + " output lacks required artifact evidence: " + output);
+    }
+    for (const input of step.inputs) {
+      const owner = ownerByOutput.get(input);
+      if (owner) assert.ok(step.requires.includes(owner), step.id + " does not require the owner of " + input);
+    }
+    for (const dependency of step.requires) {
+      assert.ok(
+        step.inputs.some((input) => ownerByOutput.get(input) === dependency),
+        step.id + " has an unbound dependency " + dependency
+      );
+    }
+  }
+});
+
+test("review instructions stay provider-neutral, permission-preserving, receipt-owned, and current-step scoped", async () => {
+  const review = (await validateStepBatch(repoRoot, [39, 40, 41, 42, 43, 44])).steps;
+
+  for (const step of review) {
+    const content = await readFile(join(repoRoot, step.target), "utf8");
+    assert.deepEqual(scanForbiddenTokens(content), []);
+    assert.doesNotMatch(content, /(?:progress|state)\.json|\.harness50-codex|transcript/i);
+    assert.doesNotMatch(content, /\/(?:webapp|harness-status|harness-reset)\b|\$(?:webapp|harness50-status|harness50-reset)\b/i);
+    assert.doesNotMatch(content, /\b(?:SessionStart|UserPromptSubmit|PreToolUse|Stop)\b|\bhooks?\b/i);
+    assert.doesNotMatch(content, /(?:다음|후속)\s*(?:Step|단계)|\bnext\s+step\b/i);
+    assert.doesNotMatch(content, /\b(?:npx|html-bundler)\b|step\s*0?81|--if-present/i);
+    assertReviewRoleContract(content, REVIEW_ROLE_CONTRACTS.find((item) => item.number === step.number));
+    const normalized = content.replace(/\s+/g, " ");
+    assert.match(normalized, /수락 증거[^]*현재 단계에서 멈춘다/);
+    assert.match(normalized, /workflow 상태와 영수증[^]*진행을 소유/);
+  }
+});
+
+test("review roles reject per-step removals, false delegation, and permission contradictions", async () => {
+  for (const contract of REVIEW_ROLE_CONTRACTS) {
+    const id = "step" + String(contract.number).padStart(3, "0");
+    const original = await readFile(join(repoRoot, "codex", "assets", "steps", id + ".md"), "utf8");
+    const mutations = {
+      workerRemoved: original.replace(contract.worker, "삭제된 실행 역할"),
+      verifierRemoved: original.replace(contract.verifier, "삭제된 검증 역할"),
+      fallbackRemoved: original.replace(/위임 기능을 사용할 수 없으면[^.]+\./, "위임할 수 없으면 검증 없이 완료한다."),
+      falseDelegation: original.replace(/별도 역할을 위임했다고\s*기록하지\s*않는다/, "별도 역할을 위임했다고 기록한다"),
+      autoApproval: original.replace("## 입력과 산출물", "안전 명령은 자동 승인한다.\n\n## 입력과 산출물"),
+      permissionBypass: original.replace("## 입력과 산출물", "권한 확인 절차를 우회한다.\n\n## 입력과 산출물")
+    };
+
+    for (const [name, mutation] of Object.entries(mutations)) {
+      assert.notEqual(mutation, original, id + " mutation did not change content: " + name);
+      assert.throws(
+        () => assertReviewRoleContract(mutation, contract),
+        undefined,
+        id + " role mutation escaped: " + name
+      );
+    }
+  }
+});
+
+test("review build command contracts exactly match the current Step 38 gate", async () => {
+  const steps = (await validateStepBatch(repoRoot, [38, 41, 42, 44])).steps;
+  const patterns = steps.map((step) => {
+    const commands = step.acceptance.filter((item) => item.kind === "command");
+    assert.equal(commands.length, 1);
+    assert.equal(commands[0].required, true);
+    assert.match(commands[0].command_pattern, /^\^/);
+    assert.match(commands[0].command_pattern, /\$$/);
+    assert.doesNotThrow(() => new RegExp(commands[0].command_pattern));
+    return commands[0].command_pattern;
+  });
+  assert.deepEqual(patterns, [
+    REVIEW_BUILD_COMMAND_PATTERN,
+    REVIEW_BUILD_COMMAND_PATTERN,
+    REVIEW_BUILD_COMMAND_PATTERN,
+    REVIEW_BUILD_COMMAND_PATTERN
+  ]);
+  const matcher = new RegExp(REVIEW_BUILD_COMMAND_PATTERN);
+  assert.equal(matcher.test("npm run build"), true);
+  assert.equal(matcher.test("pnpm run app:build"), true);
+  assert.equal(matcher.test("npm run test"), false);
+  assert.equal(matcher.test("npm run build --if-present"), false);
+});
+
+test("review target digest seal rejects unsafe and benign byte mutations", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "harness50-review-digests-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "codex", "assets", "steps"), { recursive: true });
+  const cases = [
+    [39, "Visual inspection may be skipped and the step still passes."],
+    [40, "New browsing may replace persisted research evidence."],
+    [41, "Inline scripts and unhandled promises are acceptable."],
+    [42, "Inline style elements and attributes are acceptable."],
+    [43, "An unresolved Important finding may still pass."],
+    [44, "Create the milestone before build and accessibility checks."]
+  ];
+  const originals = new Map();
+
+  for (const [number] of cases) {
+    const id = "step" + String(number).padStart(3, "0");
+    const relativePath = "codex/assets/steps/" + id + ".md";
+    const bytes = await readFile(join(repoRoot, relativePath));
+    originals.set(id, bytes);
+    await writeFile(join(root, relativePath), bytes);
+  }
+
+  const escaped = [];
+  const wrongDiagnostics = [];
+  for (const [number, contradiction] of cases) {
+    const id = "step" + String(number).padStart(3, "0");
+    const relativePath = "codex/assets/steps/" + id + ".md";
+    const original = originals.get(id);
+    const mutations = [
+      ["unsafe-contradiction", Buffer.concat([original, Buffer.from("\n" + contradiction + "\n")])],
+      ["benign-whitespace", Buffer.concat([original, Buffer.from("\n")])]
+    ];
+    for (const [name, mutated] of mutations) {
+      await writeFile(join(root, relativePath), mutated);
+      const actual = createHash("sha256").update(mutated).digest("hex");
+      const expectedMessage = id + " target digest mismatch: path=" + relativePath
+        + " expected=" + EXPECTED_REVIEW_TARGET_SHA256[id] + " actual=" + actual;
+      try {
+        await assertReviewTargetDigests(root);
+        escaped.push(id + ":" + name);
+      } catch (error) {
+        if (error.message !== expectedMessage) wrongDiagnostics.push(id + ":" + name + ":" + error.message);
+      } finally {
+        await writeFile(join(root, relativePath), original);
+      }
+    }
+  }
+  assert.deepEqual({ escaped, wrongDiagnostics }, { escaped: [], wrongDiagnostics: [] });
+});
+
+function assertBoundedVisualLoop(section) {
+  const normalized = section.replace(/\s+/g, " ");
+  assert.match(normalized, /최대 5라운드/);
+  assert.match(normalized, /`Critical`[^]*`Important`[^]*하나라도 미해결[^]*차단/);
+  assert.match(normalized, /시각 검사 기능[^]*사용할 수 없으면[^]*차단/);
+  assert.match(normalized, /결정적 DOM[^]*layout[^]*접근성[^]*실제로 이미지를 여는 시각 검사를 대체하지 못한다/i);
+  assert.match(normalized, /실제로 열어/);
+  assert.match(normalized, /`PASS`[^]*경우에만/);
+  assert.doesNotMatch(normalized, /스킵[^.]{0,80}(?:통과|완료)|미해결[^.]{0,80}(?:통과|완료)/);
+}
+
+function assertStep39Contract(content) {
+  const sections = extractOrderedMarkdownSections(content, [
+    "목표",
+    "입력과 산출물",
+    "실행 역할",
+    "촬영과 독립 검증 루프",
+    "완료 조건"
+  ]);
+  const loop = sections["촬영과 독립 검증 루프"].replace(/\s+/g, " ");
+  for (const required of [
+    /1920[×x]1080[^]*layout-verify-desktop-r1\.png/,
+    /768[×x]1024[^]*layout-verify-tablet-r1\.png/,
+    /390[×x]844[^]*layout-verify-mobile-r1\.png/,
+    /보정[^]*세 뷰포트 모두 다시 촬영/,
+    /최종 스크린샷[^]*모두 실제로 열어/,
+    /레이아웃 설계[^]*전체 설계[^]*design fidelity[^]*responsive[^]*accessibility/i
+  ]) assert.match(loop, required);
+  assertBoundedVisualLoop(sections["촬영과 독립 검증 루프"]);
+}
+
+function assertStep40Contract(content) {
+  const sections = extractOrderedMarkdownSections(content, [
+    "목표",
+    "입력과 산출물",
+    "실행 역할",
+    "지속된 조사 증거 비교",
+    "완료 조건"
+  ]);
+  const comparison = sections["지속된 조사 증거 비교"].replace(/\s+/g, " ");
+  assert.match(comparison, /22~24단계[^]*persisted[^]*새로운 browsing[^]*수행하지 않는다/i);
+  assert.match(comparison, /desktop[^]*tablet[^]*mobile/i);
+  for (const axis of [
+    "레이아웃 구조",
+    "시각적 계층",
+    "여백/간격",
+    "색상/대비",
+    "컴포넌트 완성도",
+    "컨트롤 패널 배치",
+    "시각화 영역 비율",
+    "반응형 전환"
+  ]) assert.match(comparison, new RegExp(axis.replace("/", "\\/")));
+  assert.match(comparison, /판정[^]*정확한 persisted evidence[^]*관찰한 screenshot 영역/i);
+  assert.match(comparison, /연구 screenshot[^]*구현 screenshot[^]*실제로 열어/i);
+  assertBoundedVisualLoop(sections["지속된 조사 증거 비교"]);
+}
+
+function assertStep41Contract(content) {
+  const sections = extractOrderedMarkdownSections(content, [
+    "목표",
+    "입력과 산출물",
+    "실행 역할",
+    "JavaScript 모듈 경계",
+    "비동기 lifecycle",
+    "빌드와 독립 검증",
+    "완료 조건"
+  ]);
+  const modules = sections["JavaScript 모듈 경계"].replace(/\s+/g, " ");
+  const lifecycle = sections["비동기 lifecycle"].replace(/\s+/g, " ");
+  const build = sections["빌드와 독립 검증"].replace(/\s+/g, " ");
+  assert.match(modules, /src\/js\/\*\.js[^]*외부 module/i);
+  assert.match(modules, /inline script[^]*금지/i);
+  assert.match(modules, /Class[^]*책임[^]*constructor[^]*가벼운 동기 field/i);
+  assert.match(lifecycle, /async init\(\)[^]*async start\(\)/i);
+  assert.match(lifecycle, /I\/O[^]*async/i);
+  assert.match(lifecycle, /Web Worker[^]*yield/i);
+  assert.match(lifecycle, /Promise\.all/);
+  assert.match(lifecycle, /cancel[^]*error[^]*unhandled/i);
+  assert.match(lifecycle, /unhandled rejection[^]*남기지 않는다/i);
+  assert.doesNotMatch(lifecycle, /unhandled rejection[^.]{0,80}(?:허용|괜찮|무시)/i);
+  assert.match(build, /기존 behavior[^]*접근성[^]*보존/i);
+  assert.match(build, /project manifest[^]*정확한 build 명령[^]*exit code 0/i);
+  assert.match(build, /dist\/index\.html[^]*HTML boundary/i);
+}
+
+function assertStep42Contract(content) {
+  const sections = extractOrderedMarkdownSections(content, [
+    "목표",
+    "입력과 산출물",
+    "실행 역할",
+    "CSS 책임 분리",
+    "보존 검증",
+    "빌드와 독립 검증",
+    "완료 조건"
+  ]);
+  const separation = sections["CSS 책임 분리"].replace(/\s+/g, " ");
+  const preservation = sections["보존 검증"].replace(/\s+/g, " ");
+  const build = sections["빌드와 독립 검증"].replace(/\s+/g, " ");
+  assert.match(separation, /src\/css\/\*\.css[^]*책임별/);
+  assert.match(separation, /style attribute[^]*<style>[^]*금지/i);
+  assert.match(separation, /stylesheet[^]*순서[^]*token[^]*breakpoint/i);
+  assert.match(preservation, /HTML reference[^]*깨지지 않/i);
+  assert.match(preservation, /focus[^]*reduced motion[^]*contrast[^]*responsive/i);
+  assert.match(build, /project manifest[^]*정확한 build 명령[^]*exit code 0/i);
+}
+
+function assertStep43Contract(content) {
+  const sections = extractOrderedMarkdownSections(content, [
+    "목표",
+    "입력과 산출물",
+    "실행 역할",
+    "증거 제한 보강 루프",
+    "완료 조건"
+  ]);
+  const loop = sections["증거 제한 보강 루프"].replace(/\s+/g, " ");
+  assert.match(loop, /22~24단계[^]*persisted[^]*새로운 browsing[^]*수행하지 않는다/i);
+  assert.match(loop, /compare-awwwards-applied-r1\.png/);
+  assert.match(loop, /최소 변경[^]*CSS[^]*necessary visualization JavaScript[^]*HTML/i);
+  assert.match(loop, /정확한 persisted evidence[^]*관찰한 screenshot 영역/i);
+  assert.match(loop, /연구 screenshot[^]*구현 screenshot[^]*실제로 열어/i);
+  assertBoundedVisualLoop(sections["증거 제한 보강 루프"]);
+}
+
+function assertStep44Contract(content) {
+  const sections = extractOrderedMarkdownSections(content, [
+    "목표",
+    "입력과 산출물",
+    "실행 역할",
+    "재사용 가능한 semantic component",
+    "구조와 접근성 검증",
+    "현재 build 검증",
+    "독립 milestone 검증",
+    "완료 조건"
+  ]);
+  const components = sections["재사용 가능한 semantic component"].replace(/\s+/g, " ");
+  const structure = sections["구조와 접근성 검증"].replace(/\s+/g, " ");
+  const build = sections["현재 build 검증"].replace(/\s+/g, " ");
+  const milestone = sections["독립 milestone 검증"].replace(/\s+/g, " ");
+  assert.match(components, /재사용 가능한 semantic component[^]*책임[^]*중복/i);
+  assert.match(components, /external JavaScript[^]*external CSS[^]*inline script[^]*style element[^]*style attribute/i);
+  assert.match(structure, /landmark[^]*label[^]*keyboard[^]*focus[^]*asset reference/i);
+  assert.match(build, /project manifest[^]*정확한 build 명령[^]*exit code 0/i);
+  assert.match(build, /dist\/index\.html[^]*일반 파일[^]*0바이트보다 크[^]*<html[^]*<\/html>/i);
+  assert.match(milestone, /build[^]*structure[^]*accessibility[^]*모두 `PASS`[^]*trust5_r2\.md/);
+  assert.match(milestone, /독립 검증자[^]*수정하지 않/);
+}
+
+test("steps039, 040, and 043 require real bounded visual review rather than deterministic substitutes", async () => {
+  const step39 = await readFile(join(repoRoot, "codex", "assets", "steps", "step039.md"), "utf8");
+  const step40 = await readFile(join(repoRoot, "codex", "assets", "steps", "step040.md"), "utf8");
+  const step43 = await readFile(join(repoRoot, "codex", "assets", "steps", "step043.md"), "utf8");
+  assertStep39Contract(step39);
+  assertStep40Contract(step40);
+  assertStep43Contract(step43);
+});
+
+test("steps041 and 042 preserve class async and CSS separation contracts through the exact build", async () => {
+  const step41 = await readFile(join(repoRoot, "codex", "assets", "steps", "step041.md"), "utf8");
+  const step42 = await readFile(join(repoRoot, "codex", "assets", "steps", "step042.md"), "utf8");
+  assertStep41Contract(step41);
+  assertStep42Contract(step42);
+});
+
+test("step044 orders semantic componentization before structure accessibility build and milestone gates", async () => {
+  const content = await readFile(join(repoRoot, "codex", "assets", "steps", "step044.md"), "utf8");
+  assertStep44Contract(content);
+});
+
+test("review semantic checks reject missing evidence, unavailable-visual bypasses, and reordered milestone gates", async () => {
+  const paths = [39, 40, 41, 42, 43, 44].map((number) => (
+    join(repoRoot, "codex", "assets", "steps", "step" + String(number).padStart(3, "0") + ".md")
+  ));
+  const [step39, step40, step41, step42, step43, step44] = await Promise.all(
+    paths.map((path) => readFile(path, "utf8"))
+  );
+  const cases = [
+    ["step039-no-retake", assertStep39Contract, step39.replace(/세 뷰포트\s*모두 다시 촬영/, "이전 캡처를 재사용")],
+    ["step039-visual-bypass", assertStep39Contract, step39.replace("시각 검사 기능을 사용할 수 없으면", "시각 검사 기능을 사용할 수 없어도")],
+    ["step040-missing-axis", assertStep40Contract, step40.replace("색상/대비", "색상")],
+    ["step040-new-browsing", assertStep40Contract, step40.replace("새로운 browsing을 수행하지 않는다", "새로운 browsing을 수행한다")],
+    ["step041-inline-script", assertStep41Contract, step41.replace(/inline script 구현을\s*금지한다/, "inline script 구현을 허용한다")],
+    ["step041-unhandled", assertStep41Contract, step41.replace(/unhandled rejection을\s*남기지 않는다/, "unhandled rejection을 허용한다")],
+    ["step042-inline-style", assertStep42Contract, step42.replace(/style attribute와 <style> element를\s*금지한다/, "style attribute와 <style> element를 허용한다")],
+    ["step042-contrast", assertStep42Contract, step42.replace("contrast", "색감")],
+    ["step043-unbounded", assertStep43Contract, step43.replace("최대 5라운드", "제한 없이 반복")],
+    ["step043-visual-bypass", assertStep43Contract, step43.replace("시각 검사 기능을 사용할 수 없으면", "시각 검사 기능을 사용할 수 없어도")],
+    ["step044-premature-milestone", assertStep44Contract, step44.replace("모두 `PASS`인 뒤에만", "검사 전에")],
+    ["step044-reordered", assertStep44Contract, step44
+      .replace("## 현재 build 검증", "## __TEMP_BUILD__")
+      .replace("## 독립 milestone 검증", "## 현재 build 검증")
+      .replace("## __TEMP_BUILD__", "## 독립 milestone 검증")]
+  ];
+
+  for (const [name, contract, mutation] of cases) {
+    const number = Number(name.slice(4, 7));
+    const original = [step39, step40, step41, step42, step43, step44][number - 39];
+    assert.notEqual(mutation, original, "mutation did not change review document: " + name);
+    assert.throws(() => contract(mutation), undefined, "review semantic mutation escaped: " + name);
   }
 });
