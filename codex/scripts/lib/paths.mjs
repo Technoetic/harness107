@@ -1,23 +1,35 @@
-import { isAbsolute, relative, resolve, sep, join } from "node:path";
+import * as nativePath from "node:path";
+import { win32 } from "node:path";
 
 import { HarnessError } from "./errors.mjs";
+
+function usesWindowsPathFlavor(value) {
+  return /^[A-Za-z]:[\\/]|^\\\\/.test(value);
+}
 
 function workspaceRootFor(workspaceRoot) {
   if (typeof workspaceRoot !== "string" || workspaceRoot.trim() === "") {
     throw new HarnessError("WORKSPACE_REQUIRED", "workspace root is required");
   }
-  return resolve(workspaceRoot);
+  const path = usesWindowsPathFlavor(workspaceRoot) ? win32 : nativePath;
+  return { path, root: path.resolve(workspaceRoot) };
 }
 
 export function assertInside(workspaceRoot, candidatePath) {
-  const root = workspaceRootFor(workspaceRoot);
+  const { path, root } = workspaceRootFor(workspaceRoot);
   if (typeof candidatePath !== "string" || candidatePath.trim() === "") {
     throw new HarnessError("PATH_REQUIRED", "candidate path is required");
   }
 
-  const candidate = resolve(candidatePath);
-  const pathFromRoot = relative(root, candidate);
-  if (pathFromRoot === ".." || pathFromRoot.startsWith(`..${sep}`) || isAbsolute(pathFromRoot)) {
+  if (path !== win32 && usesWindowsPathFlavor(candidatePath)) {
+    throw new HarnessError("PATH_OUTSIDE_WORKSPACE", "path uses a different path flavor than the selected workspace", {
+      workspace_root: root,
+      path: candidatePath
+    });
+  }
+  const candidate = path.resolve(candidatePath);
+  const pathFromRoot = path.relative(root, candidate);
+  if (pathFromRoot === ".." || pathFromRoot.startsWith(`..${path.sep}`) || path.isAbsolute(pathFromRoot)) {
     throw new HarnessError("PATH_OUTSIDE_WORKSPACE", "path escapes the selected workspace", {
       workspace_root: root,
       path: candidate
@@ -27,17 +39,17 @@ export function assertInside(workspaceRoot, candidatePath) {
 }
 
 export function pathsFor(workspaceRoot) {
-  const root = workspaceRootFor(workspaceRoot);
-  const codexDir = assertInside(root, join(root, "step_archive", ".harness50-codex"));
+  const { path, root } = workspaceRootFor(workspaceRoot);
+  const codexDir = assertInside(root, path.join(root, "step_archive", ".harness50-codex"));
   return {
     workspaceRoot: root,
     codexDir,
-    statePath: assertInside(root, join(codexDir, "state.json")),
-    receiptsDir: assertInside(root, join(codexDir, "receipts")),
-    importsDir: assertInside(root, join(codexDir, "imports")),
-    eventsPath: assertInside(root, join(codexDir, "events.jsonl")),
-    lockPath: assertInside(root, join(codexDir, "run.lock")),
-    backupsDir: assertInside(root, join(codexDir, "backups")),
-    importErrorPath: assertInside(root, join(codexDir, "import-error.json"))
+    statePath: assertInside(root, path.join(codexDir, "state.json")),
+    receiptsDir: assertInside(root, path.join(codexDir, "receipts")),
+    importsDir: assertInside(root, path.join(codexDir, "imports")),
+    eventsPath: assertInside(root, path.join(codexDir, "events.jsonl")),
+    lockPath: assertInside(root, path.join(codexDir, "run.lock")),
+    backupsDir: assertInside(root, path.join(codexDir, "backups")),
+    importErrorPath: assertInside(root, path.join(codexDir, "import-error.json"))
   };
 }

@@ -10,6 +10,10 @@ const STATE_FIELDS = new Set([
   "consecutive_failures", "blocked_reason", "owner", "continuation",
   "imported_from", "last_stop_turn_id", "created_at", "updated_at", "completed_at"
 ]);
+const CURRENT_ATTEMPT_FIELDS = new Set(["id", "step", "session_id", "started_at", "failure_recorded"]);
+const OWNER_FIELDS = new Set(["session_id", "lease_updated_at"]);
+const CONTINUATION_FIELDS = new Set(["workflow_id", "step", "nonce", "issued_at", "baseline_receipt_count"]);
+const IMPORTED_FROM_FIELDS = new Set(["kind", "source_sha256", "imported_at", "prefix_length", "warnings"]);
 
 function invalid(message, details = {}) {
   throw new HarnessError("STATE_INVALID", message, details);
@@ -17,6 +21,15 @@ function invalid(message, details = {}) {
 
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function requireExactFields(value, fields, label) {
+  for (const field of Object.keys(value)) {
+    if (!fields.has(field)) invalid(`${label} contains an unknown field: ${field}`, { field: `${label}.${field}` });
+  }
+  for (const field of fields) {
+    if (!(field in value)) invalid(`${label} is missing required field: ${field}`, { field: `${label}.${field}` });
+  }
 }
 
 function requireString(value, field) {
@@ -58,6 +71,7 @@ function validateCompletedSteps(completedSteps) {
 function validateCurrentAttempt(value, currentStep) {
   if (value === null) return;
   if (!isPlainObject(value)) invalid("current_attempt must be null or an object", { field: "current_attempt" });
+  requireExactFields(value, CURRENT_ATTEMPT_FIELDS, "current_attempt");
   requireString(value.id, "current_attempt.id");
   requireStep(value.step, "current_attempt.step");
   if (value.step !== currentStep) invalid("current_attempt.step must match current_step", { field: "current_attempt.step" });
@@ -71,6 +85,7 @@ function validateCurrentAttempt(value, currentStep) {
 function validateOwner(value) {
   if (value === null) return;
   if (!isPlainObject(value)) invalid("owner must be null or an object", { field: "owner" });
+  requireExactFields(value, OWNER_FIELDS, "owner");
   requireString(value.session_id, "owner.session_id");
   requireTimestamp(value.lease_updated_at, "owner.lease_updated_at");
 }
@@ -78,6 +93,7 @@ function validateOwner(value) {
 function validateContinuation(value, state) {
   if (value === null) return;
   if (!isPlainObject(value)) invalid("continuation must be null or an object", { field: "continuation" });
+  requireExactFields(value, CONTINUATION_FIELDS, "continuation");
   if (value.workflow_id !== state.workflow_id) invalid("continuation.workflow_id must match workflow_id", { field: "continuation.workflow_id" });
   if (value.step !== state.current_step) invalid("continuation.step must match current_step", { field: "continuation.step" });
   requireString(value.nonce, "continuation.nonce");
@@ -85,11 +101,15 @@ function validateContinuation(value, state) {
   if (!Number.isInteger(value.baseline_receipt_count) || value.baseline_receipt_count < 0 || value.baseline_receipt_count > STEP_COUNT) {
     invalid("continuation.baseline_receipt_count must be an integer from 0 through 50", { field: "continuation.baseline_receipt_count" });
   }
+  if (value.baseline_receipt_count !== state.completed_steps.length) {
+    invalid("continuation.baseline_receipt_count must match completed_steps", { field: "continuation.baseline_receipt_count" });
+  }
 }
 
-function validateImportedFrom(value) {
+function validateImportedFrom(value, completedStepCount) {
   if (value === null) return;
   if (!isPlainObject(value)) invalid("imported_from must be null or an object", { field: "imported_from" });
+  requireExactFields(value, IMPORTED_FROM_FIELDS, "imported_from");
   if (value.kind !== "claude-progress") invalid("imported_from.kind is invalid", { field: "imported_from.kind" });
   if (!/^[a-f0-9]{64}$/.test(value.source_sha256 ?? "")) {
     invalid("imported_from.source_sha256 must be a SHA-256 digest", { field: "imported_from.source_sha256" });
@@ -97,6 +117,9 @@ function validateImportedFrom(value) {
   requireTimestamp(value.imported_at, "imported_from.imported_at");
   if (!Number.isInteger(value.prefix_length) || value.prefix_length < 0 || value.prefix_length > STEP_COUNT) {
     invalid("imported_from.prefix_length must be an integer from 0 through 50", { field: "imported_from.prefix_length" });
+  }
+  if (value.prefix_length > completedStepCount) {
+    invalid("imported_from.prefix_length cannot exceed completed_steps", { field: "imported_from.prefix_length" });
   }
   if (!Array.isArray(value.warnings) || value.warnings.some((warning) => typeof warning !== "string")) {
     invalid("imported_from.warnings must be an array of strings", { field: "imported_from.warnings" });
@@ -135,9 +158,12 @@ export function validateState(state) {
   requireTimestamp(state.created_at, "created_at");
   requireTimestamp(state.updated_at, "updated_at");
   requireTimestamp(state.completed_at, "completed_at", { nullable: true });
+  if ((state.status === "completed") !== (state.completed_at !== null)) {
+    invalid("completed_at must be set only for completed state", { field: "completed_at" });
+  }
   requireNullableString(state.last_stop_turn_id, "last_stop_turn_id");
   validateOwner(state.owner);
-  validateImportedFrom(state.imported_from);
+  validateImportedFrom(state.imported_from, state.completed_steps.length);
 
   const expectedCurrentStep = state.completed_steps.length === STEP_COUNT
     ? null

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join, resolve, win32 } from "node:path";
 
 import { HarnessError } from "../scripts/lib/errors.mjs";
 import { assertInside, pathsFor } from "../scripts/lib/paths.mjs";
@@ -22,6 +22,40 @@ function initialState() {
     topicSha256: "a".repeat(64),
     now
   });
+}
+
+function stateWithCanonicalMetadata() {
+  const state = initialState();
+  return {
+    ...state,
+    current_step: 2,
+    completed_steps: [1],
+    current_attempt: {
+      id: "attempt-2",
+      step: 2,
+      session_id: "session-1",
+      started_at: now,
+      failure_recorded: false
+    },
+    owner: {
+      session_id: "session-1",
+      lease_updated_at: now
+    },
+    continuation: {
+      workflow_id: "wf-1",
+      step: 2,
+      nonce: "nonce-2",
+      issued_at: now,
+      baseline_receipt_count: 1
+    },
+    imported_from: {
+      kind: "claude-progress",
+      source_sha256: "b".repeat(64),
+      imported_at: now,
+      prefix_length: 1,
+      warnings: []
+    }
+  };
 }
 
 test("HarnessError preserves a stable code and details", () => {
@@ -56,8 +90,22 @@ test("paths stay under the selected workspace", async () => {
   assert.equal(paths.lockPath, join(paths.codexDir, "run.lock"));
   assert.equal(paths.backupsDir, join(paths.codexDir, "backups"));
   assert.equal(paths.importErrorPath, join(paths.codexDir, "import-error.json"));
+  assert.equal(assertInside(root, root), resolve(root));
   assert.equal(assertInside(root, join(root, "step_archive", "safe.json")), join(root, "step_archive", "safe.json"));
   assert.throws(() => assertInside(root, resolve(root, "..", "escape")));
+  assert.throws(() => assertInside(root, `${resolve(root)}-sibling`));
+});
+
+test("Windows path flavor rejects sibling drives and UNC paths on every host platform", () => {
+  const root = "C:\\fixture\\workspace";
+  const inside = "C:\\fixture\\workspace\\step_archive\\safe.json";
+
+  assert.equal(assertInside(root, root), win32.resolve(root));
+  assert.equal(assertInside(root, inside), win32.resolve(inside));
+  assert.equal(pathsFor(root).codexDir, win32.join(root, "step_archive", ".harness50-codex"));
+  assert.throws(() => assertInside(root, "C:\\fixture\\workspace-sibling\\state.json"));
+  assert.throws(() => assertInside(root, "D:\\escape\\state.json"));
+  assert.throws(() => assertInside(root, "\\\\server\\share\\escape\\state.json"));
 });
 
 test("initial state has the canonical first-step values", () => {
@@ -107,6 +155,63 @@ test("state rejects invalid versions, totals, and statuses", () => {
     ...state,
     status: "blocked",
     blocked_reason: "RECEIPT_CONFLICT"
+  }));
+});
+
+test("parseState rejects malformed and non-string JSON without changing valid input", () => {
+  const state = initialState();
+  const before = structuredClone(state);
+
+  assert.throws(() => parseState("{"), error => error.code === "STATE_PARSE_ERROR");
+  assert.throws(() => parseState({}), error => error.code === "STATE_PARSE_ERROR");
+  assert.equal(validateState(state), state);
+  assert.deepEqual(state, before);
+});
+
+test("state rejects completion timestamps inconsistent with status", () => {
+  const state = initialState();
+  const completedSteps = Array.from({ length: 50 }, (_, index) => index + 1);
+  const completed = {
+    ...state,
+    status: "completed",
+    current_step: null,
+    completed_steps: completedSteps,
+    completed_at: now
+  };
+
+  assert.throws(() => validateState({ ...completed, completed_at: null }));
+  assert.throws(() => validateState({ ...state, completed_at: now }));
+  assert.throws(() => validateState({ ...state, status: "paused", completed_at: now }));
+  assert.throws(() => validateState({
+    ...state,
+    status: "blocked",
+    blocked_reason: "RECEIPT_GAP",
+    completed_at: now
+  }));
+});
+
+test("state rejects unknown fields in each nested canonical record", () => {
+  const state = stateWithCanonicalMetadata();
+  const invalidStates = [
+    { ...state, current_attempt: { ...state.current_attempt, unexpected: true } },
+    { ...state, owner: { ...state.owner, unexpected: true } },
+    { ...state, continuation: { ...state.continuation, unexpected: true } },
+    { ...state, imported_from: { ...state.imported_from, unexpected: true } }
+  ];
+
+  for (const invalidState of invalidStates) assert.throws(() => validateState(invalidState));
+});
+
+test("state reconciles continuation and import counts to its completed prefix", () => {
+  const state = stateWithCanonicalMetadata();
+
+  assert.throws(() => validateState({
+    ...state,
+    continuation: { ...state.continuation, baseline_receipt_count: 0 }
+  }));
+  assert.throws(() => validateState({
+    ...state,
+    imported_from: { ...state.imported_from, prefix_length: 2 }
   }));
 });
 
