@@ -1,8 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { renameSync, symlinkSync } from "node:fs";
 import { link, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { handleStop } from "../hooks/stop.mjs";
+import { handleUserPromptSubmit } from "../hooks/user-prompt-submit.mjs";
 import { beginStep, completeStep, initWorkflow } from "../scripts/lib/workflow.mjs";
 import { pathsFor } from "../scripts/lib/paths.mjs";
 import { readState, writeStateAtomic } from "../scripts/lib/state-store.mjs";
@@ -66,6 +69,16 @@ function assertEmptySuccess(result) {
   assert.equal(result.stdout, "{}\n");
 }
 
+function swapCodexDirectory(workspaceRoot, outsideRoot) {
+  const original = pathsFor(workspaceRoot).codexDir;
+  renameSync(original, `${original}.before-swap`);
+  symlinkSync(
+    pathsFor(outsideRoot).codexDir,
+    original,
+    process.platform === "win32" ? "junction" : "dir"
+  );
+}
+
 test("documented hook fixtures have distinct event-specific shapes", async () => {
   const names = [
     "session-start.json",
@@ -80,12 +93,21 @@ test("documented hook fixtures have distinct event-specific shapes", async () =>
     "SessionStart", "SessionStart", "SessionStart", "SessionStart", "UserPromptSubmit", "Stop"
   ]);
   assert.equal(values[1].cwd, "C:\\Harness50 Workspaces\\fixture");
+  assert.deepEqual(values[0], {
+    hook_event_name: "SessionStart",
+    cwd: "__WORKSPACE__",
+    source: "clear",
+    session_id: "session-realistic-01",
+    transcript_path: null,
+    permission_mode: "default",
+    model: "gpt-5.6-codex"
+  });
   assert.equal(values[4].prompt, "다른 버그를 먼저 고쳐줘");
   assert.equal(values[5].stop_hook_active, false);
 });
 
-test("SessionStart provides concise startup resume and compact context without mutating state", async () => {
-  for (const source of ["startup", "resume", "compact"]) {
+test("SessionStart accepts the official full shape and all documented sources without mutating state", async () => {
+  for (const source of ["startup", "resume", "clear", "compact"]) {
     const root = await makeWorkspace();
     await init(root, source);
     const before = await readFile(pathsFor(root).statePath);
@@ -93,7 +115,10 @@ test("SessionStart provides concise startup resume and compact context without m
       hook_event_name: "SessionStart",
       cwd: root,
       source,
-      session_id: `session-${source}`
+      session_id: `session-${source}`,
+      transcript_path: source === "clear" ? null : `transcripts/${source}.jsonl`,
+      permission_mode: "default",
+      model: "gpt-5.6-codex"
     });
     assert.equal(result.code, 0);
     assert.equal(result.stderr, "");
@@ -115,7 +140,7 @@ test("SessionStart provides concise startup resume and compact context without m
 
 test("SessionStart missing and completed workflows return the documented empty result", async () => {
   const missingRoot = await makeWorkspace();
-  assertEmptySuccess(await runHook("session-start", await fixture("session-start-missing.json", missingRoot)));
+  assertEmptySuccess(await runHook("session-start", await fixture("session-start.json", missingRoot)));
 
   const completedRoot = await makeWorkspace();
   const running = await init(completedRoot, "completed");
@@ -297,6 +322,112 @@ test("Stop emits exactly one marked follow-up for a progressing workflow", async
   assert.equal((await readState(root)).last_stop_turn_id, "turn-1");
 });
 
+test("stop_hook_active releases bounded recursive entries until durable work advances", async () => {
+  const root = await makeWorkspace();
+  const initial = await init(root, "active-loop");
+  const beforeEvents = await events(root);
+  for (let retry = 0; retry < 5; retry += 1) {
+    assertEmptySuccess(await runHook("stop", {
+      hook_event_name: "Stop",
+      cwd: root,
+      turn_id: `turn-active-loop-${retry}`,
+      stop_hook_active: true,
+      last_assistant_message: "must remain ignored"
+    }));
+  }
+  const after = await readState(root);
+  assert.deepEqual(after, initial);
+  assert.equal(after.consecutive_failures, 0);
+  assert.equal((await events(root)).filter(event =>
+    event.kind === "stop_continuation_requested" ||
+    (event.kind === "step_failed" && event.reason_code === "STOP_NO_PROGRESS")
+  ).length, 0);
+  assert.deepEqual(await events(root), beforeEvents);
+});
+
+test("active Stop stays quiet after acceptance until the executor begins a new attempt", async () => {
+  const root = await makeWorkspace();
+  const initialized = await init(root, "active-before-attempt");
+  await begin(root, initialized, "active-before-attempt-run");
+  const failed = await runHook("stop", {
+    hook_event_name: "Stop",
+    cwd: root,
+    turn_id: "turn-active-failed",
+    stop_hook_active: true,
+    last_assistant_message: null
+  });
+  assert.equal(failed.output.decision, "block");
+  assertEmptySuccess(await runHook("user-prompt-submit", {
+    hook_event_name: "UserPromptSubmit",
+    cwd: root,
+    turn_id: "turn-active-accepted",
+    prompt: failed.output.reason
+  }));
+
+  for (let retry = 0; retry < 5; retry += 1) {
+    assertEmptySuccess(await runHook("stop", {
+      hook_event_name: "Stop",
+      cwd: root,
+      turn_id: `turn-active-waiting-${retry}`,
+      stop_hook_active: true,
+      last_assistant_message: null
+    }));
+  }
+  const state = await readState(root);
+  assert.equal(state.consecutive_failures, 1);
+  assert.equal(state.current_attempt.failure_recorded, true);
+  assert.equal((await events(root)).filter(event =>
+    event.kind === "stop_continuation_requested"
+  ).length, 1);
+});
+
+test("a lost Stop output is re-delivered idempotently until its marker is accepted", async () => {
+  const root = await makeWorkspace();
+  const initialized = await init(root, "lost-output");
+  const firstEvent = {
+    hook_event_name: "Stop",
+    cwd: root,
+    turn_id: "turn-lost-output",
+    stop_hook_active: false,
+    last_assistant_message: null
+  };
+  const lost = await runHook("stop", firstEvent, { closeStdout: true });
+  assert.notEqual(lost.code, 0);
+  assert.equal(lost.output, null);
+
+  const expectedMarker = markerFor(initialized.continuation);
+  const stateAfterLoss = await readState(root);
+  const requestsAfterLoss = (await events(root)).filter(event =>
+    event.kind === "stop_continuation_requested"
+  );
+  assert.equal(stateAfterLoss.last_stop_turn_id, firstEvent.turn_id);
+  assert.equal(requestsAfterLoss.length, 1);
+
+  const sameTurn = await runHook("stop", firstEvent);
+  assert.deepEqual(sameTurn.output, { decision: "block", reason: expectedMarker });
+  const newTurn = await runHook("stop", { ...firstEvent, turn_id: "turn-lost-output-retry" });
+  assert.deepEqual(newTurn.output, { decision: "block", reason: expectedMarker });
+  assert.equal((await readState(root)).last_stop_turn_id, firstEvent.turn_id);
+  assert.equal((await events(root)).filter(event =>
+    event.kind === "stop_continuation_requested"
+  ).length, 1);
+
+  assertEmptySuccess(await runHook("user-prompt-submit", {
+    hook_event_name: "UserPromptSubmit",
+    cwd: root,
+    turn_id: "turn-lost-output-prompt",
+    prompt: expectedMarker
+  }));
+  assertEmptySuccess(await runHook("stop", {
+    ...firstEvent,
+    turn_id: "turn-after-acceptance",
+    stop_hook_active: true
+  }));
+  assert.equal((await events(root)).filter(event =>
+    event.kind === "stop_continuation_requested"
+  ).length, 1);
+});
+
 test("an accepted Stop marker can advance through a receipt to the next marked step", async () => {
   const root = await makeWorkspace();
   const pluginRoot = await makePluginFixture();
@@ -358,10 +489,14 @@ test("assistant completion prose cannot advance without a receipt and no-progres
   assert.equal(afterFirst.current_attempt.failure_recorded, true);
   assert.equal(afterFirst.consecutive_failures, 1);
 
-  assertEmptySuccess(await runHook("stop", event));
+  const repeated = await runHook("stop", event);
+  assert.deepEqual(repeated.output, first.output);
   const afterDuplicate = await readState(root);
   assert.equal(afterDuplicate.consecutive_failures, 1);
   assert.equal(afterDuplicate.current_attempt.id, started.attempt.id);
+  assert.equal((await events(root)).filter(item =>
+    item.kind === "stop_continuation_requested" && item.turn_id === event.turn_id
+  ).length, 1);
 });
 
 test("concurrent duplicate Stop calls cannot double-fail or emit conflicting markers", async () => {
@@ -528,6 +663,9 @@ test("event-specific names fields types cwd turn IDs and booleans fail before mu
   const cases = [
     ["session-start", { hook_event_name: "Stop", cwd: root, source: "startup" }, "HOOK_EVENT_INVALID"],
     ["session-start", { hook_event_name: "SessionStart", cwd: root, source: "launch" }, "HOOK_EVENT_INVALID"],
+    ["session-start", { hook_event_name: "SessionStart", cwd: root, source: "startup", model: 7 }, "HOOK_EVENT_INVALID"],
+    ["session-start", { hook_event_name: "SessionStart", cwd: root, source: "startup", permission_mode: "workspace-write" }, "HOOK_EVENT_INVALID"],
+    ["session-start", { hook_event_name: "SessionStart", cwd: root, source: "startup", unknown_official_field: true }, "HOOK_EVENT_INVALID"],
     ["session-start", { hook_event_name: "SessionStart", cwd: other, source: "startup" }, "HOOK_WORKSPACE_UNSAFE"],
     ["user-prompt-submit", { hook_event_name: "UserPromptSubmit", cwd: root, turn_id: "", prompt: "hello" }, "HOOK_EVENT_INVALID"],
     ["user-prompt-submit", { hook_event_name: "UserPromptSubmit", cwd: root, turn_id: "turn", prompt: 7 }, "HOOK_EVENT_INVALID"],
@@ -579,6 +717,40 @@ test("hard-linked state and event control files are rejected before hook access"
       error: { code: "HOOK_WORKSPACE_UNSAFE", message: "hook workspace rejected" }
     });
     assert.equal(result.stderr, "");
+  }
+});
+
+test("hook getters cannot redirect locked state or event mutations outside the workspace", async () => {
+  for (const handlerName of ["prompt", "stop"]) {
+    const root = await makeWorkspace();
+    const outside = await makeWorkspace();
+    await init(root, `swap-${handlerName}-inside`);
+    await init(outside, `swap-${handlerName}-outside`);
+    const outsideStateBefore = await readFile(pathsFor(outside).statePath);
+    const outsideEventsBefore = await readFile(pathsFor(outside).eventsPath);
+    let swapped = false;
+    const swapOnce = value => {
+      if (!swapped) {
+        swapped = true;
+        swapCodexDirectory(root, outside);
+      }
+      return value;
+    };
+
+    const operation = handlerName === "prompt"
+      ? handleUserPromptSubmit({
+        turn_id: "turn-swap-prompt",
+        get prompt() { return swapOnce("human prompt must not escape"); }
+      }, { workspaceRoot: root })
+      : handleStop({
+        turn_id: "turn-swap-stop",
+        get stop_hook_active() { return swapOnce(true); }
+      }, { workspaceRoot: root });
+
+    await assert.rejects(operation, error => error?.code === "HOOK_WORKSPACE_UNSAFE");
+    assert.equal(swapped, true);
+    assert.ok(Buffer.from(await readFile(pathsFor(outside).statePath)).equals(outsideStateBefore));
+    assert.ok(Buffer.from(await readFile(pathsFor(outside).eventsPath)).equals(outsideEventsBefore));
   }
 });
 

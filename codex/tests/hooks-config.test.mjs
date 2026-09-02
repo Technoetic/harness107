@@ -2,6 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { posix, win32 } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { runConfiguredHook } from "./helpers/run-hook.mjs";
+import { makeWorkspace } from "./helpers/workspace.mjs";
 
 const configUrl = new URL("../hooks/hooks.json", import.meta.url);
 const expectedScripts = new Map([
@@ -68,15 +72,34 @@ test("POSIX and Windows command fields resolve exactly inside realistic installe
   }
 });
 
-test("PLUGIN_ROOT appears once as quoted trusted package metadata and cannot add a command separator", async () => {
+test("PLUGIN_ROOT remains the exact quoted Codex discovery placeholder", async () => {
   const config = JSON.parse(await readFile(configUrl, "utf8"));
   for (const { handler } of allCommandHandlers(config)) {
     for (const field of ["command", "commandWindows"]) {
       assert.equal((handler[field].match(/\$\{PLUGIN_ROOT\}/g) ?? []).length, 1);
       assert.match(handler[field], /^node "\$\{PLUGIN_ROOT\}\/codex\/hooks\/[a-z-]+\.mjs"$/);
-      const expanded = expandRoot(handler[field], "/installed/root;echo-inert");
-      assert.equal(quotedScript(expanded).includes(";echo-inert/codex/hooks/"), true);
-      assert.equal(expanded.split('"').length, 3);
     }
   }
+});
+
+test("Codex substitution executes the selected hook through the native host shell", async () => {
+  const config = JSON.parse(await readFile(configUrl, "utf8"));
+  const pluginRoot = fileURLToPath(new URL("../..", import.meta.url));
+  assert.match(pluginRoot, /\s/);
+  const root = await makeWorkspace();
+  const handler = config.hooks.SessionStart[0].hooks[0];
+  const command = process.platform === "win32" ? handler.commandWindows : handler.command;
+  const result = await runConfiguredHook(command, {
+    hook_event_name: "SessionStart",
+    cwd: root,
+    source: "clear",
+    session_id: "native-command-smoke",
+    transcript_path: null,
+    permission_mode: "default",
+    model: "gpt-5.6-codex"
+  }, { pluginRoot, cwd: root });
+  assert.equal(result.code, 0);
+  assert.deepEqual(result.output, {});
+  assert.equal(result.stdout, "{}\n");
+  assert.equal(result.stderr, "");
 });

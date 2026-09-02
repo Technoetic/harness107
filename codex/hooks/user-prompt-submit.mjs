@@ -1,13 +1,14 @@
 import { appendEvent, readState, writeStateAtomic } from "../scripts/lib/state-store.mjs";
-import { withRunLock } from "../scripts/lib/lock.mjs";
-import { pathsFor } from "../scripts/lib/paths.mjs";
 import {
+  assertHookStorageGuard,
   continuationMarker,
+  guardedHookOperation,
   isDirectEntrypoint,
   readLifecycleEvents,
   runHookDirect,
   stopTurnWasAccepted,
-  stopTurnWasRequested
+  stopTurnWasRequested,
+  withHookStorageLock
 } from "../scripts/lib/hook-io.mjs";
 
 const CONTROL_PROMPT = /^(?:\$harness50-status|\$harness50-reset|\$webapp(?: [^\r\n]+)?)$/;
@@ -25,39 +26,53 @@ function currentMarkerPrompt(state, prompt, lifecycleEvents) {
 }
 
 export async function handleUserPromptSubmit(event, { workspaceRoot }) {
-  let observed;
   try {
-    observed = await readState(workspaceRoot);
-  } catch {
-    return {};
-  }
-  if (observed === null || observed.status !== "running") return {};
-  if (CONTROL_PROMPT.test(event.prompt)) return {};
-
-  const { lockPath } = pathsFor(workspaceRoot);
-  try {
-    await withRunLock(lockPath, async () => {
-      let state = await readState(workspaceRoot);
+    await withHookStorageLock(workspaceRoot, async guard => {
+      const prompt = event.prompt;
+      const turnId = event.turn_id;
+      await assertHookStorageGuard(guard);
+      let state;
+      try {
+        state = await guardedHookOperation(
+          guard,
+          [guard.paths.statePath],
+          () => readState(workspaceRoot)
+        );
+      } catch (error) {
+        if (error?.code === "HOOK_WORKSPACE_UNSAFE") throw error;
+        return;
+      }
       if (state === null || state.status !== "running") return;
+      if (CONTROL_PROMPT.test(prompt)) return;
       let lifecycleEvents;
       try {
-        lifecycleEvents = await readLifecycleEvents(workspaceRoot);
-      } catch {
+        lifecycleEvents = await guardedHookOperation(
+          guard,
+          [guard.paths.eventsPath],
+          () => readLifecycleEvents(workspaceRoot)
+        );
+      } catch (error) {
+        if (error?.code === "HOOK_WORKSPACE_UNSAFE") throw error;
         lifecycleEvents = [];
       }
-      const acceptedMarker = currentMarkerPrompt(state, event.prompt, lifecycleEvents);
+      const acceptedMarker = currentMarkerPrompt(state, prompt, lifecycleEvents);
       const updatedAt = mutationTime(state);
       if (acceptedMarker) {
         try {
-          await appendEvent(workspaceRoot, {
-            kind: "continuation_prompt_accepted",
-            workflow_id: state.workflow_id,
-            step: state.current_step,
-            turn_id: state.last_stop_turn_id,
-            baseline_receipt_count: state.completed_steps.length
-          });
+          await guardedHookOperation(
+            guard,
+            [guard.paths.eventsPath],
+            () => appendEvent(workspaceRoot, {
+              kind: "continuation_prompt_accepted",
+              workflow_id: state.workflow_id,
+              step: state.current_step,
+              turn_id: state.last_stop_turn_id,
+              baseline_receipt_count: state.completed_steps.length
+            })
+          );
           return;
-        } catch {
+        } catch (error) {
+          if (error?.code === "HOOK_WORKSPACE_UNSAFE") throw error;
           // If acceptance cannot be recorded, pause instead of permitting replay.
         }
       }
@@ -67,22 +82,34 @@ export async function handleUserPromptSubmit(event, { workspaceRoot }) {
         continuation: null,
         updated_at: updatedAt
       };
-      state = await writeStateAtomic(workspaceRoot, state);
+      state = await guardedHookOperation(
+        guard,
+        [guard.paths.statePath],
+        () => writeStateAtomic(workspaceRoot, state),
+        { allowReplacement: true }
+      );
       try {
-        await appendEvent(workspaceRoot, {
-          kind: "workflow_paused",
-          workflow_id: state.workflow_id,
-          step: state.current_step,
-          status: "paused",
-          turn_id: event.turn_id,
-          reason_code: "USER_REQUEST"
-        });
-      } catch {
+        await guardedHookOperation(
+          guard,
+          [guard.paths.eventsPath],
+          () => appendEvent(workspaceRoot, {
+            kind: "workflow_paused",
+            workflow_id: state.workflow_id,
+            step: state.current_step,
+            status: "paused",
+            turn_id: turnId,
+            reason_code: "USER_REQUEST"
+          })
+        );
+      } catch (error) {
+        if (error?.code === "HOOK_WORKSPACE_UNSAFE") throw error;
         // The locked state transition is authoritative when observation storage fails.
       }
     });
   } catch (error) {
-    if (error?.code === "WORKSPACE_PATH_UNSAFE") throw error;
+    if (error?.code === "WORKSPACE_PATH_UNSAFE" || error?.code === "HOOK_WORKSPACE_UNSAFE") {
+      throw error;
+    }
     // A human prompt must never be blocked by lifecycle bookkeeping failure.
   }
   return {};

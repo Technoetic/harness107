@@ -1,14 +1,21 @@
 import { lstat, readFile, realpath } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { TextDecoder } from "node:util";
 
 import { HarnessError } from "./errors.mjs";
 import { readJsonInput, writeOutput } from "./json-io.mjs";
+import { withRunLock } from "./lock.mjs";
+import { pathsFor } from "./paths.mjs";
 
 export const HOOK_INPUT_LIMIT = 1024 * 1024;
 
-const COMMON_OPTIONAL_FIELDS = new Set(["session_id", "transcript_path", "permission_mode"]);
+const COMMON_OPTIONAL_FIELDS = new Set([
+  "session_id",
+  "transcript_path",
+  "permission_mode",
+  "model"
+]);
 const EVENT_FIELDS = new Map([
   ["SessionStart", {
     required: new Set(["hook_event_name", "cwd", "source"]),
@@ -29,7 +36,14 @@ const EVENT_FIELDS = new Map([
     optional: COMMON_OPTIONAL_FIELDS
   }]
 ]);
-const SESSION_SOURCES = new Set(["startup", "resume", "compact"]);
+const SESSION_SOURCES = new Set(["startup", "resume", "clear", "compact"]);
+const PERMISSION_MODES = new Set([
+  "default",
+  "acceptEdits",
+  "plan",
+  "dontAsk",
+  "bypassPermissions"
+]);
 const SAFE_ID = /^[A-Za-z0-9._:-]{1,256}$/;
 
 function fail(code, message) {
@@ -39,6 +53,10 @@ function fail(code, message) {
 function samePath(left, right) {
   const normalize = value => process.platform === "win32" ? value.toLowerCase() : value;
   return normalize(resolve(left)) === normalize(resolve(right));
+}
+
+function sameNode(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
 }
 
 function requireText(value) {
@@ -77,6 +95,167 @@ async function assertPhysicalPath(workspaceRoot, candidate, { rejectFileAliases 
   }
 }
 
+function storagePaths(paths) {
+  return [
+    join(paths.workspaceRoot, "step_archive"),
+    paths.codexDir,
+    paths.statePath,
+    paths.eventsPath,
+    paths.receiptsDir,
+    paths.lockPath
+  ];
+}
+
+async function assertPhysicalComponents(workspaceRoot, candidates) {
+  const root = resolve(workspaceRoot);
+  let rootBefore;
+  let canonicalRoot;
+  try {
+    rootBefore = await lstat(root, { bigint: true });
+    canonicalRoot = await realpath(root);
+  } catch {
+    fail("HOOK_WORKSPACE_UNSAFE", "hook workspace rejected");
+  }
+  if (rootBefore.isSymbolicLink() || !rootBefore.isDirectory() || !samePath(root, canonicalRoot)) {
+    fail("HOOK_WORKSPACE_UNSAFE", "hook workspace rejected");
+  }
+  for (const candidate of candidates) {
+    const target = resolve(candidate);
+    const pathFromRoot = relative(root, target);
+    if (
+      pathFromRoot === ".." ||
+      pathFromRoot.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) ||
+      isAbsolute(pathFromRoot)
+    ) {
+      fail("HOOK_WORKSPACE_UNSAFE", "hook workspace rejected");
+    }
+    let current = root;
+    for (const part of pathFromRoot.split(/[\\/]+/).filter(Boolean)) {
+      current = join(current, part);
+      let before;
+      try {
+        before = await lstat(current, { bigint: true });
+      } catch (error) {
+        if (error?.code === "ENOENT") break;
+        fail("HOOK_WORKSPACE_UNSAFE", "hook workspace rejected");
+      }
+      let canonical;
+      let after;
+      try {
+        canonical = await realpath(current);
+        after = await lstat(current, { bigint: true });
+      } catch {
+        fail("HOOK_WORKSPACE_UNSAFE", "hook workspace rejected");
+      }
+      if (
+        before.isSymbolicLink() ||
+        !sameNode(before, after) ||
+        !samePath(current, canonical)
+      ) {
+        fail("HOOK_WORKSPACE_UNSAFE", "hook workspace rejected");
+      }
+    }
+  }
+}
+
+async function existingStat(path) {
+  try {
+    return await lstat(path, { bigint: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    fail("HOOK_WORKSPACE_UNSAFE", "hook workspace rejected");
+  }
+}
+
+async function assertControlFiles(controlPaths) {
+  for (const path of controlPaths) {
+    const information = await existingStat(path);
+    if (
+      information !== null &&
+      (information.isSymbolicLink() || !information.isFile() || information.nlink !== 1n)
+    ) {
+      fail("HOOK_WORKSPACE_UNSAFE", "hook workspace rejected");
+    }
+  }
+}
+
+export async function captureHookStorageGuard(workspaceRoot, { includeLock = true } = {}) {
+  const paths = pathsFor(workspaceRoot);
+  await assertPhysicalComponents(paths.workspaceRoot, storagePaths(paths));
+  const identities = new Map();
+  const stableDirectories = [
+    paths.workspaceRoot,
+    join(paths.workspaceRoot, "step_archive"),
+    paths.codexDir,
+    paths.receiptsDir
+  ];
+  if (includeLock) stableDirectories.push(paths.lockPath);
+  for (const path of stableDirectories) {
+    const information = await existingStat(path);
+    if (information === null) continue;
+    if (information.isSymbolicLink() || !information.isDirectory()) {
+      fail("HOOK_WORKSPACE_UNSAFE", "hook workspace rejected");
+    }
+    identities.set(path, information);
+  }
+  return { paths, identities };
+}
+
+export async function assertHookStorageGuard(guard, controlPaths = []) {
+  const { paths, identities } = guard;
+  await assertPhysicalComponents(paths.workspaceRoot, storagePaths(paths));
+  await assertControlFiles(controlPaths);
+  for (const [path, expected] of identities) {
+    const current = await existingStat(path);
+    if (current === null || current.isSymbolicLink() || !sameNode(expected, current)) {
+      fail("HOOK_WORKSPACE_UNSAFE", "hook workspace rejected");
+    }
+  }
+}
+
+export async function guardedHookOperation(guard, controlPaths, operation, {
+  allowReplacement = false
+} = {}) {
+  await assertHookStorageGuard(guard, controlPaths);
+  const identities = new Map();
+  if (!allowReplacement) {
+    for (const path of controlPaths) {
+      const information = await existingStat(path);
+      if (information !== null) identities.set(path, information);
+    }
+  }
+  try {
+    const result = await operation();
+    await assertHookStorageGuard(guard, controlPaths);
+    for (const [path, expected] of identities) {
+      const current = await existingStat(path);
+      if (current === null || !sameNode(expected, current)) {
+        fail("HOOK_WORKSPACE_UNSAFE", "hook workspace rejected");
+      }
+    }
+    return result;
+  } catch (error) {
+    await assertHookStorageGuard(guard, controlPaths);
+    throw error;
+  }
+}
+
+export async function withHookStorageLock(workspaceRoot, operation) {
+  const beforeLock = await captureHookStorageGuard(workspaceRoot, { includeLock: false });
+  return withRunLock(beforeLock.paths.lockPath, async () => {
+    await assertHookStorageGuard(beforeLock);
+    const locked = await captureHookStorageGuard(workspaceRoot);
+    try {
+      const result = await operation(locked);
+      await assertHookStorageGuard(locked);
+      return result;
+    } catch (error) {
+      await assertHookStorageGuard(locked);
+      throw error;
+    }
+  });
+}
+
 export async function validateEventWorkspace(cwd) {
   if (!requireText(cwd) || !isAbsolute(cwd)) {
     fail("HOOK_EVENT_INVALID", "hook event rejected");
@@ -113,10 +292,16 @@ function validateOptionalFields(event) {
   if ("session_id" in event && !SAFE_ID.test(event.session_id)) {
     fail("HOOK_EVENT_INVALID", "hook event rejected");
   }
-  if ("transcript_path" in event && typeof event.transcript_path !== "string") {
+  if (
+    "transcript_path" in event &&
+    !(event.transcript_path === null || typeof event.transcript_path === "string")
+  ) {
     fail("HOOK_EVENT_INVALID", "hook event rejected");
   }
-  if ("permission_mode" in event && typeof event.permission_mode !== "string") {
+  if ("permission_mode" in event && !PERMISSION_MODES.has(event.permission_mode)) {
+    fail("HOOK_EVENT_INVALID", "hook event rejected");
+  }
+  if ("model" in event && typeof event.model !== "string") {
     fail("HOOK_EVENT_INVALID", "hook event rejected");
   }
 }

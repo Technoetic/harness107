@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const hookRoot = fileURLToPath(new URL("../../hooks/", import.meta.url));
@@ -41,24 +42,25 @@ function parseOutput(bytes, { allowMissingOutput }) {
   return value;
 }
 
-export async function runHook(name, event, {
+async function runSpawned(executable, args, event, {
   env = {},
   cwd = typeof event?.cwd === "string" ? event.cwd : process.cwd(),
   input = event,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   outputLimit = DEFAULT_OUTPUT_LIMIT,
-  closeStdout = false
+  closeStdout = false,
+  windowsVerbatimArguments = false
 } = {}) {
-  if (!HOOK_NAMES.has(name)) throw new TypeError("runHook name is not recognized");
   if (typeof cwd !== "string" || cwd === "") throw new TypeError("runHook cwd must be a string");
   const inputChunks = chunksFor(input);
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [`${hookRoot}${name}.mjs`], {
+    const child = spawn(executable, args, {
       cwd,
       env: { ...process.env, ...env },
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true
+      windowsHide: true,
+      windowsVerbatimArguments
     });
     const stdout = [];
     const stderr = [];
@@ -177,4 +179,36 @@ export async function runHook(name, event, {
 
     pumpInput();
   });
+}
+
+export async function runHook(name, event, options = {}) {
+  if (!HOOK_NAMES.has(name)) throw new TypeError("runHook name is not recognized");
+  return runSpawned(process.execPath, [`${hookRoot}${name}.mjs`], event, options);
+}
+
+export async function runConfiguredHook(command, event, {
+  pluginRoot,
+  ...options
+} = {}) {
+  if (
+    typeof command !== "string" ||
+    command === "" ||
+    typeof pluginRoot !== "string" ||
+    !isAbsolute(pluginRoot) ||
+    /["\0\r\n]/.test(pluginRoot) ||
+    !command.includes("${PLUGIN_ROOT}")
+  ) {
+    throw new TypeError("configured hook command and plugin root are invalid");
+  }
+  const expanded = command.replaceAll("${PLUGIN_ROOT}", pluginRoot);
+  const env = { PLUGIN_ROOT: pluginRoot, ...(options.env ?? {}) };
+  if (process.platform === "win32") {
+    return runSpawned(
+      process.env.ComSpec ?? "cmd.exe",
+      ["/d", "/s", "/c", expanded],
+      event,
+      { ...options, env, windowsVerbatimArguments: true }
+    );
+  }
+  return runSpawned("/bin/sh", ["-c", expanded], event, { ...options, env });
 }
