@@ -2474,3 +2474,693 @@ test("ported batch validation rejects missing Codex files", async () => {
     /missing Codex step/
   );
 });
+
+const EXPECTED_IMPLEMENTATION_ACCEPTANCE_DESCRIPTIONS = {
+  step031: {
+    "environment-preparation-report": "Stores the selected-design, project-manifest, dependency, version, and smoke-check evidence.",
+    "selected-design-and-manifests": "Confirms the selected Step 30 design and every present project manifest and lockfile were inspected.",
+    "required-dependencies-only": "Confirms only dependencies required by the selected design were considered for installation.",
+    "bounded-resolution-smoke": "Confirms every required dependency resolved, reported a version, and passed a bounded smoke check.",
+    "permission-preservation": "Confirms conditional installation kept the normal permission flow and never auto-approved a command."
+  },
+  step032: {
+    "implementation-file-index": "Stores the bounded file, Class, function, ownership, and dependency-order implementation map.",
+    "selected-design-traceability": "Traces every planned file and symbol to the selected Step 30 design.",
+    "bounded-file-ownership": "Confirms every work unit owns one to three files and each declared chunk is at most 500 lines.",
+    "optional-tokei-disposition": "Records local tokei evidence or an explicit safe SKIP with deterministic fallback measurements.",
+    "dependency-order": "Confirms new and modified files are ordered by their concrete implementation dependencies."
+  },
+  step033: {
+    "jscpd-baseline-summary": "Stores the pre-implementation duplication baseline, tool disposition, and fallback evidence.",
+    "jscpd-raw-report": "Stores raw JSON only when the already-local jscpd command succeeds.",
+    "local-jscpd-command": "Runs only the already-local jscpd executable with network-disabled package execution.",
+    "preimplementation-duplication-snapshot": "Confirms the baseline was captured before implementation changes.",
+    "optional-jscpd-disposition": "Records either measured jscpd results or an explicit safe SKIP with a reason.",
+    "duplication-fallback": "Records deterministic local fallback measurements when jscpd is unavailable."
+  },
+  step034: {
+    "knip-baseline-summary": "Stores the pre-implementation unused-code baseline, tool disposition, and fallback evidence.",
+    "knip-raw-report": "Stores raw JSON only when the already-local knip command succeeds.",
+    "local-knip-command": "Runs only the already-local knip executable with network-disabled package execution.",
+    "preimplementation-unused-code-snapshot": "Confirms the baseline was captured before implementation changes.",
+    "optional-knip-disposition": "Records either measured knip results or an explicit safe SKIP with a reason.",
+    "unused-code-fallback": "Records deterministic manifest and import-graph fallback evidence when knip is unavailable."
+  },
+  step035: {
+    "context-policy": "Stores the bounded read, work-unit, checkpoint, and handoff policy used by later implementation.",
+    "partial-inspection-policy": "Confirms large files use targeted discovery and bounded partial reads without blind rereads.",
+    "small-work-units": "Confirms implementation work is divided into independently checkable one-to-three-file units.",
+    "minimal-handoff": "Confirms each checkpoint and handoff contains only paths, decisions, evidence, blockers, and next work.",
+    "no-token-balance-claim": "Confirms the policy never invents or claims observation of a hidden token balance."
+  },
+  step036: {
+    "encoding-policy": "Stores the UTF-8-no-BOM, LF, final-newline audit and configuration-preservation evidence.",
+    "utf8-lf-final-newline": "Confirms every touched text file is UTF-8 without BOM, uses LF, and ends with a newline.",
+    "configuration-preservation": "Confirms existing encoding configuration was preserved and only minimally merged when needed.",
+    "byte-level-verification": "Confirms encoding and line endings were verified from file bytes rather than display output.",
+    "no-blind-rewrite": "Confirms only changed text files were corrected and binary or unrelated files were not rewritten."
+  },
+  step037: {
+    "implementation-manifest": "Stores implemented files, digests, owners, tests, and traceability to the selected design and topic.",
+    "implementation-screenshot-input": "Requires the persisted Step 22 Awwwards screenshot inspected for CSS evidence.",
+    "topic-field-fidelity": "Confirms topic, audience, interactive, real-world application, and constraint fields are reflected without modifying TOPIC.",
+    "selected-design-only": "Confirms implementation follows only the selected Step 30 design without reopening selection.",
+    "class-async-accessibility": "Confirms Class boundaries, asynchronous lifecycle, interactions, and accessibility contracts are implemented.",
+    "incremental-test-evidence": "Confirms each owned module was implemented through a failing-test, minimal-change, passing-test cycle.",
+    "visual-evidence-inspection": "Confirms the required screenshot was actually opened and CSS decisions trace to observed regions.",
+    "independent-implementation-verifier": "Confirms a non-modifying independent verification pass checked the implementation and manifest."
+  },
+  step038: {
+    "build-smoke-report": "Stores the exact build, dist HTML, zero-cycle, and advisory diagnostic results.",
+    "implementation-milestone": "Stores the first 38-step quality milestone only after both mandatory gates pass.",
+    "dist-index-html": "Requires the build-produced dist/index.html artifact.",
+    "project-build-command": "Runs the exact non-optional build script declared by the project manifest.",
+    "dist-html-boundary": "Confirms dist/index.html is a regular nonempty file with opening and closing HTML boundaries.",
+    "zero-cycle-gate": "Confirms a declared local cycle tool or deterministic local fallback reports zero cycles.",
+    "advisory-diagnostics": "Records lint, formatting, and type diagnostics without substituting for either mandatory gate.",
+    "pass-only-build-gate": "Confirms both mandatory gates passed before the report and milestone count as completion evidence."
+  }
+};
+
+function assertImplementationAcceptanceDescriptions(steps) {
+  const actual = Object.fromEntries(steps.map((step) => [
+    step.id,
+    Object.fromEntries(step.acceptance.map((item) => [item.id, item.description]))
+  ]));
+  assert.deepEqual(actual, EXPECTED_IMPLEMENTATION_ACCEPTANCE_DESCRIPTIONS);
+}
+
+const IMPLEMENTATION_ROLE_CONTRACTS = [
+  { number: 31, worker: /환경 준비 실행자 역할/, verifier: /환경 준비 독립 검증자 역할/ },
+  { number: 32, worker: /파일 인덱스 작성자 역할/, verifier: /파일 인덱스 독립 검증자 역할/ },
+  { number: 33, worker: /중복 베이스라인 실행자 역할/, verifier: /중복 베이스라인 독립 검증자 역할/ },
+  { number: 34, worker: /미사용 코드 베이스라인 실행자 역할/, verifier: /미사용 코드 베이스라인 독립 검증자 역할/ },
+  { number: 36, worker: /인코딩 정책 작성자 역할/, verifier: /인코딩 독립 검증자 역할/ },
+  { number: 37, worker: /모듈 구현자 역할/, verifier: /구현 독립 검증자 역할/ },
+  { number: 38, worker: /빌드 게이트 실행자 역할/, verifier: /빌드 게이트 독립 검증자 역할/ }
+];
+
+function assertImplementationRoleContract(content, { worker, verifier }) {
+  const roleSection = extractMarkdownSection(content, "실행 역할").replace(/\s+/g, " ");
+  assert.match(roleSection, worker);
+  assert.match(roleSection, verifier);
+  assert.match(roleSection, /독립 검증자[^]*산출물을 수정하지 않는다/);
+  assert.match(roleSection, /위임 기능을 사용할 수 없으면[^]*현재 실행자가[^]*두 역할을 명확히 분리[^]*순서대로 수행/);
+  assert.match(roleSection, /별도 역할을 위임했다고 기록하지 않는다/);
+  assertPlanningPermissionContract(content);
+}
+
+function assertStep35RoleContract(content) {
+  const roleSection = extractMarkdownSection(content, "실행 역할").replace(/\s+/g, " ");
+  assert.match(roleSection, /이 단계에서는 외부 역할에 위임하지 않는다/);
+  assert.match(roleSection, /현재 실행자가 정책 수립 패스[^]*분리된 검증 패스[^]*순서대로 수행/);
+  assert.match(roleSection, /검증 패스[^]*정책 산출물을 수정하지 않는다/);
+  assert.match(roleSection, /별도 역할을 위임했다고 기록하지 않는다/);
+  assertPlanningPermissionContract(content);
+}
+
+test("implementation batch declares the exact Codex-native evidence contracts", async () => {
+  const report = await validateStepBatch(repoRoot, [31, 32, 33, 34, 35, 36, 37, 38]);
+  assertImplementationAcceptanceDescriptions(report.steps);
+  const projected = report.steps.map((step) => ({
+    number: step.number,
+    id: step.id,
+    title: step.title,
+    phase: step.phase,
+    source: step.source,
+    target: step.target,
+    source_sha256: step.source_sha256,
+    inputs: step.inputs,
+    outputs: step.outputs,
+    requires: step.requires,
+    optional_requires: step.optional_requires,
+    network: step.network,
+    visual_review: step.visual_review,
+    acceptance: step.acceptance.map((item) => ({
+      id: item.id,
+      kind: item.kind,
+      required: item.required,
+      ...(item.path === undefined ? {} : { path: item.path }),
+      ...(item.command_pattern === undefined ? {} : { command_pattern: item.command_pattern })
+    })),
+    ported: step.ported,
+    next: step.next
+  }));
+
+  assert.deepEqual(projected, [
+    {
+      number: 31,
+      id: "step031",
+      title: "환경 준비",
+      phase: "implementation",
+      source: "assets/steps/step031.md",
+      target: "codex/assets/steps/step031.md",
+      source_sha256: "f825f56718e9399018639a61c4d09e6a4726639b0561976436976ca42372c094",
+      inputs: [
+        "step_archive/outputs/step030_설계선택.md",
+        "step_archive/step030_레이아웃설계_chunk1.md",
+        "step_archive/step030_전체설계_chunk1.md"
+      ],
+      outputs: ["step_archive/step031_환경준비.md"],
+      requires: ["step030"],
+      optional_requires: [],
+      network: true,
+      visual_review: false,
+      acceptance: [
+        { id: "environment-preparation-report", kind: "artifact", required: true, path: "step_archive/step031_환경준비.md" },
+        { id: "selected-design-and-manifests", kind: "check", required: true },
+        { id: "required-dependencies-only", kind: "check", required: true },
+        { id: "bounded-resolution-smoke", kind: "check", required: true },
+        { id: "permission-preservation", kind: "check", required: true }
+      ],
+      ported: true,
+      next: "step032"
+    },
+    {
+      number: 32,
+      id: "step032",
+      title: "구현 파일 인덱싱 (tokei)",
+      phase: "implementation",
+      source: "assets/steps/step032.md",
+      target: "codex/assets/steps/step032.md",
+      source_sha256: "1ca75809d8fec4aeabe496dfbe412d22f551abc2004b2fff0f82f55b4cd40f5f",
+      inputs: [
+        "step_archive/step030_레이아웃설계_chunk1.md",
+        "step_archive/step030_전체설계_chunk1.md",
+        "step_archive/step031_환경준비.md"
+      ],
+      outputs: ["step_archive/step032_파일인덱스_chunk1.md"],
+      requires: ["step030", "step031"],
+      optional_requires: [],
+      network: false,
+      visual_review: false,
+      acceptance: [
+        { id: "implementation-file-index", kind: "artifact", required: true, path: "step_archive/step032_파일인덱스_chunk1.md" },
+        { id: "selected-design-traceability", kind: "check", required: true },
+        { id: "bounded-file-ownership", kind: "check", required: true },
+        { id: "optional-tokei-disposition", kind: "check", required: true },
+        { id: "dependency-order", kind: "check", required: true }
+      ],
+      ported: true,
+      next: "step033"
+    },
+    {
+      number: 33,
+      id: "step033",
+      title: "jscpd 코드 중복 베이스라인 수집",
+      phase: "implementation",
+      source: "assets/steps/step033.md",
+      target: "codex/assets/steps/step033.md",
+      source_sha256: "1d92fd81e2ecf485817a5a78f8846b5376e40e3ab58cb45fad606c09a2a74659",
+      inputs: ["step_archive/step032_파일인덱스_chunk1.md"],
+      outputs: ["step_archive/step033_jscpd베이스라인.md"],
+      requires: ["step032"],
+      optional_requires: [],
+      network: false,
+      visual_review: false,
+      acceptance: [
+        { id: "jscpd-baseline-summary", kind: "artifact", required: true, path: "step_archive/step033_jscpd베이스라인.md" },
+        { id: "jscpd-raw-report", kind: "artifact", required: false, path: "step_archive/jscpd-baseline/jscpd-report.json" },
+        { id: "local-jscpd-command", kind: "command", required: false, command_pattern: "^npm exec --offline -- jscpd src/ --reporters json --output step_archive/jscpd-baseline/$" },
+        { id: "preimplementation-duplication-snapshot", kind: "check", required: true },
+        { id: "optional-jscpd-disposition", kind: "check", required: true },
+        { id: "duplication-fallback", kind: "check", required: true }
+      ],
+      ported: true,
+      next: "step034"
+    },
+    {
+      number: 34,
+      id: "step034",
+      title: "knip 미사용 코드 베이스라인 수집",
+      phase: "implementation",
+      source: "assets/steps/step034.md",
+      target: "codex/assets/steps/step034.md",
+      source_sha256: "f82ed6a8cd582b740d39d53e75b8b31b75b4b9b759b48d8d63add97cd24f4671",
+      inputs: ["step_archive/step032_파일인덱스_chunk1.md"],
+      outputs: ["step_archive/step034_knip베이스라인.md"],
+      requires: ["step032"],
+      optional_requires: [],
+      network: false,
+      visual_review: false,
+      acceptance: [
+        { id: "knip-baseline-summary", kind: "artifact", required: true, path: "step_archive/step034_knip베이스라인.md" },
+        { id: "knip-raw-report", kind: "artifact", required: false, path: "step_archive/knip-baseline.json" },
+        { id: "local-knip-command", kind: "command", required: false, command_pattern: "^npm exec --offline -- knip --reporter json$" },
+        { id: "preimplementation-unused-code-snapshot", kind: "check", required: true },
+        { id: "optional-knip-disposition", kind: "check", required: true },
+        { id: "unused-code-fallback", kind: "check", required: true }
+      ],
+      ported: true,
+      next: "step035"
+    },
+    {
+      number: 35,
+      id: "step035",
+      title: "컨텍스트 윈도우 제한 방지",
+      phase: "implementation",
+      source: "assets/steps/step035.md",
+      target: "codex/assets/steps/step035.md",
+      source_sha256: "664d663cc7ed8cbb8605e3c5c5d2653fb139421eb469e81d1f08201fbf284acd",
+      inputs: ["step_archive/step032_파일인덱스_chunk1.md"],
+      outputs: ["step_archive/step035_컨텍스트정책.md"],
+      requires: ["step032"],
+      optional_requires: [],
+      network: false,
+      visual_review: false,
+      acceptance: [
+        { id: "context-policy", kind: "artifact", required: true, path: "step_archive/step035_컨텍스트정책.md" },
+        { id: "partial-inspection-policy", kind: "check", required: true },
+        { id: "small-work-units", kind: "check", required: true },
+        { id: "minimal-handoff", kind: "check", required: true },
+        { id: "no-token-balance-claim", kind: "check", required: true }
+      ],
+      ported: true,
+      next: "step036"
+    },
+    {
+      number: 36,
+      id: "step036",
+      title: "인코딩 규칙 (모지바케 방지)",
+      phase: "implementation",
+      source: "assets/steps/step036.md",
+      target: "codex/assets/steps/step036.md",
+      source_sha256: "27787a5adeff811a6ce6b1f8c58fe9afc0703139f049e88a705b6e911b2fcec0",
+      inputs: ["step_archive/step032_파일인덱스_chunk1.md", "step_archive/step035_컨텍스트정책.md"],
+      outputs: ["step_archive/step036_인코딩정책.md"],
+      requires: ["step032", "step035"],
+      optional_requires: [],
+      network: false,
+      visual_review: false,
+      acceptance: [
+        { id: "encoding-policy", kind: "artifact", required: true, path: "step_archive/step036_인코딩정책.md" },
+        { id: "utf8-lf-final-newline", kind: "check", required: true },
+        { id: "configuration-preservation", kind: "check", required: true },
+        { id: "byte-level-verification", kind: "check", required: true },
+        { id: "no-blind-rewrite", kind: "check", required: true }
+      ],
+      ported: true,
+      next: "step037"
+    },
+    {
+      number: 37,
+      id: "step037",
+      title: "구현",
+      phase: "implementation",
+      source: "assets/steps/step037.md",
+      target: "codex/assets/steps/step037.md",
+      source_sha256: "dbfc0b0c5f6412dbb13615bb1b7e60140a084ff8eab0254eb67c6c582378b82e",
+      inputs: [
+        "step_archive/TOPIC/TOPIC.md",
+        "step_archive/step022_수집결과_chunk1.md",
+        "step_archive/awwwards-step022-primary.txt",
+        "step_archive/screenshots/research/step022-primary-desktop.png",
+        "step_archive/step023_조사결과_chunk1.md",
+        "step_archive/outputs/step030_설계선택.md",
+        "step_archive/step030_레이아웃설계_chunk1.md",
+        "step_archive/step030_전체설계_chunk1.md",
+        "step_archive/step031_환경준비.md",
+        "step_archive/step032_파일인덱스_chunk1.md",
+        "step_archive/step035_컨텍스트정책.md",
+        "step_archive/step036_인코딩정책.md"
+      ],
+      outputs: ["step_archive/step037_구현manifest.md"],
+      requires: ["step022", "step023", "step030", "step031", "step032", "step035", "step036"],
+      optional_requires: [],
+      network: false,
+      visual_review: true,
+      acceptance: [
+        { id: "implementation-manifest", kind: "artifact", required: true, path: "step_archive/step037_구현manifest.md" },
+        { id: "implementation-screenshot-input", kind: "artifact", required: true, path: "step_archive/screenshots/research/step022-primary-desktop.png" },
+        { id: "topic-field-fidelity", kind: "check", required: true },
+        { id: "selected-design-only", kind: "check", required: true },
+        { id: "class-async-accessibility", kind: "check", required: true },
+        { id: "incremental-test-evidence", kind: "check", required: true },
+        { id: "visual-evidence-inspection", kind: "check", required: true },
+        { id: "independent-implementation-verifier", kind: "check", required: true }
+      ],
+      ported: true,
+      next: "step038"
+    },
+    {
+      number: 38,
+      id: "step038",
+      title: "빌드 스모크 테스트 (구현 완료 게이트)",
+      phase: "implementation",
+      source: "assets/steps/step038.md",
+      target: "codex/assets/steps/step038.md",
+      source_sha256: "a582363f00adf1a81f0a55471ac5bce95b2819bb4cc096e43cb4decc2118565e",
+      inputs: [
+        "step_archive/step031_환경준비.md",
+        "step_archive/step033_jscpd베이스라인.md",
+        "step_archive/step034_knip베이스라인.md",
+        "step_archive/step037_구현manifest.md"
+      ],
+      outputs: ["step_archive/step038_smoke_test.md", "step_archive/outputs/trust5_r1.md"],
+      requires: ["step031", "step033", "step034", "step037"],
+      optional_requires: [],
+      network: false,
+      visual_review: false,
+      acceptance: [
+        { id: "build-smoke-report", kind: "artifact", required: true, path: "step_archive/step038_smoke_test.md" },
+        { id: "implementation-milestone", kind: "artifact", required: true, path: "step_archive/outputs/trust5_r1.md" },
+        { id: "dist-index-html", kind: "artifact", required: true, path: "dist/index.html" },
+        { id: "project-build-command", kind: "command", required: true, command_pattern: "^(?:npm run|pnpm(?: run)?|yarn(?: run)?|bun run) (?:build|[A-Za-z0-9][A-Za-z0-9:_-]*build[A-Za-z0-9:_-]*)$" },
+        { id: "dist-html-boundary", kind: "check", required: true },
+        { id: "zero-cycle-gate", kind: "check", required: true },
+        { id: "advisory-diagnostics", kind: "check", required: true },
+        { id: "pass-only-build-gate", kind: "check", required: true }
+      ],
+      ported: true,
+      next: "step039"
+    }
+  ]);
+});
+
+test("implementation source hashes bind the untouched source steps 031 through 038", async () => {
+  const index = await loadIndex(repoRoot);
+  const hashes = await recordSourceHashes(repoRoot, index.steps.slice(30, 38));
+
+  assert.deepEqual(hashes, {
+    step031: "f825f56718e9399018639a61c4d09e6a4726639b0561976436976ca42372c094",
+    step032: "1ca75809d8fec4aeabe496dfbe412d22f551abc2004b2fff0f82f55b4cd40f5f",
+    step033: "1d92fd81e2ecf485817a5a78f8846b5376e40e3ab58cb45fad606c09a2a74659",
+    step034: "f82ed6a8cd582b740d39d53e75b8b31b75b4b9b759b48d8d63add97cd24f4671",
+    step035: "664d663cc7ed8cbb8605e3c5c5d2653fb139421eb469e81d1f08201fbf284acd",
+    step036: "27787a5adeff811a6ce6b1f8c58fe9afc0703139f049e88a705b6e911b2fcec0",
+    step037: "dbfc0b0c5f6412dbb13615bb1b7e60140a084ff8eab0254eb67c6c582378b82e",
+    step038: "a582363f00adf1a81f0a55471ac5bce95b2819bb4cc096e43cb4decc2118565e"
+  });
+});
+
+test("implementation acceptance descriptions reject placeholder-wide mutation", async () => {
+  const index = await loadIndex(repoRoot);
+  const mutated = structuredClone(index.steps.slice(30, 38));
+  for (const step of mutated) {
+    for (const item of step.acceptance ?? []) item.description = "x";
+  }
+
+  assert.throws(() => assertImplementationAcceptanceDescriptions(mutated));
+});
+
+test("implementation documents bind exact frontmatter titles and only their current Step heading", async () => {
+  const expected = [
+    { name: "step031", number: 31, title: "환경 준비" },
+    { name: "step032", number: 32, title: "구현 파일 인덱싱 (tokei)" },
+    { name: "step033", number: 33, title: "jscpd 코드 중복 베이스라인 수집" },
+    { name: "step034", number: 34, title: "knip 미사용 코드 베이스라인 수집" },
+    { name: "step035", number: 35, title: "컨텍스트 윈도우 제한 방지" },
+    { name: "step036", number: 36, title: "인코딩 규칙 (모지바케 방지)" },
+    { name: "step037", number: 37, title: "구현" },
+    { name: "step038", number: 38, title: "빌드 스모크 테스트 (구현 완료 게이트)" }
+  ];
+
+  for (const item of expected) {
+    const content = await readFile(join(repoRoot, "codex", "assets", "steps", `${item.name}.md`), "utf8");
+    assert.deepEqual(parseStepDocument(content), {
+      frontmatter: { name: item.name, phase: "implementation" },
+      titles: [{ number: item.number, title: item.title }],
+      referencedSteps: [item.number]
+    });
+  }
+});
+
+test("implementation outputs are unique required artifacts with closed direct dependencies", async () => {
+  const index = await loadIndex(repoRoot);
+  const implementation = (await validateStepBatch(repoRoot, [31, 32, 33, 34, 35, 36, 37, 38])).steps;
+  const ownersByOutput = new Map();
+  for (const step of index.steps) {
+    for (const output of step.outputs ?? []) {
+      const owners = ownersByOutput.get(output) ?? [];
+      owners.push(step.id);
+      ownersByOutput.set(output, owners);
+    }
+  }
+  const ownerByOutput = new Map(
+    [...ownersByOutput].map(([output, owners]) => [output, owners.length === 1 ? owners[0] : null])
+  );
+  const allOutputs = implementation.flatMap((step) => step.outputs);
+
+  assert.equal(new Set(allOutputs).size, allOutputs.length);
+  for (const step of implementation) {
+    for (const output of step.outputs) {
+      assert.deepEqual(ownersByOutput.get(output), [step.id], `${output} must have exactly one canonical owner`);
+      assert.ok(step.acceptance.some((item) => (
+        item.kind === "artifact" && item.required && item.path === output
+      )), `${step.id} output lacks required artifact evidence: ${output}`);
+    }
+    for (const input of step.inputs) {
+      const owner = ownerByOutput.get(input);
+      if (owner) assert.ok(step.requires.includes(owner), `${step.id} does not require the owner of ${input}`);
+    }
+    for (const dependency of step.requires) {
+      assert.ok(step.inputs.some((input) => ownerByOutput.get(input) === dependency), `${step.id} has an unbound dependency ${dependency}`);
+    }
+  }
+});
+
+test("implementation instructions stay provider-neutral, permission-preserving, and receipt-owned", async () => {
+  const implementation = (await validateStepBatch(repoRoot, [31, 32, 33, 34, 35, 36, 37, 38])).steps;
+
+  for (const step of implementation) {
+    const content = await readFile(join(repoRoot, step.target), "utf8");
+    assert.deepEqual(scanForbiddenTokens(content), []);
+    assert.doesNotMatch(content, /(?:progress|state)\.json|\.harness50-codex|transcript/i);
+    assert.doesNotMatch(content, /\/(?:webapp|harness-status|harness-reset)\b|\$(?:webapp|harness50-status|harness50-reset)\b/i);
+    assert.doesNotMatch(content, /\b(?:SessionStart|UserPromptSubmit|PreToolUse|Stop)\b|\bhooks?\b/i);
+    assert.doesNotMatch(content, /(?:다음|후속)\s*(?:Step|단계)|\bnext\s+step\b/i);
+    assertPlanningPermissionContract(content);
+    const normalized = content.replace(/\s+/g, " ");
+    assert.match(normalized, /수락 증거[^]*현재 단계에서 멈춘다/);
+    assert.match(normalized, /workflow 상태와 영수증[^]*진행을 소유/);
+  }
+});
+
+test("implementation roles are concrete, independently verified, and truthfully fall back", async () => {
+  for (const contract of IMPLEMENTATION_ROLE_CONTRACTS) {
+    const id = `step${String(contract.number).padStart(3, "0")}`;
+    const content = await readFile(join(repoRoot, "codex", "assets", "steps", `${id}.md`), "utf8");
+    assertImplementationRoleContract(content, contract);
+  }
+
+  const step35 = await readFile(join(repoRoot, "codex", "assets", "steps", "step035.md"), "utf8");
+  assertStep35RoleContract(step35);
+});
+
+test("implementation role and permission checks reject per-step removals and contradictions", async () => {
+  for (const contract of IMPLEMENTATION_ROLE_CONTRACTS) {
+    const id = `step${String(contract.number).padStart(3, "0")}`;
+    const original = await readFile(join(repoRoot, "codex", "assets", "steps", `${id}.md`), "utf8");
+    const workerRemoved = original.replace(contract.worker, "삭제된 실행 역할");
+    const verifierRemoved = original.replace(contract.verifier, "삭제된 검증 역할");
+    const fallbackRemoved = original.replace(/위임 기능을\s*사용할 수 없으면[^.]+\./, "위임할 수 없으면 그대로 완료한다.");
+    const contradiction = original.replace("## 입력과 산출물", "안전 명령은 자동 승인한다.\n\n## 입력과 산출물");
+
+    for (const [name, mutation] of Object.entries({ workerRemoved, verifierRemoved, fallbackRemoved, contradiction })) {
+      assert.notEqual(mutation, original, `${id} mutation did not change content: ${name}`);
+      assert.throws(
+        () => assertImplementationRoleContract(mutation, contract),
+        undefined,
+        `${id} role mutation escaped: ${name}`
+      );
+    }
+  }
+
+  const step35 = await readFile(join(repoRoot, "codex", "assets", "steps", "step035.md"), "utf8");
+  for (const [name, mutation] of Object.entries({
+    delegated: step35.replace("이 단계에서는 외부 역할에 위임하지 않는다", "이 단계는 외부 역할에 위임한다"),
+    mergedPass: step35.replace(/분리된\s*검증 패스/, "같은 정책 수립 패스"),
+    contradiction: step35.replace("## 입력과 산출물", "권한 확인 절차를 우회한다.\n\n## 입력과 산출물")
+  })) {
+    assert.notEqual(mutation, step35, `step035 mutation did not change content: ${name}`);
+    assert.throws(() => assertStep35RoleContract(mutation), undefined, `step035 mutation escaped: ${name}`);
+  }
+});
+
+test("step031 installs only required dependencies through bounded normal-permission checks", async () => {
+  const content = await readFile(join(repoRoot, "codex", "assets", "steps", "step031.md"), "utf8");
+  const section = extractMarkdownSection(content, "환경 확인과 설치").replace(/\s+/g, " ");
+
+  assert.match(section, /설계선택[^]*레이아웃설계[^]*전체설계/);
+  assert.match(section, /manifest[^]*lockfile/i);
+  assert.match(section, /선택된 설계에 필수인 프로젝트 의존성만/);
+  assert.match(section, /최대 3회/);
+  assert.match(section, /resolve[^]*version[^]*smoke/i);
+  assert.match(section, /실패[^]*차단/);
+  assert.doesNotMatch(content, /dependency-checker|자동 설치|설치 없이[^]*완료/i);
+});
+
+test("step032 creates a bounded dependency-ordered file and symbol ownership map", async () => {
+  const content = await readFile(join(repoRoot, "codex", "assets", "steps", "step032.md"), "utf8");
+  const section = extractMarkdownSection(content, "파일 인덱스 작성").replace(/\s+/g, " ");
+
+  assert.match(section, /파일[^]*Class[^]*함수/);
+  assert.match(section, /신규[^]*수정/);
+  assert.match(section, /의존성 순서/);
+  assert.match(section, /1~3개 파일/);
+  assert.match(section, /500줄 이하/);
+  assert.match(section, /로컬 `tokei`[^]*선택 사항/);
+  assert.match(section, /없으면[^]*`SKIP`[^]*안전한 파일 열거[^]*줄 수/);
+  assert.doesNotMatch(section, /(?:설치|다운로드)[^]*(?:tokei)|npx/i);
+});
+
+test("steps033 and 034 keep optional baselines local and preserve mandatory summaries", async () => {
+  const cases = [
+    {
+      id: "step033",
+      heading: "선택적 jscpd 베이스라인",
+      tool: "jscpd",
+      summary: "step_archive/step033_jscpd베이스라인.md",
+      raw: "step_archive/jscpd-baseline/jscpd-report.json",
+      fallback: /중복[^]*fallback/i
+    },
+    {
+      id: "step034",
+      heading: "선택적 knip 베이스라인",
+      tool: "knip",
+      summary: "step_archive/step034_knip베이스라인.md",
+      raw: "step_archive/knip-baseline.json",
+      fallback: /manifest[^]*import[^]*fallback/i
+    }
+  ];
+
+  for (const item of cases) {
+    const content = await readFile(join(repoRoot, "codex", "assets", "steps", `${item.id}.md`), "utf8");
+    const section = extractMarkdownSection(content, item.heading).replace(/\s+/g, " ");
+    assert.match(section, /구현 변경 전/);
+    assert.match(section, new RegExp(`로컬[^]*${item.tool}`));
+    assert.match(section, /네트워크[^]*사용하지 않는다/);
+    assert.match(section, /없으면[^]*`SKIP`[^]*이유/);
+    assert.match(section, item.fallback);
+    assert.match(section, new RegExp(item.summary.replaceAll("/", "\\/")));
+    assert.match(section, new RegExp(item.raw.replaceAll("/", "\\/")));
+    assert.match(section, /원시 JSON[^]*성공한 경우에만[^]*선택적/);
+    assert.doesNotMatch(content, /\bnpx\b|(?:설치|다운로드)[^]*(?:jscpd|knip)/i);
+  }
+});
+
+test("step035 defines bounded reads, small work units, checkpoints, and honest handoffs", async () => {
+  const content = await readFile(join(repoRoot, "codex", "assets", "steps", "step035.md"), "utf8");
+  const section = extractMarkdownSection(content, "컨텍스트 정책").replace(/\s+/g, " ");
+
+  assert.match(section, /필요한 범위만 부분적으로 읽/);
+  assert.match(section, /읽은 범위[^]*다시 읽지 않는다/);
+  assert.match(section, /1~3개 파일/);
+  assert.match(section, /체크포인트/);
+  assert.match(section, /경로[^]*결정[^]*증거[^]*차단 요인[^]*다음 작업/);
+  assert.match(section, /토큰 잔량[^]*관찰했다고 주장하지 않는다/);
+  assert.doesNotMatch(section, /토큰[^]*(?:\d+%|남았다|확인했다|측정했다)/);
+});
+
+test("step036 enforces byte-verified UTF-8 LF without destructive configuration rewrites", async () => {
+  const content = await readFile(join(repoRoot, "codex", "assets", "steps", "step036.md"), "utf8");
+  const section = extractMarkdownSection(content, "인코딩 정책").replace(/\s+/g, " ");
+
+  assert.match(section, /UTF-8[^]*BOM 없음[^]*LF[^]*마지막 줄바꿈/);
+  assert.match(section, /바이트[^]*검증/);
+  assert.match(section, /\.editorconfig[^]*\.gitattributes[^]*보존[^]*병합/);
+  assert.match(section, /변경한 텍스트 파일만[^]*바이너리[^]*재작성하지 않는다/);
+  assert.doesNotMatch(content, /Set-Content[^\n]*-Encoding\s+UTF8|무조건[^]*(?:덮어쓰|재작성)/i);
+});
+
+function assertStep37ImplementationContract(content) {
+  const section = extractMarkdownSection(content, "선택 설계 구현").replace(/\s+/g, " ");
+  assert.match(section, /TOPIC\.md[^]*수정하지 않는다/);
+  assert.match(section, /`topic`[^]*`audience`[^]*`interactive`[^]*`real_world_apps`[^]*`constraints`/);
+  assert.match(section, /선택된 30단계 설계만[^]*다시 선택하지 않는다/);
+  assert.match(section, /파일\/모듈 소유권[^]*1~3개 파일/);
+  assert.match(section, /실패하는 테스트[^]*최소 구현[^]*통과[^]*리팩터링/);
+  assert.match(section, /Class[^]*async[^]*접근성/);
+  assert.match(section, /step022-primary-desktop\.png[^]*실제로 열어[^]*CSS[^]*화면 영역/);
+  assert.match(section, /시각 검사 기능[^]*사용할 수 없으면[^]*차단/);
+  assert.match(section, /구현manifest\.md[^]*파일[^]*digest[^]*요구 추적/);
+  assert.doesNotMatch(section, /(?:브레인스토밍|brainstorm)|대안을 새로|선택을 변경/i);
+}
+
+test("step037 implements only the selected topic-complete design with real visual inspection", async () => {
+  const step = (await validateStepBatch(repoRoot, [37])).steps[0];
+  const content = await readFile(join(repoRoot, step.target), "utf8");
+
+  assert.equal(step.visual_review, true);
+  assert.ok(step.acceptance.some((item) => (
+    item.kind === "artifact" && item.required && item.path === "step_archive/screenshots/research/step022-primary-desktop.png"
+  )));
+  assert.ok(step.acceptance.some((item) => item.id === "visual-evidence-inspection" && item.required));
+  assertStep37ImplementationContract(content);
+});
+
+test("step037 section checks reject missing topic fields, reselection, fake inspection, and missing manifest traceability", async () => {
+  const original = await readFile(join(repoRoot, "codex", "assets", "steps", "step037.md"), "utf8");
+  const mutations = {
+    missingAudience: original.replace("`audience`", "`target_group`"),
+    reselection: original.replace("다시 선택하지 않는다", "필요하면 선택을 변경한다"),
+    fakeInspection: original.replace("실제로 열어", "파일명만 확인해"),
+    missingDigest: original.replace("digest", "파일 크기"),
+    noVisualBlock: original.replace("시각 검사 기능을 사용할 수 없으면", "시각 검사 기능을 사용할 수 없어도")
+  };
+
+  assertStep37ImplementationContract(original);
+  for (const [name, mutation] of Object.entries(mutations)) {
+    assert.notEqual(mutation, original, `step037 mutation did not change content: ${name}`);
+    assert.throws(() => assertStep37ImplementationContract(mutation), undefined, `step037 mutation escaped: ${name}`);
+  }
+});
+
+function assertStep38GateContract(content) {
+  const section = extractMarkdownSection(content, "필수 빌드와 순환 의존성 게이트").replace(/\s+/g, " ");
+  assert.match(section, /project manifest[^]*선언된[^]*build[^]*정확한 명령/);
+  assert.match(section, /exit code 0[^]*실패[^]*차단/i);
+  assert.match(section, /dist\/index\.html[^]*일반 파일[^]*0바이트보다 크[^]*<html[^]*<\/html>/i);
+  assert.match(section, /순환 의존성이 0개인지 별도 필수 gate로 확인한다/);
+  assert.match(section, /로컬[^]*(?:cycle|madge)[^]*결정적 정적 import graph fallback/i);
+  assert.match(section, /두 필수 게이트[^]*`PASS`[^]*trust5_r1\.md/);
+  assert.match(section, /lint[^]*format[^]*type[^]*경고[^]*필수 게이트를 대체하지 않는다/i);
+  assert.doesNotMatch(content, /--if-present|\bnpx\b|html-bundler|step\s*0?81|스킵[^]*(?:빌드|순환)/i);
+}
+
+test("step038 is a non-skippable declared-build and zero-cycle PASS gate", async () => {
+  const step = (await validateStepBatch(repoRoot, [38])).steps[0];
+  const content = await readFile(join(repoRoot, step.target), "utf8");
+  const commandItems = step.acceptance.filter((item) => item.kind === "command");
+
+  assertStep38GateContract(content);
+  assert.equal(commandItems.length, 1);
+  assert.equal(commandItems[0].required, true);
+  assert.match(commandItems[0].command_pattern, /^\^/);
+  assert.match(commandItems[0].command_pattern, /\$$/);
+  assert.doesNotThrow(() => new RegExp(commandItems[0].command_pattern));
+  assert.equal(new RegExp(commandItems[0].command_pattern).test("npm run build"), true);
+  assert.equal(new RegExp(commandItems[0].command_pattern).test("npm run test"), false);
+  assert.equal(new RegExp(commandItems[0].command_pattern).test("npm run build --if-present"), false);
+});
+
+test("optional tooling command patterns are anchored, offline, and cannot accept implicit downloads", async () => {
+  const steps = (await validateStepBatch(repoRoot, [33, 34])).steps;
+
+  for (const step of steps) {
+    const item = step.acceptance.find((acceptance) => acceptance.kind === "command");
+    assert.equal(item.required, false);
+    assert.match(item.command_pattern, /^\^/);
+    assert.match(item.command_pattern, /\$$/);
+    assert.match(item.command_pattern, /--offline/);
+    assert.doesNotMatch(item.command_pattern, /\bnpx\b|--yes/);
+    assert.doesNotThrow(() => new RegExp(item.command_pattern));
+  }
+});
+
+test("step038 section checks reject optional builds, empty HTML, skipped cycles, stale bundlers, and premature milestones", async () => {
+  const original = await readFile(join(repoRoot, "codex", "assets", "steps", "step038.md"), "utf8");
+  const mutations = {
+    optionalBuild: original.replace("정확한 명령", "--if-present를 붙인 명령"),
+    emptyHtml: original.replace("0바이트보다 크고", "0바이트여도 되고"),
+    skippedCycles: original.replace("순환 의존성이 0개", "순환 의존성은 스킵"),
+    staleBundler: original.replace("## 완료 조건", "html-bundler.ps1을 실행한다.\n\n## 완료 조건"),
+    prematureMilestone: original.replace("두 필수 게이트가 모두 `PASS`인 뒤에만", "빌드 전에도")
+  };
+
+  assertStep38GateContract(original);
+  for (const [name, mutation] of Object.entries(mutations)) {
+    assert.notEqual(mutation, original, `step038 mutation did not change content: ${name}`);
+    assert.throws(() => assertStep38GateContract(mutation), undefined, `step038 mutation escaped: ${name}`);
+  }
+});
