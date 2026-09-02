@@ -18,14 +18,14 @@ Use the state manager for every workflow mutation. Pass the current project dire
 
 ## `$webapp <topic>`
 
-Run `show` first, then apply this decision table in order:
+Run `show` first, then apply this decision table in order. Treat topics as different only when existing state proves the mismatch; do not infer it from wording alone.
 
-| Observed condition | Action |
-|---|---|
-| An active Codex workflow exists | Leave it unchanged; do not call `init`; report `$webapp resume`. |
-| No Codex workflow exists but detected Claude progress is present | Leave it unchanged; do not call `init`; report `$webapp resume`. |
-| Existing work belongs to a different topic | Leave it unchanged and use a separate workspace for the new topic. |
-| When neither exists and the supplied topic is a nonempty topic | Call `init` with that topic, then follow One-step execution. |
+| First matching condition | Mutation after `show` | Response |
+|---|---|---|
+| Existing Codex or Claude work is proven to have a different topic | None | Leave existing work unchanged and advise a separate workspace. |
+| No different-topic proof and an active Codex workflow exists | None | Leave it unchanged; do not call `init`; report `$webapp resume`. |
+| No different-topic proof, no Codex workflow, and detected Claude progress exists | None | Leave it unchanged; do not call `init`; report `$webapp resume`. |
+| No different-topic proof, neither exists, and the supplied topic is a nonempty topic | `init` | Call `init` with that topic, then follow One-step execution. |
 
 An empty topic is not an initialization request. Never pause, reset, reinterpret, or replace existing work to make room for a new topic.
 
