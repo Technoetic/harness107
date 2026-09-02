@@ -183,10 +183,14 @@ async function writeAll(handle, bytes, position, writeChunk, onProgress = () => 
   while (offset < bytes.length) {
     const remaining = bytes.length - offset;
     const result = await writeChunk(handle, bytes, offset, remaining, position + offset);
-    if (!Number.isInteger(result?.bytesWritten) || result.bytesWritten <= 0) {
+    if (result?.bytesWritten === 0) {
       throw new HarnessError("EVENT_WRITE_FAILED", "event batch write made no progress");
     }
-    if (result.bytesWritten > remaining) {
+    if (
+      !Number.isInteger(result?.bytesWritten) ||
+      result.bytesWritten < 0 ||
+      result.bytesWritten > remaining
+    ) {
       throw new HarnessError("EVENT_WRITE_INTEGRITY", "event batch write reported an invalid byte count");
     }
     offset += result.bytesWritten;
@@ -223,32 +227,45 @@ async function readEventRegion(handle, length, position) {
   return bytes;
 }
 
-async function assertRollbackTarget(handle, eventsPath, original, expectedSize) {
+async function inspectRollbackTarget(handle, eventsPath, original) {
   const opened = await eventHandleStat(handle, "event log could not be rolled back safely");
   const current = await eventPathStat(eventsPath, "event log could not be rolled back safely");
   if (
     !opened.isFile() ||
     opened.nlink !== 1n ||
     !sameNode(original, opened) ||
-    opened.size !== expectedSize ||
     current.isSymbolicLink() ||
     !current.isFile() ||
     current.nlink !== 1n ||
     !sameNode(original, current) ||
-    current.size !== expectedSize
+    current.size !== opened.size
   ) {
+    throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log could not be rolled back safely");
+  }
+  return opened.size;
+}
+
+async function assertRollbackTarget(handle, eventsPath, original, expectedSize) {
+  if (await inspectRollbackTarget(handle, eventsPath, original) !== expectedSize) {
     throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log could not be rolled back safely");
   }
 }
 
 async function rollbackPreparedAppend(handle, eventsPath, original, originalSize, prepared, successfulBytes) {
-  const writtenSize = originalSize + BigInt(successfulBytes);
-  await assertRollbackTarget(handle, eventsPath, original, writtenSize);
-  const written = await readEventRegion(handle, successfulBytes, Number(originalSize));
-  if (!written.equals(prepared.subarray(0, successfulBytes))) {
+  const observedSize = await inspectRollbackTarget(handle, eventsPath, original);
+  const observedDelta = observedSize - originalSize;
+  if (observedDelta < 0n || observedDelta > BigInt(prepared.length)) {
+    throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log could not be rolled back safely");
+  }
+  const observedBytes = Number(observedDelta);
+  if (observedBytes < successfulBytes) {
+    throw new HarnessError("EVENT_WRITE_INTEGRITY", "partial event write had an invalid acknowledged size");
+  }
+  const written = await readEventRegion(handle, observedBytes, Number(originalSize));
+  if (!written.equals(prepared.subarray(0, observedBytes))) {
     throw new HarnessError("EVENT_WRITE_INTEGRITY", "partial event write did not match the prepared batch");
   }
-  await assertRollbackTarget(handle, eventsPath, original, writtenSize);
+  await assertRollbackTarget(handle, eventsPath, original, observedSize);
   try {
     await handle.truncate(Number(originalSize));
     await handle.sync();
@@ -459,9 +476,16 @@ export async function appendEvent(workspaceRoot, event, { now = () => new Date()
     let handle;
     try {
       try {
-        handle = await open(eventsPath, "a+", 0o600);
-      } catch {
-        throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log could not be opened safely");
+        handle = await open(eventsPath, "r+");
+      } catch (error) {
+        if (error?.code !== "ENOENT") {
+          throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log could not be opened safely");
+        }
+        try {
+          handle = await open(eventsPath, "wx+", 0o600);
+        } catch {
+          throw new HarnessError("WORKSPACE_PATH_UNSAFE", "event log could not be opened safely");
+        }
       }
       const opened = await eventHandleStat(handle, "event log could not be inspected safely");
       const current = await eventPathStat(eventsPath, "event log could not be inspected safely");

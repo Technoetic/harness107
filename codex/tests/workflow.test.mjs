@@ -562,6 +562,75 @@ test("processStop rolls back a partial telemetry write before tolerating its I/O
   }), result);
 });
 
+test("processStop infers and rolls back prepared bytes written by the first rejected call", async () => {
+  const root = await makeWorkspace();
+  const initialized = await initWorkflow({
+    workspaceRoot: root,
+    topic: "projection first write rejection",
+    now: baseTime,
+    idFactory: ids("workflow-first-rejection", "nonce-first-rejection", "generation-first-rejection")
+  });
+  const paths = pathsFor(root);
+  const eventsBefore = await readFile(paths.eventsPath);
+  let writes = 0;
+  const result = await processStop({
+    workspaceRoot: root,
+    turnId: "turn-first-rejection",
+    stopHookActive: false,
+    now: plus(1),
+    eventBatchOptions: {
+      writeChunk: async (handle, buffer, offset, length, position) => {
+        writes += 1;
+        await handle.write(buffer, offset, Math.min(length, 3), position);
+        throw Object.assign(new Error("fixture first write rejection"), { code: "EIO" });
+      }
+    }
+  });
+
+  assert.equal(writes, 1);
+  assert.deepEqual(result, { decision: "block", continuation: initialized.continuation });
+  assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(eventsBefore));
+  assert.equal((await readState(root)).stop_delivery.requested_turn_id, "turn-first-rejection");
+});
+
+test("processStop rejects unlink during first-call rollback and replays after repair", async () => {
+  const root = await makeWorkspace();
+  const initialized = await initWorkflow({
+    workspaceRoot: root,
+    topic: "projection first write unlink",
+    now: baseTime,
+    idFactory: ids("workflow-first-unlink", "nonce-first-unlink", "generation-first-unlink")
+  });
+  const paths = pathsFor(root);
+  const eventsBefore = await readFile(paths.eventsPath);
+  let writes = 0;
+  await assert.rejects(() => processStop({
+    workspaceRoot: root,
+    turnId: "turn-first-unlink",
+    stopHookActive: false,
+    now: plus(1),
+    eventBatchOptions: {
+      writeChunk: async (handle, buffer, offset, length, position) => {
+        writes += 1;
+        await handle.write(buffer, offset, Math.min(length, 3), position);
+        await unlink(paths.eventsPath);
+        throw Object.assign(new Error("fixture first write rejection"), { code: "EIO" });
+      }
+    }
+  }), error => error.code === "WORKSPACE_PATH_UNSAFE");
+
+  assert.equal(writes, 1);
+  assert.equal((await readState(root)).stop_delivery.requested_turn_id, "turn-first-unlink");
+  assert.equal(existsSync(paths.eventsPath), false);
+  await writeFile(paths.eventsPath, eventsBefore);
+  assert.deepEqual(await processStop({
+    workspaceRoot: root,
+    turnId: "turn-first-unlink-retry",
+    stopHookActive: false,
+    now: plus(2)
+  }), { decision: "block", continuation: initialized.continuation });
+});
+
 test("processStop rejects a path swap during partial-write rollback and replays after repair", async () => {
   const root = await makeWorkspace();
   const initialized = await initWorkflow({

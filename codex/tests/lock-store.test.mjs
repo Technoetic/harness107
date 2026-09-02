@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { fork, spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,6 +37,18 @@ function initialState(workflowId = "wf-1") {
     topicSha256: "a".repeat(64),
     now: baseTime
   });
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function delayForTest(milliseconds) {
+  return new Promise(resolve => setTimeout(resolve, milliseconds));
 }
 
 function nextMessage(child, predicate, timeoutMs = 3000) {
@@ -546,6 +558,119 @@ test("pinned writes reject an impossible bytesWritten count without changing the
   assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(original));
 });
 
+test("invalid write counts are integrity failures while integer zero is no progress", async t => {
+  for (const [name, bytesWritten, code] of [
+    ["negative", -1, "EVENT_WRITE_INTEGRITY"],
+    ["fractional", 0.5, "EVENT_WRITE_INTEGRITY"],
+    ["NaN", Number.NaN, "EVENT_WRITE_INTEGRITY"],
+    ["zero", 0, "EVENT_WRITE_FAILED"]
+  ]) {
+    await t.test(name, async () => {
+      const root = await makeWorkspace();
+      const paths = pathsFor(root);
+      await mkdir(paths.codexDir, { recursive: true });
+      const original = Buffer.from('{"kind":"original"}\n');
+      await writeFile(paths.eventsPath, original);
+      const prepared = prepareEventBatch([{
+        kind: "workflow_paused",
+        workflow_id: `wf-${name}`,
+        status: "paused"
+      }], { now: () => new Date(baseTime) });
+
+      await assert.rejects(() => withPinnedEventBatch(root, prepared, async () => {}, {
+        writeChunk: async () => ({ bytesWritten })
+      }), error => error.code === code);
+      assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(original));
+    });
+  }
+});
+
+test("public append rolls back prepared bytes written before the first write rejection", async () => {
+  const root = await makeWorkspace();
+  const paths = pathsFor(root);
+  await mkdir(paths.codexDir, { recursive: true });
+  const original = Buffer.from('{"kind":"original"}\n');
+  await writeFile(paths.eventsPath, original);
+  const event = {
+    kind: "workflow_paused",
+    workflow_id: "wf-public-first-throw",
+    status: "paused"
+  };
+  const eventNow = () => new Date(baseTime);
+  const prepared = prepareEventBatch([event], { now: eventNow });
+  const probe = await open(paths.eventsPath, "r+");
+  const fileHandlePrototype = Object.getPrototypeOf(probe);
+  const originalWrite = fileHandlePrototype.write;
+  await probe.close();
+  let intercepted = false;
+  fileHandlePrototype.write = async function (buffer, offset, length, position) {
+    if (!intercepted && Buffer.from(buffer).equals(prepared.bytes)) {
+      intercepted = true;
+      await originalWrite.call(this, buffer, offset, Math.min(length, 3), position);
+      throw Object.assign(new Error("fixture first write rejection"), { code: "EIO" });
+    }
+    return originalWrite.call(this, buffer, offset, length, position);
+  };
+  try {
+    await assert.rejects(
+      () => appendEvent(root, event, { now: eventNow }),
+      error => error.code === "EIO"
+    );
+  } finally {
+    fileHandlePrototype.write = originalWrite;
+  }
+  assert.equal(intercepted, true);
+  assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(original));
+});
+
+test("rollback truncate and sync failures remain non-tolerable integrity errors", async t => {
+  for (const mode of ["truncate", "sync"]) {
+    await t.test(mode, async () => {
+      const root = await makeWorkspace();
+      const paths = pathsFor(root);
+      await mkdir(paths.codexDir, { recursive: true });
+      const original = Buffer.from('{"kind":"original"}\n');
+      await writeFile(paths.eventsPath, original);
+      const prepared = prepareEventBatch([{
+        kind: "workflow_paused",
+        workflow_id: `wf-rollback-${mode}`,
+        status: "paused"
+      }], { now: () => new Date(baseTime) });
+      const probe = await open(paths.eventsPath, "r+");
+      const fileHandlePrototype = Object.getPrototypeOf(probe);
+      const originalTruncate = fileHandlePrototype.truncate;
+      const originalSync = fileHandlePrototype.sync;
+      await probe.close();
+      let writes = 0;
+
+      try {
+        await assert.rejects(() => withPinnedEventBatch(root, prepared, async () => {}, {
+          writeChunk: async (handle, buffer, offset, length, position) => {
+            writes += 1;
+            if (writes === 1) return handle.write(buffer, offset, Math.min(length, 3), position);
+            if (mode === "truncate") {
+              fileHandlePrototype.truncate = async () => {
+                throw Object.assign(new Error("fixture truncate failure"), { code: "EIO" });
+              };
+            } else {
+              fileHandlePrototype.sync = async () => {
+                throw Object.assign(new Error("fixture sync failure"), { code: "EIO" });
+              };
+            }
+            throw Object.assign(new Error("fixture append failure"), { code: "EIO" });
+          }
+        }), error => error.code === "EVENT_ROLLBACK_FAILED");
+      } finally {
+        fileHandlePrototype.truncate = originalTruncate;
+        fileHandlePrototype.sync = originalSync;
+      }
+      assert.equal(writes, 2);
+      const final = await readFile(paths.eventsPath);
+      assert.equal(final.length, original.length + (mode === "truncate" ? 3 : 0));
+    });
+  }
+});
+
 test("pinned batches reject same-inode growth without overwriting at a stale offset", async () => {
   const root = await makeWorkspace();
   const paths = pathsFor(root);
@@ -752,6 +877,76 @@ test("Windows-flavor lock identity normalization is host-portable", () => {
     ),
     false
   );
+  assert.equal(sameRunLockIdentity("/tmp/Case/run.lock", "/tmp/case/run.lock"), false);
+});
+
+test("a run-lock owner drains queued event writers before another owner enters", async () => {
+  const root = await makeWorkspace();
+  const paths = pathsFor(root);
+  await mkdir(paths.codexDir, { recursive: true });
+  const prepared = prepareEventBatch([{
+    kind: "workflow_paused",
+    workflow_id: "q".repeat(128 * 1024),
+    status: "paused"
+  }], { now: () => new Date(baseTime) });
+  const prefix = '{"kind":"padding","value":"';
+  const suffix = '"}\n';
+  const paddingLength = (1024 * 1024) - prepared.bytes.length - Buffer.byteLength(prefix + suffix);
+  await writeFile(paths.eventsPath, prefix + "p".repeat(paddingLength) + suffix);
+  const appendGate = deferred();
+  const firstAtGate = deferred();
+  let launchedSettled;
+  const lateStart = deferred();
+  let lateSettled;
+
+  const outer = withRunLock(paths.lockPath, async () => {
+    const first = withPinnedEventBatch(root, prepared, async () => {}, {
+      beforeAppend: async () => {
+        firstAtGate.resolve();
+        await appendGate.promise;
+      }
+    });
+    await firstAtGate.promise;
+    const second = withPinnedEventBatch(root, prepared, async () => {});
+    launchedSettled = Promise.allSettled([first, second]);
+    lateSettled = Promise.allSettled([(async () => {
+      await lateStart.promise;
+      return appendEvent(root, {
+        kind: "workflow_paused",
+        workflow_id: "wf-too-late",
+        status: "paused"
+      }, { now: () => new Date(baseTime) });
+    })()]);
+  });
+  await firstAtGate.promise;
+  let contenderEntered = false;
+  const contender = withRunLock(paths.lockPath, async () => {
+    contenderEntered = true;
+  }, { waitMs: 3000 });
+  await delayForTest(100);
+  const overlapped = contenderEntered;
+  lateStart.resolve();
+  await delayForTest(25);
+  appendGate.resolve();
+
+  const settled = await launchedSettled;
+  const late = await lateSettled;
+  await outer;
+  await contender;
+  assert.equal(overlapped, false);
+  assert.equal(settled[0].status, "fulfilled");
+  assert.equal(settled[1].status, "rejected");
+  assert.equal(settled[1].reason.code, "EVENT_LOG_LIMIT");
+  assert.equal(late[0].status, "rejected");
+  assert.equal(late[0].reason.code, "EVENT_WRITE_LOCK_CLOSING");
+  assert.equal((await readFile(paths.eventsPath)).length, 1024 * 1024);
+  await writeFile(paths.eventsPath, "");
+  await withRunLock(paths.lockPath, () => appendEvent(root, {
+    kind: "workflow_paused",
+    workflow_id: "wf-after-drain",
+    status: "paused"
+  }, { now: () => new Date(baseTime) }));
+  assert.match(await readFile(paths.eventsPath, "utf8"), /wf-after-drain/);
 });
 
 test("independent appendEvent processes serialize the exact boundary", async () => {

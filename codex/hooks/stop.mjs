@@ -7,9 +7,13 @@ import {
   runHookDirect
 } from "../scripts/lib/hook-io.mjs";
 
-function safelyReleasable(error) {
-  return error?.code !== "WORKSPACE_PATH_UNSAFE" && error?.code !== "HOOK_WORKSPACE_UNSAFE";
-}
+const QUIET_STOP_ERRORS = new Set([
+  "EVENT_LOG_LIMIT",
+  "STATE_INVALID",
+  "STATE_PARSE_ERROR",
+  "STOP_INVALID",
+  "WORKFLOW_NOT_FOUND"
+]);
 
 export async function handleStop(event, { workspaceRoot, eventNow } = {}) {
   const storage = await captureHookStorageGuard(workspaceRoot);
@@ -32,8 +36,8 @@ export async function handleStop(event, { workspaceRoot, eventNow } = {}) {
       now: observed.now
     });
   } catch (error) {
-    if (!safelyReleasable(error)) throw error;
-    return {};
+    if (QUIET_STOP_ERRORS.has(error?.code)) return {};
+    throw error;
   }
   if (result.decision !== "block" || result.continuation === null) return {};
   return {

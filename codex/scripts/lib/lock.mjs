@@ -11,6 +11,13 @@ const lockContext = new AsyncLocalStorage();
 const eventWriteContext = new AsyncLocalStorage();
 const eventWriteTail = Symbol("eventWriteTail");
 
+function hasWindowsAbsoluteSyntax(value) {
+  return (
+    /^[A-Za-z]:[\\/]/.test(value) ||
+    /^(?:\\\\|\/\/)(?:[?.][\\/]|[^\\/]+[\\/][^\\/]+)/.test(value)
+  );
+}
+
 function lockTimeout(lockPath, waitMs) {
   return new HarnessError("LOCK_TIMEOUT", "timed out waiting for the workflow lock", {
     lock_path: lockPath,
@@ -165,7 +172,7 @@ async function createLock(lockPath, now) {
     await handle.writeFile(`${JSON.stringify(record)}\n`, "utf8");
     await handle.sync();
     await handle.close();
-    return { lockPath, claimPath, token: record.token, active: true };
+    return { lockPath, claimPath, token: record.token, active: true, closing: false };
   } catch (error) {
     await handle?.close().catch(() => {});
     if (directoryCreated) {
@@ -235,7 +242,7 @@ export function isRunLockHeld(lockPath) {
 
 export function sameRunLockIdentity(left, right) {
   if (typeof left !== "string" || typeof right !== "string") return false;
-  if (process.platform === "win32" || (win32.isAbsolute(left) && win32.isAbsolute(right))) {
+  if (hasWindowsAbsoluteSyntax(left) && hasWindowsAbsoluteSyntax(right)) {
     return win32.normalize(left).toLowerCase() === win32.normalize(right).toLowerCase();
   }
   return left === right;
@@ -248,6 +255,9 @@ export async function withRunLockEventWrite(lockPath, fn) {
   const owner = lockContext.getStore();
   if (!sameRunLockIdentity(owner?.lockPath, lockPath) || owner.active !== true) {
     throw new HarnessError("EVENT_WRITE_LOCK_REQUIRED", "event writes require the workspace run lock");
+  }
+  if (owner.closing) {
+    throw new HarnessError("EVENT_WRITE_LOCK_CLOSING", "event writes cannot start while the run lock is closing");
   }
   if (eventWriteContext.getStore() === owner) {
     throw new HarnessError("EVENT_WRITE_REENTRANT", "nested event writes are not permitted");
@@ -284,6 +294,8 @@ export async function withRunLock(lockPath, fn, {
   try {
     return await lockContext.run(owner, fn);
   } finally {
+    owner.closing = true;
+    await (owner[eventWriteTail] ?? Promise.resolve());
     owner.active = false;
     await releaseLock(owner, beforeRelease);
   }

@@ -5,10 +5,13 @@ import { once } from "node:events";
 import { linkSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { link, lstat, mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 
 import { handleSessionStart } from "../hooks/session-start.mjs";
 import { handleStop } from "../hooks/stop.mjs";
 import { handleUserPromptSubmit } from "../hooks/user-prompt-submit.mjs";
+import { HarnessError } from "../scripts/lib/errors.mjs";
+import { runHookDirect } from "../scripts/lib/hook-io.mjs";
 import { beginStep, completeStep, initWorkflow } from "../scripts/lib/workflow.mjs";
 import { pathsFor } from "../scripts/lib/paths.mjs";
 import { writeReceiptExclusive } from "../scripts/lib/receipts.mjs";
@@ -1375,6 +1378,42 @@ test("Stop rejects a full event ledger before changing state or receipts", async
   assert.ok(Buffer.from(await readFile(paths.statePath)).equals(stateBefore));
   assert.deepEqual(await receiptSnapshot(root), receiptsBefore);
   assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(fullLedger));
+});
+
+test("Stop wire surfaces event integrity failures as one sanitized internal error", async () => {
+  const root = await makeWorkspace();
+  await init(root, "wire-integrity");
+  const event = await fixture("stop-running.json", root);
+  event.turn_id = "turn-wire-integrity";
+  const secret = "secret=/outside/private/event-ledger";
+  const hostileNow = {
+    [Symbol.toPrimitive]() {
+      throw new HarnessError("EVENT_WRITE_INTEGRITY", secret);
+    }
+  };
+  const stdout = new PassThrough();
+  let raw = "";
+  stdout.on("data", chunk => {
+    raw += chunk.toString("utf8");
+  });
+  const priorExitCode = process.exitCode;
+  let code;
+  try {
+    code = await runHookDirect("Stop", handleStop, {
+      stdout,
+      runMain: async (_expectedName, handler) => {
+        const output = await handler(event, { workspaceRoot: root, eventNow: () => hostileNow });
+        stdout.write(`${JSON.stringify(output)}\n`);
+        return 0;
+      }
+    });
+  } finally {
+    process.exitCode = priorExitCode;
+  }
+
+  assert.equal(code, 1);
+  assert.equal(raw, '{"error":{"code":"HOOK_INTERNAL","message":"hook failed safely"}}\n');
+  assert.doesNotMatch(raw, /EVENT_WRITE_INTEGRITY|secret|outside|private|event-ledger/i);
 });
 
 test("an accepted Stop marker can advance through a receipt to the next marked step", async () => {
