@@ -200,6 +200,164 @@ test("bounded shell wrappers and grouping preserve destructive target semantics"
   }
 });
 
+test("PowerShell and cmd attached switch forms retain their nested command", async () => {
+  const root = await makeWorkspace();
+  const windowsRoot = "C:\\";
+  const cases = [
+    ["powershell.exe /EncodedCommand ZQBjAGgAbwAgAG8AawA=", "encoded-command"],
+    ["pwsh /ENCODEDCOMMAND:ZQBjAGgAbwAgAG8AawA=", "encoded-command"],
+    ["PowerShell -Ec=ZQBjAGgAbwAgAG8AawA=", "encoded-command"],
+    ["powershell.exe /Command \"Remove-Item -Recurse -Force C:/\"", "protected-root"],
+    ["pwsh -co \"Remove-Item -Recurse -Force C:/\"", "protected-root"],
+    [`cmd.exe /Crd /s /q ${windowsRoot}`, "protected-root"],
+    [`cmd.exe /c\"rd /s /q ${windowsRoot}\"`, "protected-root"]
+  ];
+  for (const [command, rule] of cases) {
+    assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny(rule), command);
+  }
+  for (const command of [
+    "powershell -ErrorAction Stop -Command \"Write-Output ok\"",
+    "pwsh -ErrorVariable captured -Command \"Write-Output ok\""
+  ]) {
+    assert.deepEqual(await inspect(command, { workspaceRoot: root }), {}, command);
+  }
+});
+
+test("escaped executable names, assignments, and execution wrappers cannot hide destructive commands", async () => {
+  const root = await makeWorkspace();
+  const cases = [
+    ["r\\m -rf /", "protected-root"],
+    ["g\\it reset --hard", "git-destructive"],
+    ["shut\\down /s /t 0", "system-destructive"],
+    ["r^d /s /q C:/", "protected-root"],
+    ["Remove-`Item -Recurse -Force C:/", "protected-root"],
+    ["FOO=bar rm -rf /", "protected-root"],
+    ["sudo FOO=bar rm -rf /", "protected-root"],
+    ["exec rm -rf /", "protected-root"],
+    ["builtin rm -rf /", "protected-root"],
+    ["env -u NAME rm -rf /", "protected-root"],
+    ["exec -a custom rm -rf /", "protected-root"]
+  ];
+  for (const [command, rule] of cases) {
+    assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny(rule), command);
+  }
+  assert.deepEqual(
+    await inspect("C:\\Windows\\System32\\cmd.exe /c \"echo ok\"", { workspaceRoot: root }),
+    {}
+  );
+  assert.deepEqual(await inspect("env -u NAME npm test", { workspaceRoot: root }), {});
+});
+
+test("dynamic substitutions and implicit pipeline targets fail closed without blocking explicit safe paths", async () => {
+  const root = await makeWorkspace();
+  for (const command of [
+    "rm -rf $(printf /)",
+    "Remove-Item -Recurse -Force $(Get-Location)",
+    "Remove-Item -Recurse -Force @targets",
+    "'C:/' | Remove-Item -Recurse -Force",
+    "Write-Output C:/ | Remove-Item -Recurse -Force",
+    "Write-Output C:/ | (Remove-Item -Recurse -Force)",
+    "rm -rf ./build/{one,two}"
+  ]) {
+    assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny("dynamic-target"), command);
+  }
+  for (const command of [
+    "Write-Output value | Set-Content -Path ./notes.txt",
+    "Write-Output '$HOME' | Set-Content -LiteralPath './notes with spaces.txt'",
+    "(rm -rf \"./dist (cached)\")"
+  ]) {
+    assert.deepEqual(await inspect(command, { workspaceRoot: root }), {}, command);
+  }
+});
+
+test("git worktree replacement and force variants deny without treating ordinary branch switches as path checkout", async () => {
+  const root = await makeWorkspace();
+  for (const command of [
+    "git restore .",
+    "git restore README.md",
+    "git checkout HEAD README.md",
+    "git checkout .",
+    "git checkout -f feature",
+    "git checkout --force feature",
+    "git checkout --pathspec-from-file paths.txt",
+    "git checkout --pathspec-from-file=paths.txt",
+    "git checkout -B branch",
+    "git push -fu origin main",
+    "git push -uf origin main",
+    "git branch -D obsolete",
+    "git switch -f main",
+    "git switch --force main",
+    "git switch --discard-changes main"
+  ]) {
+    assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny("git-destructive"), command);
+  }
+  for (const command of [
+    "git status",
+    "git checkout feature",
+    "git checkout -b feature",
+    "git switch feature"
+  ]) {
+    assert.deepEqual(await inspect(command, { workspaceRoot: root }), {}, command);
+  }
+});
+
+test("PowerShell content data is not classified as a path while explicit targets remain protected", async () => {
+  const root = await makeWorkspace();
+  for (const command of [
+    "Add-Content -Path ./notes.txt -Value *",
+    "Set-Content -Path ./notes.txt -Value $HOME",
+    "Set-Content -LiteralPath './notes with spaces.txt' -Value '@targets'"
+  ]) {
+    assert.deepEqual(await inspect(command, { workspaceRoot: root }), {}, command);
+  }
+  const cases = [
+    ["Set-Content -Path .git/config -Value x", "sensitive-path"],
+    ["Add-Content -Path C:/danger.txt -Value x", "protected-root"],
+    ["Remove-Item -LiteralPath .git/config -Force", "sensitive-path"],
+    ["Copy-Item ./safe.txt .git/config", "sensitive-path"],
+    ["Move-Item ./safe.txt ../outside.txt", "protected-root"],
+    ["Rename-Item ./safe.txt .git/config", "sensitive-path"]
+  ];
+  for (const [command, rule] of cases) {
+    assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny(rule), command);
+  }
+});
+
+test("new guard parser branches publish their exact active wire rule IDs", async () => {
+  const root = await makeWorkspace();
+  await init(root, "parser-wire");
+  const cases = [
+    ["powershell /EncodedCommand ZQBjAGgAbwAgAG8AawA=", "encoded-command"],
+    ["cmd /Crd /s /q C:/", "protected-root"],
+    ["rm -rf $(printf /)", "dynamic-target"],
+    ["git restore README.md", "git-destructive"],
+    ["Set-Content -Path .git/config -Value x", "sensitive-path"]
+  ];
+  for (const [index, [command, rule]] of cases.entries()) {
+    const result = await runHook("pre-tool-use", {
+      hook_event_name: "PreToolUse",
+      cwd: root,
+      turn_id: `parser-wire-turn-${index}`,
+      tool_name: "Bash",
+      tool_use_id: `parser-wire-tool-${index}`,
+      tool_input: { command }
+    });
+    assert.equal(result.code, 0);
+    assert.equal(result.stdout, `${JSON.stringify(expectedDeny(rule))}\n`);
+    assert.deepEqual(result.output, expectedDeny(rule));
+  }
+  const tail = (await events(root)).slice(-cases.length);
+  assert.deepEqual(tail.map(event => ({
+    kind: event.kind,
+    tool_name: event.tool_name,
+    rule_id: event.rule_id
+  })), cases.map(([, rule]) => ({
+    kind: "guard_denied",
+    tool_name: "Bash",
+    rule_id: rule
+  })));
+});
+
 test("bounded shell inspection fails closed when command fan-out exceeds its limit", async () => {
   const root = await makeWorkspace();
   const command = "echo ok;".repeat(1100);
