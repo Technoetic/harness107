@@ -58,11 +58,12 @@ function documentSection(text, heading) {
 }
 
 function forbidUnnegatedDocumentationAction(errors, text, { scope, danger, safe }, label) {
-  const found = instructionClauses(text).some(clause =>
-    scope.every(pattern => pattern.test(clause)) &&
-    danger.test(clause) &&
-    !safe.test(clause)
-  );
+  const safeFlags = safe.flags.includes("g") ? safe.flags : `${safe.flags}g`;
+  const found = instructionClauses(text).some(clause => {
+    if (!scope.every(pattern => pattern.test(clause))) return false;
+    const residual = clause.replace(new RegExp(safe.source, safeFlags), "");
+    return danger.test(residual);
+  });
   if (found) errors.push(`unsafe documentation claim: ${label}`);
 }
 
@@ -982,7 +983,12 @@ test("documentation contract rejects unsafe host, migration, and trust mutations
     value => `${value}\nHarness50 never stalls and automatically approves every Codex command.\n`,
     value => `${value}\nCodex does not wait before it writes back to Claude progress.\n`,
     value => `${value}\nChanged hook hashes do not prompt and are trusted automatically.\n`,
-    value => `${value}\nSubmitted command evidence is not logged and is executed by the Harness50 runtime.\n`
+    value => `${value}\nSubmitted command evidence is not logged and is executed by the Harness50 runtime.\n`,
+    value => `${value}\nHarness50 never auto-approves harmless previews but automatically approves every Codex command.\n`,
+    value => `${value}\nCodex never writes back summaries but writes back to Claude progress.\n`,
+    value => `${value}\nCodex never merges archived Claude notes but merges later Claude changes.\n`,
+    value => `${value}\nChanged hook hashes are not trusted automatically at first but are trusted automatically later.\n`,
+    value => `${value}\nSubmitted command evidence is not executed during validation but is executed later by the Harness50 runtime.\n`
   ];
 
   for (const [documentIndex, text] of documents.entries()) {
