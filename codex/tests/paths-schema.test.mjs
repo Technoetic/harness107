@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { join, resolve, win32 } from "node:path";
 
 import { HarnessError } from "../scripts/lib/errors.mjs";
@@ -11,7 +12,12 @@ import {
   parseState,
   validateState
 } from "../scripts/lib/schema.mjs";
-import { hashFile, makeWorkspace, readJson } from "./helpers/workspace.mjs";
+import {
+  hashFile,
+  makeDirectoryLink,
+  makeWorkspace,
+  readJson
+} from "./helpers/workspace.mjs";
 
 const now = "2026-09-02T00:00:00.000Z";
 
@@ -82,6 +88,47 @@ test("workspace helper hashes bytes and reads JSON from its isolated workspace",
 
   assert.equal(await hashFile(sourcePath), "eac2a5a0837a324061f4b038b4c0af8c011bf9c47b595cda9459fd9c90651623");
   assert.deepEqual(await readJson(jsonPath), { step: 1 });
+});
+
+test("workspace helper returns a physical path when the OS temp directory is an alias", async () => {
+  const holder = await makeWorkspace();
+  const physicalTemporaryRoot = join(holder, "physical-temp");
+  const temporaryRootAlias = join(holder, "temp-alias");
+  await mkdir(physicalTemporaryRoot);
+  await makeDirectoryLink(physicalTemporaryRoot, temporaryRootAlias);
+
+  const environment = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !["temp", "tmp", "tmpdir"].includes(key.toLowerCase()))
+  );
+  Object.assign(environment, {
+    TEMP: temporaryRootAlias,
+    TMP: temporaryRootAlias,
+    TMPDIR: temporaryRootAlias
+  });
+  const helperUrl = new URL("./helpers/workspace.mjs", import.meta.url).href;
+  const script = `
+    import { realpathSync } from "node:fs";
+    import { dirname } from "node:path";
+    import { makeWorkspace } from ${JSON.stringify(helperUrl)};
+    const workspace = await makeWorkspace();
+    process.stdout.write(JSON.stringify({
+      workspace,
+      physicalWorkspace: realpathSync.native(workspace),
+      workspaceParent: dirname(workspace),
+      physicalTemporaryRoot: realpathSync.native(process.env.TEMP)
+    }));
+  `;
+  const child = spawnSync(process.execPath, ["--input-type=module", "--eval", script], {
+    encoding: "utf8",
+    env: environment,
+    windowsHide: true
+  });
+
+  assert.equal(child.status, 0, child.stderr);
+  const result = JSON.parse(child.stdout);
+  assert.equal(result.workspace, result.physicalWorkspace);
+  assert.equal(result.workspaceParent, result.physicalTemporaryRoot);
+  assert.deepEqual(await readdir(physicalTemporaryRoot), []);
 });
 
 test("paths stay under the selected workspace", async () => {

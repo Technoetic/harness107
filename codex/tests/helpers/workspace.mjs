@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
-const temporaryRoot = resolve(tmpdir());
+const temporaryRoot = realpathSync.native(resolve(tmpdir()));
 const workspaces = new Set();
 
 function cleanupPath(path) {
@@ -29,7 +29,9 @@ process.once("exit", () => {
 });
 
 export async function makeWorkspace() {
-  const workspace = cleanupPath(mkdtempSync(join(temporaryRoot, "harness50-codex-")));
+  const workspace = cleanupPath(realpathSync.native(
+    mkdtempSync(join(temporaryRoot, "harness50-codex-"))
+  ));
   workspaces.add(workspace);
   return workspace;
 }

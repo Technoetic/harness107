@@ -19,6 +19,8 @@ import { runHook } from "./helpers/run-hook.mjs";
 import { makeDirectoryLink, makeWorkspace, readJson } from "./helpers/workspace.mjs";
 
 const now = "2026-09-02T00:00:00.000Z";
+const posixWorkspaceRoot = "/tmp/harness50-workspace";
+const windowsWorkspaceRoot = "C:\\harness50-workspace";
 const fixtureRoot = new URL("./fixtures/hooks/", import.meta.url);
 const expectedDeny = ruleId => ({
   hookSpecificOutput: {
@@ -716,13 +718,13 @@ test("tilde expansion redirection and cleanup globs preserve their path boundari
   }
   await context.test("POSIX quoted braces remain literal path data", async () => {
     assert.deepEqual(
-      await inspect("rm -rf '{/,./dist}'", { workspaceRoot: "/tmp/harness50-workspace" }),
+      await inspect("rm -rf '{/,./dist}'", { workspaceRoot: posixWorkspaceRoot }),
       {}
     );
   });
   await context.test("Windows retains its trailing-dot ambiguity for the same literal", async () => {
     assert.deepEqual(
-      await inspect("rm -rf '{/,./dist}'", { workspaceRoot: root }),
+      await inspect("rm -rf '{/,./dist}'", { workspaceRoot: windowsWorkspaceRoot }),
       expectedDeny("dynamic-target")
     );
   });
@@ -1244,12 +1246,22 @@ test("destructive targets protect roots, home, workspace boundaries, metadata, a
     "rm -rf %TEMP%",
     "rm -rf C:relative",
     "rm -rf \\\\?\\C:\\workspace",
-    "rm -rf C:\\workspace\\file.txt:stream",
+    "rm -rf C:\\workspace\\file.txt:stream"
+  ]) {
+    assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny("dynamic-target"), command);
+  }
+
+  for (const command of [
     "rm -rf ./CON",
     "rm -rf ./folder. ",
     "rm -rf ./PROGRA~1"
   ]) {
-    assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny("dynamic-target"), command);
+    assert.deepEqual(await inspect(command, { workspaceRoot: posixWorkspaceRoot }), {}, command);
+    assert.deepEqual(
+      await inspect(command, { workspaceRoot: windowsWorkspaceRoot }),
+      expectedDeny("dynamic-target"),
+      command
+    );
   }
 });
 
@@ -1258,14 +1270,20 @@ test("path and git edge syntax cannot bypass the documented precedence", async (
   const cases = [
     ["rm -rf /s", "protected-root"],
     ["rm -rf .git/*", "sensitive-path"],
-    ["rm -f ./src/file.txt:stream", "dynamic-target"],
     ["rm -rf \\\\server\\share\\folder", "protected-root"],
-    ["rm -rf \"./folder \"", "dynamic-target"],
     ["git push origin +main", "git-destructive"],
     ["pwsh -EncodedCommand:ZQBjAGgAbwAgAG8AawA=", "encoded-command"]
   ];
   for (const [command, rule] of cases) {
     assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny(rule), command);
+  }
+  for (const command of ["rm -f ./src/file.txt:stream", "rm -rf \"./folder \""]) {
+    assert.deepEqual(await inspect(command, { workspaceRoot: posixWorkspaceRoot }), {}, command);
+    assert.deepEqual(
+      await inspect(command, { workspaceRoot: windowsWorkspaceRoot }),
+      expectedDeny("dynamic-target"),
+      command
+    );
   }
 });
 
@@ -1318,7 +1336,6 @@ test("apply_patch parses only structural directives and rejects malformed, outsi
     ["*** Begin Patch\n*** Delete File: .git/config\n*** End Patch", "patch-sensitive-path"],
     ["*** Begin Patch\n*** Update File: linked-outside/file.txt\n*** End Patch", "patch-outside-workspace"],
     ["*** Begin Patch\n*** Update File: C:relative.txt\n*** End Patch", "patch-outside-workspace"],
-    ["*** Begin Patch\n*** Update File: src/file.txt:stream\n*** End Patch", "patch-outside-workspace"],
     ["*** Begin Patch\n*** Update File: .git/config\n*** Delete File: ../outside.txt\n*** End Patch", "patch-outside-workspace"],
     ["*** Begin Patch\n*** Update File: src/a.txt\n*** Move to: ../a.txt\n*** End Patch", "patch-outside-workspace"],
     ["*** Begin Patch\n*** Update File: src/a.txt", "malformed-input"],
@@ -1327,6 +1344,17 @@ test("apply_patch parses only structural directives and rejects malformed, outsi
   for (const [patch, rule] of cases) {
     assert.deepEqual(await inspectPatch(patch, { workspaceRoot: root }), expectedDeny(rule), patch);
   }
+  const windowsAliasPatch = "*** Begin Patch\n*** Update File: src/file.txt:stream\n*** End Patch";
+  assert.deepEqual(
+    await inspectPatch(windowsAliasPatch, { workspaceRoot: posixWorkspaceRoot }),
+    {},
+    windowsAliasPatch
+  );
+  assert.deepEqual(
+    await inspectPatch(windowsAliasPatch, { workspaceRoot: windowsWorkspaceRoot }),
+    expectedDeny("patch-outside-workspace"),
+    windowsAliasPatch
+  );
 });
 
 test("inactive, completed, missing, and corrupt workflows defer without creating metadata", async () => {

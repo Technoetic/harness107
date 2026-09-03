@@ -75,10 +75,21 @@ async function events(workspaceRoot) {
   return raw.trimEnd().split("\n").filter(Boolean).map(line => JSON.parse(line));
 }
 
-async function runProcess(executable, args) {
+// GitHub Actions runs this test through pwsh -> Node -> powershell.exe. Remove the
+// inherited PS7 module path so the isolated Windows PowerShell test child rebuilds
+// its own defaults; the protected Claude runtime files remain byte-for-byte intact.
+// https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_psmodulepath#starting-windows-powershell-from-powershell-7
+function powershellChildEnvironment(environment) {
+  return Object.fromEntries(
+    Object.entries(environment).filter(([key]) => key.toLowerCase() !== "psmodulepath")
+  );
+}
+
+async function runProcess(executable, args, environment = process.env) {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, {
       cwd: repoRoot,
+      env: environment,
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true
@@ -95,6 +106,24 @@ async function runProcess(executable, args) {
     }));
   });
 }
+
+test("PowerShell child environment omits PSModulePath without mutating the runner environment", () => {
+  const runnerEnvironment = {
+    Path: "C:\\Windows\\System32",
+    PsMoDuLePaTh: "C:\\Program Files\\PowerShell\\Modules",
+    HARNESS50_FIXTURE: "preserved"
+  };
+
+  assert.deepEqual(powershellChildEnvironment(runnerEnvironment), {
+    Path: "C:\\Windows\\System32",
+    HARNESS50_FIXTURE: "preserved"
+  });
+  assert.deepEqual(runnerEnvironment, {
+    Path: "C:\\Windows\\System32",
+    PsMoDuLePaTh: "C:\\Program Files\\PowerShell\\Modules",
+    HARNESS50_FIXTURE: "preserved"
+  });
+});
 
 test("the state-only fixture gives every one of fifty steps one required check", async () => {
   const pluginRoot = await makePluginFixture();
@@ -295,7 +324,7 @@ test("the platform Claude regression wrapper runs only in an isolated copy", asy
         "-ExecutionPolicy", "Bypass",
         "-File", join(repoRoot, "codex", "tests", "claude-regression-copy.ps1"),
         "-SourceRoot", repoRoot
-      ])
+      ], powershellChildEnvironment(process.env))
     : await runProcess("bash", [
         join(repoRoot, "codex", "tests", "claude-regression-copy.sh"),
         repoRoot
