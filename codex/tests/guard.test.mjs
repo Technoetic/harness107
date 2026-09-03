@@ -1270,13 +1270,23 @@ test("path and git edge syntax cannot bypass the documented precedence", async (
   const cases = [
     ["rm -rf /s", "protected-root"],
     ["rm -rf .git/*", "sensitive-path"],
-    ["rm -rf \\\\server\\share\\folder", "protected-root"],
     ["git push origin +main", "git-destructive"],
     ["pwsh -EncodedCommand:ZQBjAGgAbwAgAG8AawA=", "encoded-command"]
   ];
   for (const [command, rule] of cases) {
     assert.deepEqual(await inspect(command, { workspaceRoot: root }), expectedDeny(rule), command);
   }
+  const uncCommand = "rm -rf \\\\server\\share\\folder";
+  assert.deepEqual(
+    await inspect(uncCommand, { workspaceRoot: posixWorkspaceRoot }),
+    expectedDeny("dynamic-target"),
+    uncCommand
+  );
+  assert.deepEqual(
+    await inspect(uncCommand, { workspaceRoot: windowsWorkspaceRoot }),
+    expectedDeny("protected-root"),
+    uncCommand
+  );
   for (const command of ["rm -f ./src/file.txt:stream", "rm -rf \"./folder \""]) {
     assert.deepEqual(await inspect(command, { workspaceRoot: posixWorkspaceRoot }), {}, command);
     assert.deepEqual(

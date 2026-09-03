@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { importClaudeProgress } from "../scripts/lib/importer.mjs";
@@ -336,6 +336,51 @@ test("the platform Claude regression wrapper runs only in an isolated copy", asy
     await hashFile(join(repoRoot, ...path.split("/")))
   ])));
   assert.deepEqual(after, before);
+});
+
+test("the Windows wrapper executes a BOM-normalized copy and preserves the protected staged script", {
+  skip: process.platform !== "win32"
+}, async () => {
+  const fixtureRoot = await makeWorkspace();
+  for (const relativePath of protectedClaudePaths) {
+    const path = join(fixtureRoot, ...relativePath.split("/"));
+    await mkdir(dirname(path), { recursive: true });
+    if (relativePath !== "tests/security-regression.ps1") {
+      await writeFile(path, `fixture for ${relativePath}\n`, "utf8");
+    }
+  }
+
+  const protectedRegression = join(fixtureRoot, "tests", "security-regression.ps1");
+  await writeFile(protectedRegression, [
+    '$ErrorActionPreference = "Stop"',
+    '$runningPath = [System.IO.Path]::GetFullPath($MyInvocation.MyCommand.Path)',
+    '$protectedPath = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "security-regression.ps1"))',
+    'if ([string]::Equals($runningPath, $protectedPath, [System.StringComparison]::OrdinalIgnoreCase)) { throw "PROTECTED_SCRIPT_EXECUTED" }',
+    '$runningBytes = [System.IO.File]::ReadAllBytes($runningPath)',
+    '$protectedBytes = [System.IO.File]::ReadAllBytes($protectedPath)',
+    'if ($runningBytes.Length -ne ($protectedBytes.Length + 3)) { throw "EXECUTION_COPY_LENGTH" }',
+    'if ($runningBytes[0] -ne 0xEF -or $runningBytes[1] -ne 0xBB -or $runningBytes[2] -ne 0xBF) { throw "EXECUTION_COPY_BOM" }',
+    'for ($index = 0; $index -lt $protectedBytes.Length; $index++) {',
+    '  if ($runningBytes[$index + 3] -ne $protectedBytes[$index]) { throw "PROTECTED_COPY_BYTES" }',
+    '}',
+    "if ([int][char]'한' -ne 0xD55C) { throw \"UTF8_DECODE\" }",
+    'Write-Output "UTF8_EXECUTION_COPY_OK"',
+    ''
+  ].join("\n"), "utf8");
+  const before = await readFile(protectedRegression);
+  assert.notDeepEqual([...before.subarray(0, 3)], [0xEF, 0xBB, 0xBF]);
+
+  const result = await runProcess("powershell.exe", [
+    "-NoProfile",
+    "-ExecutionPolicy", "Bypass",
+    "-File", join(repoRoot, "codex", "tests", "claude-regression-copy.ps1"),
+    "-SourceRoot", fixtureRoot
+  ], powershellChildEnvironment(process.env));
+
+  assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /UTF8_EXECUTION_COPY_OK/);
+  assert.match(result.stdout, /CLAUDE_REGRESSION_COPY_OK/);
+  assert.deepEqual(await readFile(protectedRegression), before);
 });
 
 test("the POSIX regression wrapper rejects copied aliases and verifies the active tree during cleanup", async () => {

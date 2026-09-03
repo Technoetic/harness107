@@ -88,13 +88,55 @@ function Get-ProtectedHashes {
 function Assert-ProtectedHashesUnchanged {
     param(
         [Parameter(Mandatory = $true)][hashtable]$Before,
-        [Parameter(Mandatory = $true)][hashtable]$After
+        [Parameter(Mandatory = $true)][hashtable]$After,
+        [Parameter(Mandatory = $false)][string]$ErrorCode = "ACTIVE_TREE_CHANGED"
     )
 
     foreach ($relativePath in $protectedPaths) {
         if (-not $After.ContainsKey($relativePath) -or $Before[$relativePath] -ne $After[$relativePath]) {
-            throw "ACTIVE_TREE_CHANGED: $relativePath"
+            throw "${ErrorCode}: $relativePath"
         }
+    }
+}
+
+function Write-Utf8BomExecutionCopy {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        [Parameter(Mandatory = $true)][string]$DestinationPath
+    )
+
+    $sourceFull = [System.IO.Path]::GetFullPath($SourcePath)
+    $destinationFull = [System.IO.Path]::GetFullPath($DestinationPath)
+    if ([string]::Equals($sourceFull, $destinationFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "EXECUTION_COPY_MUST_BE_DISTINCT: $sourceFull"
+    }
+
+    $sourceItem = Get-Item -LiteralPath $sourceFull -Force -ErrorAction Stop
+    if ($sourceItem.PSIsContainer -or
+        ($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "UNSAFE_EXECUTION_SOURCE: $sourceFull"
+    }
+
+    [byte[]]$sourceBytes = [System.IO.File]::ReadAllBytes($sourceItem.FullName)
+    $hasUtf8Bom = $sourceBytes.Length -ge 3 -and
+        $sourceBytes[0] -eq 0xEF -and
+        $sourceBytes[1] -eq 0xBB -and
+        $sourceBytes[2] -eq 0xBF
+    if ($hasUtf8Bom) {
+        [byte[]]$executionBytes = $sourceBytes.Clone()
+    } else {
+        [byte[]]$executionBytes = New-Object byte[] ($sourceBytes.Length + 3)
+        $executionBytes[0] = 0xEF
+        $executionBytes[1] = 0xBB
+        $executionBytes[2] = 0xBF
+        [System.Array]::Copy($sourceBytes, 0, $executionBytes, 3, $sourceBytes.Length)
+    }
+
+    [System.IO.File]::WriteAllBytes($destinationFull, $executionBytes)
+    $destinationItem = Get-Item -LiteralPath $destinationFull -Force -ErrorAction Stop
+    if ($destinationItem.PSIsContainer -or
+        ($destinationItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "UNSAFE_EXECUTION_COPY: $destinationFull"
     }
 }
 
@@ -160,14 +202,30 @@ try {
     Copy-DirectoryContents -From $source -To $stageRoot -RelativeDirectory ""
 
     $copiedRegression = Join-RepositoryPath -Root $stageRoot -RelativePath "tests/security-regression.ps1"
-    Get-Item -LiteralPath $copiedRegression -Force -ErrorAction Stop | Out-Null
+    $copiedRegressionItem = Get-Item -LiteralPath $copiedRegression -Force -ErrorAction Stop
+    $copiedTestsDirectory = Resolve-ExistingDirectory -LiteralPath $copiedRegressionItem.DirectoryName
+    Assert-StrictTempChild -Child $copiedTestsDirectory -Parent $stageRoot
 
-    Push-Location -LiteralPath $stageRoot
+    $stagedHashes = Get-ProtectedHashes -Root $stageRoot
+    Assert-ProtectedHashesUnchanged -Before $beforeHashes -After $stagedHashes -ErrorCode "STAGED_COPY_CHANGED"
+
+    $executionRegression = Join-Path -Path $copiedTestsDirectory -ChildPath (
+        ".security-regression.execution-" + [guid]::NewGuid().ToString("N") + ".ps1"
+    )
+    Assert-StrictTempChild -Child $executionRegression -Parent $stageRoot
+    Write-Utf8BomExecutionCopy -SourcePath $copiedRegression -DestinationPath $executionRegression
+
     try {
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $copiedRegression
-        $regressionExitCode = $LASTEXITCODE
+        Push-Location -LiteralPath $stageRoot
+        try {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $executionRegression
+            $regressionExitCode = $LASTEXITCODE
+        } finally {
+            Pop-Location
+        }
     } finally {
-        Pop-Location
+        $stagedHashesAfterRun = Get-ProtectedHashes -Root $stageRoot
+        Assert-ProtectedHashesUnchanged -Before $beforeHashes -After $stagedHashesAfterRun -ErrorCode "STAGED_COPY_CHANGED"
     }
 
     if ($regressionExitCode -ne 0) {
