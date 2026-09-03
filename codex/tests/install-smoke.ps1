@@ -22,6 +22,8 @@ $script:Comparison = if ($script:IsWindowsPlatform) {
 }
 $script:Utf8Strict = New-Object Text.UTF8Encoding($false, $true)
 $script:SafeReportDestination = $null
+$script:CodexExecutable = $null
+$script:FileIdentityTypeLoaded = $false
 $script:Report = [ordered]@{
   schema_version = 1
   mode = $Mode
@@ -364,6 +366,131 @@ function Assert-SingleLinkFile {
   }
 }
 
+function Initialize-WindowsFileIdentity {
+  if (-not $script:IsWindowsPlatform -or $script:FileIdentityTypeLoaded) { return }
+  try {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+public static class Harness50FileIdentity {
+  [StructLayout(LayoutKind.Sequential)]
+  private struct BY_HANDLE_FILE_INFORMATION {
+    public uint FileAttributes;
+    public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+    public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+    public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+    public uint VolumeSerialNumber;
+    public uint FileSizeHigh;
+    public uint FileSizeLow;
+    public uint NumberOfLinks;
+    public uint FileIndexHigh;
+    public uint FileIndexLow;
+  }
+
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern bool GetFileInformationByHandle(
+    SafeFileHandle handle,
+    out BY_HANDLE_FILE_INFORMATION information
+  );
+
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern SafeFileHandle CreateFileW(
+    string path,
+    uint desiredAccess,
+    uint shareMode,
+    IntPtr securityAttributes,
+    uint creationDisposition,
+    uint flagsAndAttributes,
+    IntPtr templateFile
+  );
+
+  private static string Identity(SafeFileHandle handle) {
+    BY_HANDLE_FILE_INFORMATION information;
+    if (handle == null || handle.IsInvalid ||
+        !GetFileInformationByHandle(handle, out information)) {
+      throw new Win32Exception(Marshal.GetLastWin32Error());
+    }
+    return String.Format(
+      "{0:x8}:{1:x8}{2:x8}",
+      information.VolumeSerialNumber,
+      information.FileIndexHigh,
+      information.FileIndexLow
+    );
+  }
+
+  public static string FromFileHandle(SafeFileHandle handle) {
+    return Identity(handle);
+  }
+
+  public static string FromDirectoryPath(string path) {
+    const uint FILE_SHARE_ALL = 0x00000007;
+    const uint OPEN_EXISTING = 3;
+    const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+    const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+    using (SafeFileHandle handle = CreateFileW(
+      path,
+      0,
+      FILE_SHARE_ALL,
+      IntPtr.Zero,
+      OPEN_EXISTING,
+      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+      IntPtr.Zero
+    )) {
+      return Identity(handle);
+    }
+  }
+}
+'@ -ErrorAction Stop
+  } catch {
+    Stop-Smoke "FILE_IDENTITY_FAILED" "Windows file identity support could not be initialized."
+  }
+  $script:FileIdentityTypeLoaded = $true
+}
+
+function Get-StableFileIdentity {
+  param(
+    [Parameter(Mandatory = $true)][string]$Path,
+    [IO.FileStream]$OpenFile,
+    [switch]$Directory
+  )
+
+  if ($script:IsWindowsPlatform) {
+    Initialize-WindowsFileIdentity
+    try {
+      if ($Directory) {
+        return [Harness50FileIdentity]::FromDirectoryPath($Path)
+      }
+      if ($null -eq $OpenFile) {
+        Stop-Smoke "FILE_IDENTITY_FAILED" "An open file is required for stable Windows identity."
+      }
+      return [Harness50FileIdentity]::FromFileHandle($OpenFile.SafeFileHandle)
+    } catch {
+      if ($_.Exception.Data.Contains("SmokeCode")) { throw }
+      Stop-Smoke "FILE_IDENTITY_FAILED" "A stable Windows file identity could not be read."
+    }
+  }
+
+  $stat = Get-Application @("stat") "filesystem stat utility"
+  $arguments = if ($script:IsMacOSPlatform) {
+    @("-f", "%d:%i", $Path)
+  } else {
+    @("-c", "%d:%i", "--", $Path)
+  }
+  $identity = Invoke-CheckedApplication `
+    -Executable $stat `
+    -Arguments $arguments `
+    -WorkingDirectory (Split-Path -Parent $Path) `
+    -FailureCode "FILE_IDENTITY_FAILED" `
+    -FailureMessage "A stable POSIX file identity could not be read."
+  if ($identity -notmatch '^[0-9]+:[0-9]+$') {
+    Stop-Smoke "FILE_IDENTITY_FAILED" "The POSIX device and inode evidence is malformed."
+  }
+  return $identity
+}
+
 function Get-SafeArtifactSha256 {
   param(
     [Parameter(Mandatory = $true)][string]$WorkspaceRoot,
@@ -382,6 +509,7 @@ function Get-SafeArtifactSha256 {
       [IO.FileAccess]::Read,
       [IO.FileShare]::Read
     )
+    $beforeIdentity = Get-StableFileIdentity -Path $path -OpenFile $stream
     $digest = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
   } catch {
     Stop-Smoke "NATIVE_RECEIPTS_INVALID" "Native receipt artifact could not be hashed safely."
@@ -392,8 +520,27 @@ function Get-SafeArtifactSha256 {
   $afterPath = Resolve-SafeFile $WorkspaceRoot $RelativePath "Native receipt artifact"
   $after = Get-Item -Force -LiteralPath $afterPath -ErrorAction Stop
   Assert-SingleLinkFile $afterPath $WorkspaceRoot
+  $afterStream = $null
+  $afterSha = [Security.Cryptography.SHA256]::Create()
+  try {
+    $afterStream = New-Object IO.FileStream(
+      $afterPath,
+      [IO.FileMode]::Open,
+      [IO.FileAccess]::Read,
+      [IO.FileShare]::Read
+    )
+    $afterIdentity = Get-StableFileIdentity -Path $afterPath -OpenFile $afterStream
+    $afterDigest = ([BitConverter]::ToString($afterSha.ComputeHash($afterStream))).Replace("-", "").ToLowerInvariant()
+  } catch {
+    Stop-Smoke "NATIVE_RECEIPTS_INVALID" "Native receipt artifact identity could not be revalidated."
+  } finally {
+    if ($null -ne $afterStream) { $afterStream.Dispose() }
+    $afterSha.Dispose()
+  }
   if (
     -not (Test-PathEqual $path $afterPath) -or
+    $beforeIdentity -cne $afterIdentity -or
+    $digest -cne $afterDigest -or
     $before.Length -ne $after.Length -or
     $before.CreationTimeUtc.Ticks -ne $after.CreationTimeUtc.Ticks -or
     $before.LastWriteTimeUtc.Ticks -ne $after.LastWriteTimeUtc.Ticks
@@ -712,9 +859,11 @@ function Get-CodexVersion {
   param([Parameter(Mandatory = $true)][string]$WorkingDirectory)
 
   $names = if ($script:IsWindowsPlatform) { @("codex.cmd") } else { @("codex", "codex.cmd") }
-  $codex = Get-Application $names "Codex CLI"
+  if ($null -eq $script:CodexExecutable) {
+    $script:CodexExecutable = Get-Application $names "Codex CLI"
+  }
   $version = Invoke-CheckedApplication `
-    -Executable $codex `
+    -Executable $script:CodexExecutable `
     -Arguments @("--version") `
     -WorkingDirectory $WorkingDirectory `
     -FailureCode "CODEX_VERSION_FAILED" `
@@ -731,10 +880,11 @@ function Get-InstalledPluginRoot {
     [Parameter(Mandatory = $true)][string]$WorkingDirectory
   )
 
-  $names = if ($script:IsWindowsPlatform) { @("codex.cmd") } else { @("codex", "codex.cmd") }
-  $codex = Get-Application $names "Codex CLI"
+  if ($null -eq $script:CodexExecutable) {
+    Stop-Smoke "CODEX_VERSION_FAILED" "The resolved Codex CLI executable is unavailable."
+  }
   $raw = Invoke-CheckedApplication `
-    -Executable $codex `
+    -Executable $script:CodexExecutable `
     -Arguments @("plugin", "list", "--json") `
     -WorkingDirectory $WorkingDirectory `
     -FailureCode "PLUGIN_IDENTITY_FAILED" `
@@ -907,22 +1057,79 @@ function Resolve-ExternalReportPath {
   if (Test-Path -LiteralPath $candidate) {
     Stop-Smoke "REPORT_PATH_EXISTS" "The report path must be fresh."
   }
+  try {
+    $parentIdentity = Get-StableFileIdentity -Path $resolvedParent -Directory
+  } catch {
+    Stop-Smoke "REPORT_PATH_UNSAFE" "The report parent identity could not be pinned."
+  }
+  return [pscustomobject]@{
+    Destination = $candidate
+    Parent = $resolvedParent
+    Leaf = $leaf
+    ParentIdentity = $parentIdentity
+    ExcludedRoots = @($ExcludedRoots)
+  }
+}
+
+function Assert-ReportTargetPinned {
+  param(
+    [Parameter(Mandatory = $true)]$Target,
+    [switch]$AllowDestinationExists
+  )
+
+  Assert-ExactProperties $Target @(
+    "Destination", "Parent", "Leaf", "ParentIdentity", "ExcludedRoots"
+  ) @() "Pinned report target"
+  try {
+    $currentParent = Resolve-PhysicalDirectory $Target.Parent "Report parent"
+    $currentIdentity = Get-StableFileIdentity -Path $currentParent -Directory
+  } catch {
+    Stop-Smoke "REPORT_PATH_UNSAFE" "The report parent changed after validation."
+  }
+  $candidate = [IO.Path]::GetFullPath((Join-Path $currentParent $Target.Leaf))
+  if (
+    -not (Test-PathEqual $currentParent $Target.Parent) -or
+    -not (Test-PathEqual $candidate $Target.Destination) -or
+    $currentIdentity -cne $Target.ParentIdentity
+  ) {
+    Stop-Smoke "REPORT_PATH_UNSAFE" "The report parent changed after validation."
+  }
+  foreach ($root in @($Target.ExcludedRoots)) {
+    if (Test-PathInside -Root $root -Candidate $candidate -AllowEqual) {
+      Stop-Smoke "REPORT_PATH_UNSAFE" "The report path entered an excluded package or workspace root."
+    }
+  }
+  if (-not $AllowDestinationExists -and (Test-Path -LiteralPath $candidate)) {
+    Stop-Smoke "REPORT_PATH_EXISTS" "The report destination changed before publication."
+  }
+  if ($AllowDestinationExists) {
+    try {
+      $published = Get-Item -Force -LiteralPath $candidate -ErrorAction Stop
+    } catch {
+      Stop-Smoke "REPORT_WRITE_FAILED" "The published report is unavailable."
+    }
+    if ($published.PSIsContainer -or (Test-IsReparsePoint $published)) {
+      Stop-Smoke "REPORT_WRITE_FAILED" "The published report is not a physical regular file."
+    }
+  }
   return $candidate
 }
 
 function Write-AtomicReport {
   param(
-    [Parameter(Mandatory = $true)][string]$Destination,
+    [Parameter(Mandatory = $true)]$Target,
     [Parameter(Mandatory = $true)][string]$Json
   )
 
-  $parent = Split-Path -Parent $Destination
-  $leaf = Split-Path -Leaf $Destination
+  $Destination = Assert-ReportTargetPinned $Target
+  $parent = $Target.Parent
+  $leaf = $Target.Leaf
   $temporary = Join-Path $parent (".{0}.{1}.{2}.tmp" -f $leaf, $PID, [guid]::NewGuid().ToString("N"))
   if (-not (Test-PathInside -Root $parent -Candidate $temporary)) {
     Stop-Smoke "REPORT_WRITE_FAILED" "The temporary report path escaped its parent."
   }
   $stream = $null
+  $publishedReport = $false
   try {
     $bytes = $script:Utf8Strict.GetBytes($Json + "`n")
     $stream = New-Object IO.FileStream(
@@ -935,27 +1142,27 @@ function Write-AtomicReport {
     $stream.Flush($true)
     $stream.Dispose()
     $stream = $null
-    if (Test-Path -LiteralPath $Destination) {
-      Stop-Smoke "REPORT_PATH_EXISTS" "The report destination changed before publication."
-    }
+    $Destination = Assert-ReportTargetPinned $Target
     [IO.File]::Move($temporary, $Destination)
-    if (-not (Test-Path -LiteralPath $Destination -PathType Leaf)) {
-      Stop-Smoke "REPORT_WRITE_FAILED" "The report could not be published atomically."
-    }
+    $publishedReport = $true
+    [void](Assert-ReportTargetPinned $Target -AllowDestinationExists)
   } catch {
     if ($_.Exception.Data.Contains("SmokeCode")) { throw }
     Stop-Smoke "REPORT_WRITE_FAILED" "The report could not be written atomically."
   } finally {
     if ($null -ne $stream) { $stream.Dispose() }
-    if (Test-Path -LiteralPath $temporary) {
-      if (-not (Test-PathInside -Root $parent -Candidate $temporary)) {
-        Stop-Smoke "REPORT_CLEANUP_FAILED" "The exact temporary report path could not be verified."
-      }
-      [IO.File]::Delete($temporary)
+    try {
+      [void](Assert-ReportTargetPinned $Target -AllowDestinationExists:$publishedReport)
       if (Test-Path -LiteralPath $temporary) {
-        Stop-Smoke "REPORT_CLEANUP_FAILED" "The exact temporary report file could not be removed."
+        if (-not (Test-PathInside -Root $parent -Candidate $temporary)) {
+          Stop-Smoke "REPORT_CLEANUP_FAILED" "The exact temporary report path could not be verified."
+        }
+        [IO.File]::Delete($temporary)
+        if (Test-Path -LiteralPath $temporary) {
+          Stop-Smoke "REPORT_CLEANUP_FAILED" "The exact temporary report file could not be removed."
+        }
       }
-    }
+    } catch { }
   }
 }
 
@@ -1468,16 +1675,31 @@ function Assert-NativeEvidence {
       Stop-Smoke "NATIVE_EVENTS_INVALID" "Native smoke events contain a failed, blocked, or imported transition."
     }
   }
-  foreach ($receipt in $receipts) {
-    $completion = @($events | Where-Object {
-      $_.kind -ceq "step_completed" -and
-      $_.step -eq $receipt.step -and
-      $_.attempt_id -ceq $receipt.attempt_id -and
-      $_.completed_count -eq $receipt.step
-    })
-    if ($completion.Count -ne 1) {
-      Stop-Smoke "NATIVE_RECEIPTS_INVALID" "Native receipt is not linked to one successful step attempt."
+  $completionEvents = @($events | Where-Object { $_.kind -ceq "step_completed" })
+  if ($completionEvents.Count -ne $receipts.Count) {
+    Stop-Smoke "NATIVE_RECEIPTS_INVALID" "Native completion events and receipts are not bijective."
+  }
+  $lastCompletionIndex = -1
+  for ($offset = 0; $offset -lt $receipts.Count; $offset += 1) {
+    $receipt = $receipts[$offset]
+    $completion = $completionEvents[$offset]
+    $completionIndex = [Array]::IndexOf($events, $completion)
+    if (
+      $completionIndex -le $lastCompletionIndex -or
+      $completion.step -ne $receipt.step -or
+      $completion.attempt_id -cne $receipt.attempt_id -or
+      $completion.completed_count -ne $receipt.step -or
+      $completion.timestamp -cne $receipt.completed_at
+    ) {
+      Stop-Smoke "NATIVE_RECEIPTS_INVALID" "Native completion events do not exactly match ordered receipts."
     }
+    $matches = @($receipts | Where-Object {
+      $_.step -eq $completion.step -and $_.attempt_id -ceq $completion.attempt_id
+    })
+    if ($matches.Count -ne 1) {
+      Stop-Smoke "NATIVE_RECEIPTS_INVALID" "A native completion event is extra or contradictory."
+    }
+    $lastCompletionIndex = $completionIndex
   }
   $requiredKinds = @(
     "session_context_loaded", "continuation_issued", "continuation_consumed",
@@ -1490,98 +1712,166 @@ function Assert-NativeEvidence {
       Stop-Smoke "NATIVE_EVENTS_MISSING" "Native smoke events do not prove the required trusted lifecycle."
     }
   }
+  $expectedLifecycleCounts = @{
+    continuation_issued = 2
+    stop_continuation_requested = 1
+    continuation_prompt_accepted = 1
+    continuation_consumed = 2
+    continuation_replay_rejected = 1
+    workflow_resumed = 1
+    workflow_paused = 2
+  }
+  foreach ($expectation in $expectedLifecycleCounts.GetEnumerator()) {
+    if (@($events | Where-Object { $_.kind -ceq $expectation.Key }).Count -ne $expectation.Value) {
+      Stop-Smoke "NATIVE_EVENTS_INVALID" "Native smoke lifecycle event cardinality is unexpected."
+    }
+  }
 
-  $stopIndex = Get-FirstEventIndex $events "stop_continuation_requested"
-  $stop = $events[$stopIndex]
-  $issuedIndex = -1
-  for ($index = 0; $index -lt $stopIndex; $index += 1) {
+  $initialStopIndex = Get-FirstEventIndex $events "stop_continuation_requested" ($lastCompletionIndex + 1)
+  if ($initialStopIndex -lt 0) {
+    Stop-Smoke "NATIVE_CONTINUATION_INVALID" "Native events have no first Stop continuation request."
+  }
+  $initialStop = $events[$initialStopIndex]
+  $initialIssuedIndex = -1
+  for ($index = $lastCompletionIndex + 1; $index -lt $initialStopIndex; $index += 1) {
     $candidate = $events[$index]
     if (
       $candidate.kind -ceq "continuation_issued" -and
-      $candidate.step -eq $stop.step -and
-      $candidate.generation_id -ceq $stop.generation_id -and
-      $candidate.baseline_receipt_count -eq $stop.baseline_receipt_count
-    ) {
-      $issuedIndex = $index
-    }
+      $candidate.step -eq $initialStop.step -and
+      $candidate.generation_id -ceq $initialStop.generation_id -and
+      $candidate.baseline_receipt_count -eq $initialStop.baseline_receipt_count
+    ) { $initialIssuedIndex = $index }
   }
   if (
-    $issuedIndex -lt 0 -or
-    $stop.baseline_receipt_count -lt 1 -or
-    $stop.step -ne ($stop.baseline_receipt_count + 1)
+    $initialIssuedIndex -lt 0 -or
+    $initialStop.baseline_receipt_count -ne $receipts.Count -or
+    $initialStop.step -ne ($initialStop.baseline_receipt_count + 1)
   ) {
-    Stop-Smoke "NATIVE_CONTINUATION_INVALID" "Native events do not prove the issued one-step continuation."
+    Stop-Smoke "NATIVE_CONTINUATION_INVALID" "Native events do not prove the first issued one-step continuation."
   }
-  $acceptedIndex = -1
-  $consumedIndex = -1
-  for ($index = $stopIndex + 1; $index -lt $events.Count; $index += 1) {
+  $initialAcceptedIndex = -1
+  $initialConsumedIndex = -1
+  for ($index = $initialStopIndex + 1; $index -lt $events.Count; $index += 1) {
     $candidate = $events[$index]
     if (
-      $acceptedIndex -lt 0 -and
+      $initialAcceptedIndex -lt 0 -and
       $candidate.kind -ceq "continuation_prompt_accepted" -and
-      $candidate.step -eq $stop.step -and
-      $candidate.generation_id -ceq $stop.generation_id -and
-      $candidate.turn_id -ceq $stop.turn_id -and
-      $candidate.baseline_receipt_count -eq $stop.baseline_receipt_count
+      $candidate.step -eq $initialStop.step -and
+      $candidate.generation_id -ceq $initialStop.generation_id -and
+      $candidate.turn_id -ceq $initialStop.turn_id -and
+      $candidate.baseline_receipt_count -eq $initialStop.baseline_receipt_count
     ) {
-      $acceptedIndex = $index
+      $initialAcceptedIndex = $index
       continue
     }
     if (
-      $acceptedIndex -ge 0 -and
+      $initialAcceptedIndex -ge 0 -and
       $candidate.kind -ceq "continuation_consumed" -and
-      $candidate.step -eq $stop.step -and
-      $candidate.generation_id -ceq $stop.generation_id -and
-      $candidate.baseline_receipt_count -eq $stop.baseline_receipt_count
+      $candidate.step -eq $initialStop.step -and
+      $candidate.generation_id -ceq $initialStop.generation_id -and
+      $candidate.baseline_receipt_count -eq $initialStop.baseline_receipt_count
     ) {
-      $consumedIndex = $index
+      $initialConsumedIndex = $index
       break
     }
   }
-  if ($acceptedIndex -lt 0 -or $consumedIndex -lt 0) {
-    Stop-Smoke "NATIVE_CONTINUATION_INVALID" "Native events do not prove one Stop marker was accepted and consumed."
+  if ($initialAcceptedIndex -lt 0 -or $initialConsumedIndex -lt 0) {
+    Stop-Smoke "NATIVE_CONTINUATION_INVALID" "Native events do not prove the first Stop marker was accepted and consumed."
   }
-  $replayIndex = Get-FirstEventIndex $events "continuation_replay_rejected" ($consumedIndex + 1)
-  if (
-    $replayIndex -lt 0 -or
-    $events[$replayIndex].step -ne $stop.step -or
-    $events[$replayIndex].error_code -cne "CONTINUATION_REPLAY"
-  ) {
-    Stop-Smoke "NATIVE_REPLAY_INVALID" "Native events do not prove consumed-marker replay rejection."
+
+  $initialPauseIndex = Get-FirstEventIndex $events "workflow_paused" ($initialConsumedIndex + 1)
+  if ($initialPauseIndex -lt 0) {
+    Stop-Smoke "NATIVE_PAUSE_RESUME_INVALID" "Native events do not prove the first pause."
   }
-  $pauseIndex = Get-FirstEventIndex $events "workflow_paused"
-  $resumeIndex = Get-FirstEventIndex $events "workflow_resumed" ($pauseIndex + 1)
-  $finalPauseIndex = Get-FirstEventIndex $events "workflow_paused" ($consumedIndex + 1)
+  $replayIndex = Get-FirstEventIndex $events "continuation_replay_rejected" ($initialPauseIndex + 1)
+  if ($replayIndex -lt 0) {
+    Stop-Smoke "NATIVE_REPLAY_INVALID" "Native events do not prove exact consumed-marker replay rejection."
+  }
+  $resumeIndex = Get-FirstEventIndex $events "workflow_resumed" ($replayIndex + 1)
   if (
-    $pauseIndex -lt 0 -or
     $resumeIndex -lt 0 -or
-    $finalPauseIndex -lt 0 -or
-    $replayIndex -ge $finalPauseIndex -or
-    $events[$finalPauseIndex].step -ne $state.current_step
+    $events[$initialPauseIndex].step -ne $initialStop.step -or
+    $events[$replayIndex].step -ne $initialStop.step -or
+    $events[$replayIndex].error_code -cne "CONTINUATION_REPLAY" -or
+    $events[$resumeIndex].step -ne $initialStop.step
   ) {
-    Stop-Smoke "NATIVE_PAUSE_RESUME_INVALID" "Native events do not prove pause, resume, and a safe paused boundary."
+    Stop-Smoke "NATIVE_PAUSE_RESUME_INVALID" "Native events do not prove first pause, exact replay rejection, and resume in order."
   }
-  $consumed = $events[$consumedIndex]
-  $consumedFields = @(Get-PropertyNames $consumed)
+
+  $terminalIssuedIndex = -1
+  for ($index = $resumeIndex + 1; $index -lt $events.Count; $index += 1) {
+    $candidate = $events[$index]
+    if (
+      $candidate.kind -ceq "continuation_issued" -and
+      $candidate.step -eq $initialStop.step -and
+      $candidate.baseline_receipt_count -eq $receipts.Count
+    ) {
+      $terminalIssuedIndex = $index
+      break
+    }
+  }
+  if ($terminalIssuedIndex -lt 0) {
+    Stop-Smoke "NATIVE_CONTINUATION_INVALID" "Resume did not issue a fresh continuation generation."
+  }
+  $terminalIssued = $events[$terminalIssuedIndex]
+  if ($terminalIssued.generation_id -ceq $initialStop.generation_id) {
+    Stop-Smoke "NATIVE_CONTINUATION_INVALID" "Resume reused the consumed continuation generation."
+  }
+  $terminalConsumedIndex = -1
+  for ($index = $terminalIssuedIndex + 1; $index -lt $events.Count; $index += 1) {
+    $candidate = $events[$index]
+    if (
+      $candidate.kind -ceq "continuation_consumed" -and
+      $candidate.step -eq $terminalIssued.step -and
+      $candidate.generation_id -ceq $terminalIssued.generation_id -and
+      $candidate.baseline_receipt_count -eq $terminalIssued.baseline_receipt_count
+    ) {
+      $terminalConsumedIndex = $index
+      $terminalConsumed = $candidate
+      break
+    }
+  }
+  if (
+    $terminalConsumedIndex -lt 0 -or
+    $terminalConsumed.attempt_id -ceq $events[$initialConsumedIndex].attempt_id
+  ) {
+    Stop-Smoke "NATIVE_CONTINUATION_INVALID" "Native events do not prove the fresh explicit-resume marker was consumed."
+  }
+
+  $finalPauseIndex = Get-FirstEventIndex $events "workflow_paused" ($terminalConsumedIndex + 1)
+  if ($finalPauseIndex -lt 0 -or $events[$finalPauseIndex].step -ne $state.current_step) {
+    Stop-Smoke "NATIVE_PAUSE_RESUME_INVALID" "Native events do not prove the terminal safe paused boundary."
+  }
+  $terminalConsumedFields = @(Get-PropertyNames $terminalConsumed)
+  $resumeFields = @(Get-PropertyNames $events[$resumeIndex])
   if (
     $null -eq $state.current_attempt -or
-    $state.current_attempt.id -cne $consumed.attempt_id -or
-    $state.current_attempt.step -ne $consumed.step -or
+    $state.current_attempt.id -cne $terminalConsumed.attempt_id -or
+    $state.current_attempt.step -ne $terminalConsumed.step -or
+    $state.current_attempt.started_at -cne $terminalConsumed.timestamp -or
     $state.current_attempt.failure_recorded -ne $false -or
-    (($consumedFields -contains "session_id") -ne ($null -ne $state.current_attempt.session_id)) -or
-    ($consumedFields -contains "session_id" -and $state.current_attempt.session_id -cne $consumed.session_id)
+    (($terminalConsumedFields -contains "session_id") -ne ($null -ne $state.current_attempt.session_id)) -or
+    ($terminalConsumedFields -contains "session_id" -and $state.current_attempt.session_id -cne $terminalConsumed.session_id) -or
+    (($resumeFields -contains "session_id") -ne ($terminalConsumedFields -contains "session_id")) -or
+    ($resumeFields -contains "session_id" -and $events[$resumeIndex].session_id -cne $terminalConsumed.session_id)
   ) {
     Stop-Smoke "NATIVE_STATE_INVALID" "Native paused state is not tied to the consumed, non-failed attempt."
   }
   if (
     $null -ne $state.owner -and
-    $state.owner.session_id -cne $state.current_attempt.session_id
+    (
+      $state.owner.session_id -cne $state.current_attempt.session_id -or
+      $state.owner.lease_updated_at -cne $events[$finalPauseIndex].timestamp
+    )
   ) {
     Stop-Smoke "NATIVE_STATE_INVALID" "Native paused state owner does not match the consumed attempt session."
   }
+  if ($state.updated_at -cne $events[$finalPauseIndex].timestamp) {
+    Stop-Smoke "NATIVE_STATE_INVALID" "Native paused state is not the terminal pause transition."
+  }
   $denialIndex = -1
   $deferralIndex = -1
-  for ($index = $resumeIndex + 1; $index -lt $finalPauseIndex; $index += 1) {
+  for ($index = $terminalConsumedIndex + 1; $index -lt $finalPauseIndex; $index += 1) {
     $candidate = $events[$index]
     if (
       $candidate.kind -ceq "guard_denied" -and
@@ -1667,20 +1957,59 @@ function Assert-ImportEvidence {
     Assert-ExactProperties $receipt.evidence[0] @("acceptance_id", "kind", "detail", "ok") @() "Imported receipt evidence"
   }
   $events = @(Read-Events $WorkspaceRoot $state.workflow_id "Import")
-  if (@($events | Where-Object { $_.kind -in @("step_completed", "step_failed", "workflow_blocked") }).Count -ne 0) {
-    Stop-Smoke "IMPORT_EVENTS_INVALID" "Import smoke contains a Codex completion or failure event."
+  if (@($events | Where-Object { $_.kind -in @(
+    "step_completed", "step_failed", "workflow_blocked", "continuation_consumed",
+    "continuation_replay_rejected", "stop_continuation_requested",
+    "continuation_prompt_accepted", "guard_denied", "guard_deferred"
+  ) }).Count -ne 0) {
+    Stop-Smoke "IMPORT_EVENTS_INVALID" "Import smoke contains work after the requested Step 18 pause boundary."
   }
-  $imports = @($events | Where-Object {
+  $allImports = @($events | Where-Object { $_.kind -ceq "claude_imported" })
+  $allResumes = @($events | Where-Object { $_.kind -ceq "workflow_resumed" })
+  $allIssued = @($events | Where-Object { $_.kind -ceq "continuation_issued" })
+  $allPauses = @($events | Where-Object { $_.kind -ceq "workflow_paused" })
+  $imports = @($allImports | Where-Object {
     $_.kind -ceq "claude_imported" -and
     $_.selected_step -eq 18 -and
     $_.imported_prefix_count -eq 17
   })
-  $pauses = @($events | Where-Object {
-    $_.kind -ceq "workflow_paused" -and $_.step -eq 18 -and
+  $resumes = @($allResumes | Where-Object {
+    $_.step -eq 18 -and
+    $_.status -ceq "running"
+  })
+  $issued = @($allIssued | Where-Object {
+    $_.step -eq 18 -and
+    $_.baseline_receipt_count -eq 17
+  })
+  $pauses = @($allPauses | Where-Object {
+    $_.step -eq 18 -and
     $_.status -ceq "paused" -and $_.reason_code -ceq "USER_REQUEST"
   })
-  if ($imports.Count -ne 1 -or $pauses.Count -eq 0) {
-    Stop-Smoke "IMPORT_EVENTS_INVALID" "Import events do not prove one Step 18 selection and paused boundary."
+  if (
+    $allImports.Count -ne 1 -or $imports.Count -ne 1 -or
+    $allResumes.Count -ne 1 -or $resumes.Count -ne 1 -or
+    $allIssued.Count -ne 1 -or $issued.Count -ne 1 -or
+    $allPauses.Count -ne 1 -or $pauses.Count -ne 1
+  ) {
+    Stop-Smoke "IMPORT_EVENTS_INVALID" "Import events do not prove one Step 18 import, resume, continuation, and pause."
+  }
+  $importIndex = [Array]::IndexOf($events, $imports[0])
+  $resumeIndex = [Array]::IndexOf($events, $resumes[0])
+  $issuedIndex = [Array]::IndexOf($events, $issued[0])
+  $pauseIndex = [Array]::IndexOf($events, $pauses[0])
+  $resumeFields = @(Get-PropertyNames $resumes[0])
+  if (
+    $importIndex -ge $resumeIndex -or
+    $resumeIndex -ge $issuedIndex -or
+    $issuedIndex -ge $pauseIndex -or
+    $state.updated_at -cne $pauses[0].timestamp -or
+    (($resumeFields -contains "session_id") -ne ($null -ne $state.owner)) -or
+    ($resumeFields -contains "session_id" -and (
+      $resumes[0].session_id -cne $state.owner.session_id -or
+      $state.owner.lease_updated_at -cne $pauses[0].timestamp
+    ))
+  ) {
+    Stop-Smoke "IMPORT_EVENTS_INVALID" "Import resume events are not in the runtime transition order."
   }
   $script:Report.observed_events.claude_imported = $true
   $script:Report.import_receipt_count = $receipts.Count
@@ -1714,6 +2043,9 @@ try {
       $script:SafeReportDestination = Resolve-ExternalReportPath $ReportPath @($resolvedPluginRoot)
     }
   } else {
+    if ($script:Report.codex_version -cne "codex-cli 0.150.1") {
+      Stop-Smoke "CODEX_VERSION_FAILED" "AfterTrust requires codex-cli 0.150.1."
+    }
     if (
       [string]::IsNullOrWhiteSpace($NativeWorkspace) -or
       [string]::IsNullOrWhiteSpace($ImportWorkspace) -or
