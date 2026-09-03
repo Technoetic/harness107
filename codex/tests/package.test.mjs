@@ -57,10 +57,11 @@ function documentSection(text, heading) {
   return text.slice(contentStart, next === -1 ? text.length : next);
 }
 
-function forbidAffirmativeDocumentationClaim(errors, text, patterns, label) {
+function forbidUnnegatedDocumentationAction(errors, text, { scope, danger, safe }, label) {
   const found = instructionClauses(text).some(clause =>
-    !/\b(?:never|not|no|must not|does not|do not|don't|cannot|can't)\b/i.test(clause) &&
-    patterns.every(pattern => pattern.test(clause))
+    scope.every(pattern => pattern.test(clause)) &&
+    danger.test(clause) &&
+    !safe.test(clause)
   );
   if (found) errors.push(`unsafe documentation claim: ${label}`);
 }
@@ -194,28 +195,54 @@ function documentationContractErrors(text) {
   if (/Codex (?:provides|has|supports|uses)[^\n.]*`\/webapp`/i.test(text)) {
     errors.push("Codex slash-command claim found");
   }
-  forbidAffirmativeDocumentationClaim(
+  forbidUnnegatedDocumentationAction(
     errors,
     text,
-    [/\b(?:Codex|Harness50)\b/i, /\b(?:auto[- ]?approv\w*|automatically approv\w*)\b/i],
+    {
+      scope: [/\b(?:Codex|Harness50)\b/i],
+      danger: /\b(?:auto[- ]?approv\w*|automatically\s+approv\w*|approv\w*\s+automatically)\b/i,
+      safe: /\b(?:never|does not|do not|don't|must not|cannot|can't)\s+(?:automatically\s+)?(?:auto[- ]?approv\w*|approv\w*(?:\s+automatically)?)\b/i
+    },
     "Codex command auto-approval"
   );
-  forbidAffirmativeDocumentationClaim(
+  forbidUnnegatedDocumentationAction(
     errors,
     text,
-    [/\bCodex\b/i, /\b(?:write\w* back|merge\w*)\b/i, /\bClaude\b/i],
-    "Codex write-back or later Claude merge"
+    {
+      scope: [/\bCodex\b/i, /\bClaude\b/i],
+      danger: /\bwrite\w*\s+back\b/i,
+      safe: /\b(?:never|does not|do not|don't|must not|cannot|can't)\s+write\w*\s+back\b|\b(?:is|are)\s+not\s+written\s+back\b/i
+    },
+    "Codex write-back to Claude progress"
   );
-  forbidAffirmativeDocumentationClaim(
+  forbidUnnegatedDocumentationAction(
     errors,
     text,
-    [/\bhook hashes?\b/i, /\btrust\w*\b/i, /\b(?:automatically|without (?:another )?review)\b/i],
+    {
+      scope: [/\bCodex\b/i, /\bClaude\b/i],
+      danger: /\bmerge\w*\b.*\b(?:later\s+)?Claude\b/i,
+      safe: /\b(?:never|does not|do not|don't|must not|cannot|can't)\s+merge\w*\b/i
+    },
+    "Codex merge of later Claude changes"
+  );
+  forbidUnnegatedDocumentationAction(
+    errors,
+    text,
+    {
+      scope: [/\bhook hashes?\b/i],
+      danger: /\b(?:trust\w*\s+automatically|automatically\s+trust\w*)\b/i,
+      safe: /\b(?:(?:is|are)\s+not|never)\s+(?:automatically\s+)?trust\w*(?:\s+automatically)?\b|\b(?:cannot|can't|must not)\s+be\s+trust\w*\s+automatically\b/i
+    },
     "automatic hook-hash trust"
   );
-  forbidAffirmativeDocumentationClaim(
+  forbidUnnegatedDocumentationAction(
     errors,
     text,
-    [/\bSubmitted command evidence\b/i, /\b(?:execute|run)\w*\b/i, /\bHarness50 runtime\b/i],
+    {
+      scope: [/\bsubmitted command(?: evidence)?\b/i, /\bHarness50 runtime\b/i],
+      danger: /\bexecut\w*\b/i,
+      safe: /\b(?:never|does not|do not|don't|must not|cannot|can't)\s+execut\w*\b|\b(?:is|are)\s+not\s+execut\w*\b/i
+    },
     "runtime executes submitted command evidence"
   );
   return errors;
@@ -951,7 +978,11 @@ test("documentation contract rejects unsafe host, migration, and trust mutations
     value => `${value}\nCodex automatically approves every command.\n`,
     value => `${value}\nCodex writes back to Claude progress and merges later Claude changes.\n`,
     value => `${value}\nChanged hook hashes are trusted automatically without another review.\n`,
-    value => `${value}\nSubmitted command evidence is executed by the Harness50 runtime.\n`
+    value => `${value}\nSubmitted command evidence is executed by the Harness50 runtime.\n`,
+    value => `${value}\nHarness50 never stalls and automatically approves every Codex command.\n`,
+    value => `${value}\nCodex does not wait before it writes back to Claude progress.\n`,
+    value => `${value}\nChanged hook hashes do not prompt and are trusted automatically.\n`,
+    value => `${value}\nSubmitted command evidence is not logged and is executed by the Harness50 runtime.\n`
   ];
 
   for (const [documentIndex, text] of documents.entries()) {
@@ -959,6 +990,20 @@ test("documentation contract rejects unsafe host, migration, and trust mutations
       .map((mutate, mutationIndex) => documentationContractErrors(mutate(text)).length > 0 ? null : mutationIndex + 1)
       .filter(Boolean);
     assert.deepEqual(accepted, [], `document ${documentIndex + 1} accepted mutations: ${accepted.join(", ")}`);
+
+    const safeAdditions = [
+      "Codex does not automatically approve commands.",
+      "Codex never writes back to Claude progress.",
+      "Changed hook hashes are not trusted automatically.",
+      "Submitted command evidence is not executed by the Harness50 runtime."
+    ];
+    for (const addition of safeAdditions) {
+      assert.deepEqual(
+        documentationContractErrors(`${text}\n${addition}\n`),
+        [],
+        `document ${documentIndex + 1} rejected safe negation: ${addition}`
+      );
+    }
   }
 });
 
