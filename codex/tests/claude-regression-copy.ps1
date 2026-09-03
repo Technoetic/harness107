@@ -70,6 +70,29 @@ function Join-RepositoryPath {
     return $result
 }
 
+function Resolve-StrictChildDirectory {
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [Parameter(Mandatory = $true)][string]$Parent
+    )
+
+    $item = Get-Item -LiteralPath $LiteralPath -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer) {
+        throw "NOT_A_DIRECTORY: $LiteralPath"
+    }
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "UNSAFE_EXECUTION_REPARSE_POINT: $LiteralPath"
+    }
+
+    $expected = [System.IO.Path]::GetFullPath($item.FullName)
+    $resolved = Resolve-ExistingDirectory -LiteralPath $item.FullName
+    Assert-StrictTempChild -Child $resolved -Parent $Parent
+    if (-not [string]::Equals($expected, $resolved, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "EXECUTION_PATH_CHANGED: '$expected' resolved as '$resolved'"
+    }
+    return $resolved
+}
+
 function Get-ProtectedHashes {
     param([Parameter(Mandatory = $true)][string]$Root)
 
@@ -209,14 +232,37 @@ try {
     $stagedHashes = Get-ProtectedHashes -Root $stageRoot
     Assert-ProtectedHashesUnchanged -Before $beforeHashes -After $stagedHashes -ErrorCode "STAGED_COPY_CHANGED"
 
-    $executionRegression = Join-Path -Path $copiedTestsDirectory -ChildPath (
-        ".security-regression.execution-" + [guid]::NewGuid().ToString("N") + ".ps1"
+    $executionCandidate = Join-Path -Path $stageRoot -ChildPath (
+        ".harness50-execution-" + [guid]::NewGuid().ToString("N")
     )
-    Assert-StrictTempChild -Child $executionRegression -Parent $stageRoot
-    Write-Utf8BomExecutionCopy -SourcePath $copiedRegression -DestinationPath $executionRegression
+    [System.IO.Directory]::CreateDirectory($executionCandidate) | Out-Null
+    $executionRoot = Resolve-StrictChildDirectory -LiteralPath $executionCandidate -Parent $stageRoot
+
+    foreach ($relativePath in $protectedPaths) {
+        if (-not $relativePath.EndsWith(".ps1", [System.StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+
+        $executionSource = Join-RepositoryPath -Root $stageRoot -RelativePath $relativePath
+        $executionDestinationCandidate = Join-RepositoryPath -Root $executionRoot -RelativePath $relativePath
+        $executionDirectoryCandidate = [System.IO.Path]::GetDirectoryName($executionDestinationCandidate)
+        [System.IO.Directory]::CreateDirectory($executionDirectoryCandidate) | Out-Null
+        $executionDirectory = Resolve-StrictChildDirectory -LiteralPath $executionDirectoryCandidate -Parent $executionRoot
+        $executionDestination = Join-Path -Path $executionDirectory -ChildPath (
+            [System.IO.Path]::GetFileName($executionDestinationCandidate)
+        )
+        Assert-StrictTempChild -Child $executionDestination -Parent $executionRoot
+        if (Test-Path -LiteralPath $executionDestination) {
+            throw "EXECUTION_COPY_COLLISION: $relativePath"
+        }
+        Write-Utf8BomExecutionCopy -SourcePath $executionSource -DestinationPath $executionDestination
+    }
+
+    $executionRegression = Join-RepositoryPath -Root $executionRoot -RelativePath "tests/security-regression.ps1"
+    Get-Item -LiteralPath $executionRegression -Force -ErrorAction Stop | Out-Null
 
     try {
-        Push-Location -LiteralPath $stageRoot
+        Push-Location -LiteralPath $executionRoot
         try {
             & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $executionRegression
             $regressionExitCode = $LASTEXITCODE
