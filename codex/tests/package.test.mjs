@@ -3,6 +3,15 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 const SKILL_URL = new URL("../skills/", import.meta.url);
+const REPO_URL = new URL("../../", import.meta.url);
+
+async function readRepo(relativePath) {
+  return readFile(new URL(relativePath, REPO_URL), "utf8");
+}
+
+async function readJson(relativePath) {
+  return JSON.parse(await readRepo(relativePath));
+}
 
 async function readSkill(name) {
   return readFile(new URL(`${name}/SKILL.md`, SKILL_URL), "utf8");
@@ -37,6 +46,136 @@ function markdownTable(content) {
   return lines.slice(2).map(line => Object.fromEntries(
     cells(line).map((value, index) => [headers[index], value])
   ));
+}
+
+function documentSection(text, heading) {
+  const marker = `## ${heading}\n`;
+  const start = text.indexOf(marker);
+  assert.notEqual(start, -1, `missing document section: ${heading}`);
+  const contentStart = start + marker.length;
+  const next = text.indexOf("\n## ", contentStart);
+  return text.slice(contentStart, next === -1 ? text.length : next);
+}
+
+function documentationContractErrors(text) {
+  const errors = [];
+  const requiredSections = [
+    "Host commands / 호스트 명령",
+    "Codex installation / 설치",
+    "Permissions and continuation / 권한과 이어가기",
+    "Migration and reset / 마이그레이션과 리셋",
+    "Hook trust gate / 후크 신뢰 게이트",
+    "Host compatibility / 호스트 호환성"
+  ];
+  const sections = {};
+  for (const heading of requiredSections) {
+    try {
+      sections[heading] = documentSection(text, heading);
+    } catch (error) {
+      errors.push(error.message);
+    }
+  }
+  if (errors.length > 0) return errors;
+
+  try {
+    assert.deepEqual(markdownTable(sections[requiredSections[0]]), [
+      {
+        Host: "Claude Code",
+        Start: "`/webapp <topic>`",
+        Status: "`/harness-status`",
+        Reset: "`/harness-reset`"
+      },
+      {
+        Host: "Codex",
+        Start: "`$webapp <topic>`",
+        Status: "`$harness50-status`",
+        Reset: "`$harness50-reset`"
+      }
+    ]);
+  } catch {
+    errors.push("host command matrix must keep Claude slash commands and Codex skill invocations distinct");
+  }
+
+  const host = sections[requiredSections[0]];
+  if (!host.includes("Codex does not provide a `/webapp` slash command.")) {
+    errors.push("Codex slash-command boundary is missing");
+  }
+  if (!host.includes("`$webapp resume`") || !host.includes("`$webapp pause`")) {
+    errors.push("Codex resume and pause invocations are missing");
+  }
+
+  const install = sections[requiredSections[1]];
+  for (const command of [
+    "codex plugin marketplace add <path-to-harness50>",
+    "codex plugin marketplace add Technoetic/harness50",
+    "codex plugin add harness50@harness50"
+  ]) {
+    if (!install.includes(command)) errors.push(`missing Codex install command: ${command}`);
+  }
+  if (!install.includes("Local checkout (works before publication)") ||
+      !install.includes("GitHub source (only after publication)")) {
+    errors.push("local and post-publication Codex install routes are not separated");
+  }
+  if (!install.includes("The current upstream repository must not be assumed to include these Codex changes until they are published.")) {
+    errors.push("unpublished upstream limitation is missing");
+  }
+
+  const permissions = sections[requiredSections[2]];
+  const requiredPermissionStatements = [
+    "Normal Codex permission confirmations remain in effect for every command.",
+    "Harness50 never auto-approves commands and never changes sandbox or approval settings.",
+    "Each later turn receives at most one 50-step continuation marker; that marker schedules work but grants no permission.",
+    "Submitted command evidence is validated only as a string and exit status; the Harness50 runtime never executes that submitted command.",
+    "The guard is a bounded, deny-only defense, not a shell sandbox; benign commands are never approved by the hook and still follow normal Codex permissions."
+  ];
+  for (const statement of requiredPermissionStatements) {
+    if (!permissions.includes(statement)) errors.push(`missing permission boundary: ${statement}`);
+  }
+
+  const migration = sections[requiredSections[3]];
+  const requiredMigrationStatements = [
+    "Only when no Codex workflow exists, existing Claude progress may be imported read-only once.",
+    "Codex never writes back to Claude progress and never merges later Claude changes.",
+    "Reset archives and deactivates only Codex control metadata.",
+    "Reset preserves Claude progress, TOPIC, shared outputs, project source, and application source."
+  ];
+  for (const statement of requiredMigrationStatements) {
+    if (!migration.includes(statement)) errors.push(`missing migration boundary: ${statement}`);
+  }
+
+  const trust = sections[requiredSections[4]];
+  const requiredTrustStatements = [
+    "Start a fresh Codex session after installation and verify that all three skills are visible.",
+    "Open `/hooks` and inspect the exact installed `codex/hooks/hooks.json` definition and its four synchronous handlers: `PreToolUse`, `SessionStart`, `UserPromptSubmit`, and `Stop`.",
+    "Confirm that no approval hook is present, then manually trust only those exact current definitions.",
+    "Changed hook hashes require review and manual trust again; never bypass or automate this trust step.",
+    "Local installation stops at this trust gate until the user confirms the review."
+  ];
+  for (const statement of requiredTrustStatements) {
+    if (!trust.includes(statement)) errors.push(`missing hook trust boundary: ${statement}`);
+  }
+
+  const compatibility = sections[requiredSections[5]];
+  if (!compatibility.includes("Claude Code behavior remains compatible, and the protected original 16 Claude files are unchanged.")) {
+    errors.push("Claude compatibility statement is missing");
+  }
+  if (!compatibility.includes("The full continuation lifecycle requires Codex CLI hooks; other hosts may discover the skills but must not claim continuation-hook support.")) {
+    errors.push("Codex CLI lifecycle scope is missing");
+  }
+
+  if (/--plugin-root\b/.test(text)) errors.push("obsolete --plugin-root instruction found");
+  if (/\b[A-Za-z]:\\Users\\|\/Users\/[^/\s]+\//.test(text)) {
+    errors.push("user-specific absolute path found");
+  }
+  if (/--dangerously-bypass-hook-trust\b/.test(text)) errors.push("hook trust bypass found");
+  if (/Codex (?:provides|has|supports|uses)[^\n.]*`\/webapp`/i.test(text)) {
+    errors.push("Codex slash-command claim found");
+  }
+  if (/Codex[^\n.]*auto[- ]?approv/i.test(permissions) &&
+      !/Harness50 never auto-approves commands/.test(permissions)) {
+    errors.push("Codex auto-approval claim found");
+  }
+  return errors;
 }
 
 const MANAGER_OPERATIONS = [
@@ -712,4 +851,71 @@ test("reset semantic contract rejects the review matrix without rejecting preser
     [],
     "a prohibition protecting preserved data must remain valid"
   );
+});
+
+test("Claude, Codex, and marketplace versions are synchronized", async () => {
+  const claude = await readJson(".claude-plugin/plugin.json");
+  const codex = await readJson(".codex-plugin/plugin.json");
+  const marketplace = await readJson(".claude-plugin/marketplace.json");
+  const entry = marketplace.plugins.find(plugin => plugin.name === "harness50");
+
+  assert.equal(claude.name, "harness50");
+  assert.equal(claude.version, "2.1.0");
+  assert.equal(codex.name, "harness50");
+  assert.equal(codex.version, "2.1.0");
+  assert.equal(codex.skills, "./codex/skills/");
+  assert.equal(codex.hooks, "./codex/hooks/hooks.json");
+  assert.equal(marketplace.name, "harness50");
+  assert.equal(marketplace.metadata.version, "2.1.0");
+  assert.equal(entry?.source, "./");
+  assert.equal(entry?.version, "2.1.0");
+
+  const marketplaceRoot = new URL(".claude-plugin/marketplace.json", REPO_URL);
+  const pluginSource = new URL(entry.source, REPO_URL);
+  assert.ok(
+    pluginSource.pathname.startsWith(REPO_URL.pathname),
+    `marketplace source must stay in the repository: ${marketplaceRoot.pathname}`
+  );
+});
+
+test("root and Codex guides define the complete dual-host contract", async () => {
+  const documents = [
+    ["README.md", await readRepo("README.md")],
+    ["codex/README.md", await readRepo("codex/README.md")]
+  ];
+  for (const [name, text] of documents) {
+    assert.deepEqual(documentationContractErrors(text), [], name);
+  }
+});
+
+test("documentation contract rejects unsafe host, migration, and trust mutations", async () => {
+  const documents = [await readRepo("README.md"), await readRepo("codex/README.md")];
+  const mutations = [
+    value => value.replace("`$webapp <topic>`", "`/webapp <topic>`"),
+    value => value.replace(
+      "Normal Codex permission confirmations remain in effect for every command.",
+      "Codex automatically approves every command."
+    ),
+    value => value.replace(
+      "Codex never writes back to Claude progress and never merges later Claude changes.",
+      "Codex writes back to Claude progress and merges later Claude changes."
+    ),
+    value => value.replace(
+      "Changed hook hashes require review and manual trust again; never bypass or automate this trust step.",
+      "Changed hook hashes are trusted automatically with --dangerously-bypass-hook-trust."
+    ),
+    value => `${value}\nRun node C:\\Users\\example\\harness50\\codex\\scripts\\harness-state.mjs --plugin-root C:\\Users\\example\\harness50.\n`
+  ];
+
+  for (const [documentIndex, text] of documents.entries()) {
+    const accepted = mutations
+      .map((mutate, mutationIndex) => documentationContractErrors(mutate(text)).length > 0 ? null : mutationIndex + 1)
+      .filter(Boolean);
+    assert.deepEqual(accepted, [], `document ${documentIndex + 1} accepted mutations: ${accepted.join(", ")}`);
+  }
+});
+
+test("JavaScript modules are normalized to LF in git attributes", async () => {
+  const attributes = await readRepo(".gitattributes");
+  assert.match(attributes, /(?:^|\n)\*\.mjs text eol=lf(?:\n|$)/);
 });

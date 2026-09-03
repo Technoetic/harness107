@@ -7,3 +7,4 @@
 # JSON / markdown: LF for cross-platform stability
 *.json text eol=lf
 *.md text eol=lf
+*.mjs text eol=lf
