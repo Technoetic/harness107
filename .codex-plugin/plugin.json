@@ -1,0 +1,12 @@
+{
+  "name": "harness50",
+  "version": "2.1.0",
+  "description": "Run the Harness50 web tutorial workflow in Codex with explicit progress receipts and normal Codex permissions.",
+  "author": { "name": "Technoetic" },
+  "homepage": "https://github.com/Technoetic/harness50",
+  "repository": "https://github.com/Technoetic/harness50",
+  "license": "MIT",
+  "keywords": ["harness", "tutorial", "codex", "claude-code", "plugin"],
+  "skills": "./codex/skills/",
+  "hooks": "./codex/hooks/hooks.json"
+}

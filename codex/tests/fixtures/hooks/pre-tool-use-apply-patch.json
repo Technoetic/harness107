@@ -1,0 +1,14 @@
+{
+  "hook_event_name": "PreToolUse",
+  "cwd": "__WORKSPACE__",
+  "session_id": "fixture-session",
+  "transcript_path": null,
+  "permission_mode": "default",
+  "model": "gpt-5.6-codex",
+  "turn_id": "fixture-turn-patch",
+  "tool_name": "apply_patch",
+  "tool_use_id": "fixture-tool-patch",
+  "tool_input": {
+    "command": "*** Begin Patch\n*** Delete File: .git/config\n*** End Patch"
+  }
+}

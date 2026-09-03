@@ -1,0 +1,12 @@
+{
+  "hook_event_name": "UserPromptSubmit",
+  "cwd": "__WORKSPACE__",
+  "turn_id": "turn-user",
+  "prompt": "다른 버그를 먼저 고쳐줘",
+  "session_id": "session-user-prompt",
+  "transcript_path": "transcripts/user-prompt.jsonl",
+  "permission_mode": "acceptEdits",
+  "model": "gpt-5.6-codex",
+  "agent_id": "agent-reviewer-01",
+  "agent_type": "reviewer"
+}

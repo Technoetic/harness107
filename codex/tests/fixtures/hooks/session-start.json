@@ -1,0 +1,9 @@
+{
+  "hook_event_name": "SessionStart",
+  "cwd": "__WORKSPACE__",
+  "source": "clear",
+  "session_id": "session-realistic-01",
+  "transcript_path": null,
+  "permission_mode": "default",
+  "model": "gpt-5.6-codex"
+}

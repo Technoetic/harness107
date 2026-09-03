@@ -11,7 +11,7 @@
 
 [![Claude Code Plugin](https://img.shields.io/badge/Claude_Code-Plugin-191919?style=for-the-badge&logo=anthropic&logoColor=white)](https://github.com/Technoetic/harness50)
 [![License MIT](https://img.shields.io/badge/License-MIT-A855F7?style=for-the-badge)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Windows_·_macOS_·_Linux-0EA5E9?style=for-the-badge&logo=windows&logoColor=white)](#-설치)
+[![Platform](https://img.shields.io/badge/Platform-Windows_·_macOS_·_Linux-0EA5E9?style=for-the-badge&logo=windows&logoColor=white)](#-claude-code-설치)
 [![Hooks](https://img.shields.io/badge/Hooks-28_files-F59E0B?style=for-the-badge)](hooks/)
 [![Steps](https://img.shields.io/badge/Steps-50_files-10B981?style=for-the-badge)](assets/steps/)
 
@@ -30,9 +30,74 @@
 
 ---
 
+## Host commands / 호스트 명령
+
+같은 50단계 절차를 사용하지만 호출 방식과 권한 모델은 호스트별로 다릅니다.
+
+| Host | Start | Status | Reset |
+|---|---|---|---|
+| Claude Code | `/webapp <topic>` | `/harness-status` | `/harness-reset` |
+| Codex | `$webapp <topic>` | `$harness50-status` | `$harness50-reset` |
+
+Codex does not provide a `/webapp` slash command. Codex에서 기존 작업을 이어가려면 `$webapp resume`, 자동 이어가기를 멈추려면 `$webapp pause`를 사용합니다.
+
+## Codex installation / 설치
+
+### Local checkout (works before publication)
+
+이 브랜치처럼 아직 GitHub에 배포되지 않은 Codex 변경은 로컬 체크아웃에서 설치합니다. 아래 명령의 `<path-to-harness50>`에는 이 저장소 루트를 지정합니다.
+
+```text
+codex plugin marketplace add <path-to-harness50>
+codex plugin add harness50@harness50
+```
+
+### GitHub source (only after publication)
+
+아래 원격 경로는 이 변경들이 GitHub에 게시된 뒤에만 사용합니다.
+
+```text
+codex plugin marketplace add Technoetic/harness50
+codex plugin add harness50@harness50
+```
+
+The current upstream repository must not be assumed to include these Codex changes until they are published. 설치 후에는 새 Codex 세션을 열고 아래 신뢰 게이트를 완료해야 합니다.
+
+## Permissions and continuation / 권한과 이어가기
+
+- Normal Codex permission confirmations remain in effect for every command.
+- Harness50 never auto-approves commands and never changes sandbox or approval settings.
+- Each later turn receives at most one 50-step continuation marker; that marker schedules work but grants no permission.
+- Submitted command evidence is validated only as a string and exit status; the Harness50 runtime never executes that submitted command.
+- The guard is a bounded, deny-only defense, not a shell sandbox; benign commands are never approved by the hook and still follow normal Codex permissions.
+
+## Migration and reset / 마이그레이션과 리셋
+
+- Only when no Codex workflow exists, existing Claude progress may be imported read-only once.
+- Codex never writes back to Claude progress and never merges later Claude changes.
+- Reset archives and deactivates only Codex control metadata.
+- Reset preserves Claude progress, TOPIC, shared outputs, project source, and application source.
+
+가져온 과거 완료 기록과 Codex에서 검증한 완료 기록은 별도로 표시됩니다.
+
+## Hook trust gate / 후크 신뢰 게이트
+
+1. Start a fresh Codex session after installation and verify that all three skills are visible.
+2. Open `/hooks` and inspect the exact installed `codex/hooks/hooks.json` definition and its four synchronous handlers: `PreToolUse`, `SessionStart`, `UserPromptSubmit`, and `Stop`.
+3. Confirm that no approval hook is present, then manually trust only those exact current definitions.
+4. Changed hook hashes require review and manual trust again; never bypass or automate this trust step.
+
+Local installation stops at this trust gate until the user confirms the review. 신뢰 전에는 Codex가 플러그인 후크를 건너뛰므로 `$webapp` 실행 검증도 그 뒤에 진행합니다.
+
+## Host compatibility / 호스트 호환성
+
+Claude Code behavior remains compatible, and the protected original 16 Claude files are unchanged. 이 문서 아래의 기존 `/webapp`, 자동 승인, 50단계 연속 실행 설명은 Claude Code 어댑터에 해당합니다.
+
+The full continuation lifecycle requires Codex CLI hooks; other hosts may discover the skills but must not claim continuation-hook support.
+
 <div align="center">
 
-## ⚡ 30초 안에 이해하기
+## ⚡ Claude Code: 30초 안에 이해하기
 
 </div>
 
@@ -83,7 +148,7 @@
 
 <div align="center">
 
-## 🏗️ 아키텍처
+## 🏗️ Claude Code 아키텍처
 
 </div>
 
@@ -145,7 +210,7 @@ flowchart TB
 
 <div align="center">
 
-## 🛡️ 9회차 감사로 검증된 안전 모델
+## 🛡️ Claude Code: 9회차 감사로 검증된 안전 모델
 
 </div>
 
@@ -379,7 +444,7 @@ sequenceDiagram
 
 <div align="center">
 
-## 🚀 설치
+## 🚀 Claude Code 설치
 
 </div>
 

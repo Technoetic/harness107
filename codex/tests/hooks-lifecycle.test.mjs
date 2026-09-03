@@ -1,0 +1,1840 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { linkSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { link, lstat, mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { PassThrough } from "node:stream";
+
+import { handleSessionStart } from "../hooks/session-start.mjs";
+import { handleStop } from "../hooks/stop.mjs";
+import { handleUserPromptSubmit } from "../hooks/user-prompt-submit.mjs";
+import { HarnessError } from "../scripts/lib/errors.mjs";
+import { runHookDirect } from "../scripts/lib/hook-io.mjs";
+import { beginStep, completeStep, initWorkflow } from "../scripts/lib/workflow.mjs";
+import { pathsFor } from "../scripts/lib/paths.mjs";
+import { writeReceiptExclusive } from "../scripts/lib/receipts.mjs";
+import { readState, writeStateAtomic } from "../scripts/lib/state-store.mjs";
+import { runHook } from "./helpers/run-hook.mjs";
+import {
+  makeDirectoryLink,
+  makePluginFixture,
+  makeWorkspace,
+  readJson
+} from "./helpers/workspace.mjs";
+
+const now = "2026-09-02T00:00:00.000Z";
+const fixtureRoot = new URL("./fixtures/hooks/", import.meta.url);
+
+function ids(prefix = "fixture-id") {
+  let value = 0;
+  return () => `${prefix}-${++value}`;
+}
+
+async function fixture(name, workspaceRoot) {
+  const value = await readJson(new URL(name, fixtureRoot));
+  if (value.cwd === "__WORKSPACE__") value.cwd = workspaceRoot;
+  return value;
+}
+
+async function init(root, prefix = "workflow") {
+  return initWorkflow({
+    workspaceRoot: root,
+    topic: "Hook lifecycle fixture",
+    now,
+    idFactory: ids(prefix)
+  });
+}
+
+async function begin(root, state, prefix = "attempt") {
+  return beginStep({
+    workspaceRoot: root,
+    step: state.current_step,
+    marker: { ...state.continuation },
+    now: new Date(Math.max(Date.now(), Date.parse(state.updated_at) + 1)).toISOString(),
+    idFactory: ids(prefix)
+  });
+}
+
+async function events(root) {
+  const raw = await readFile(pathsFor(root).eventsPath, "utf8").catch(error => {
+    if (error?.code === "ENOENT") return "";
+    throw error;
+  });
+  return raw.trim() === "" ? [] : raw.trimEnd().split("\n").map(line => JSON.parse(line));
+}
+
+async function receiptSnapshot(root) {
+  const paths = pathsFor(root);
+  const names = await readdir(paths.receiptsDir).catch(error => {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  });
+  const snapshot = {};
+  for (const name of names.sort()) {
+    snapshot[name] = (await readFile(join(paths.receiptsDir, name))).toString("base64");
+  }
+  return snapshot;
+}
+
+async function appendRawLifecycleEvent(root, event) {
+  await writeFile(pathsFor(root).eventsPath, `${JSON.stringify(event)}\n`, { flag: "a" });
+}
+
+async function writeRawLifecycleEvents(root, lifecycleEvents) {
+  await writeFile(
+    pathsFor(root).eventsPath,
+    lifecycleEvents.map(event => `${JSON.stringify(event)}\n`).join("")
+  );
+}
+
+async function startStateReplacementEventSwapper(paths, stateBefore, replacement) {
+  const backupPath = `${paths.eventsPath}.post-state-original`;
+  const source = String.raw`
+    const { watch } = require("node:fs");
+    const { readFile, rename, writeFile } = require("node:fs/promises");
+    const { basename, dirname } = require("node:path");
+    const [statePath, eventsPath, backupPath, originalState, replacement] = process.argv.slice(1);
+    let finished = false;
+    let reading = false;
+    const watcher = watch(dirname(statePath), async (_eventType, filename) => {
+      if (finished || reading || String(filename) !== basename(statePath)) return;
+      reading = true;
+      try {
+        const current = await readFile(statePath);
+        if (current.toString("base64") === originalState) return;
+        finished = true;
+        watcher.close();
+        await rename(eventsPath, backupPath);
+        await writeFile(eventsPath, Buffer.from(replacement, "base64"));
+        process.send?.({ type: "swapped" });
+      } catch (error) {
+        process.send?.({ type: "error", code: error?.code ?? "ERROR" });
+      } finally {
+        reading = false;
+      }
+    });
+    process.on("message", message => {
+      if (message?.type !== "stop") return;
+      finished = true;
+      watcher.close();
+      process.exit(0);
+    });
+    process.send?.({ type: "ready" });
+  `;
+  const child = spawn(process.execPath, [
+    "-e",
+    source,
+    paths.statePath,
+    paths.eventsPath,
+    backupPath,
+    stateBefore.toString("base64"),
+    replacement.toString("base64")
+  ], {
+    stdio: ["ignore", "ignore", "pipe", "ipc"],
+    windowsHide: true
+  });
+  let resolveReady;
+  let rejectReady;
+  const ready = new Promise((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  let resolveSwap;
+  const swap = new Promise(resolve => {
+    resolveSwap = resolve;
+  });
+  child.on("message", message => {
+    if (message?.type === "ready") resolveReady();
+    if (message?.type === "swapped" || message?.type === "error") resolveSwap(message);
+  });
+  child.once("error", error => {
+    rejectReady(error);
+    resolveSwap({ type: "error", code: error?.code ?? "ERROR" });
+  });
+  child.once("exit", code => {
+    if (code !== 0) rejectReady(new Error(`event swapper exited with ${code}`));
+    resolveSwap(null);
+  });
+  await ready;
+  return {
+    backupPath,
+    swap,
+    async stop() {
+      if (child.exitCode !== null) return;
+      const exited = once(child, "exit");
+      child.send({ type: "stop" });
+      await exited;
+    }
+  };
+}
+
+function markerFor(continuation) {
+  return `[HARNESS50_CONTINUE ${JSON.stringify(continuation)}]`;
+}
+
+function assertEmptySuccess(result) {
+  assert.equal(result.code, 0);
+  assert.deepEqual(result.output, {});
+  assert.equal(result.stderr, "");
+  assert.equal(result.stdout, "{}\n");
+}
+
+function swapCodexDirectory(workspaceRoot, outsideRoot) {
+  const original = pathsFor(workspaceRoot).codexDir;
+  renameSync(original, `${original}.before-swap`);
+  symlinkSync(
+    pathsFor(outsideRoot).codexDir,
+    original,
+    process.platform === "win32" ? "junction" : "dir"
+  );
+}
+
+test("documented hook fixtures have distinct event-specific shapes", async () => {
+  const names = [
+    "session-start.json",
+    "session-start-windows.json",
+    "session-start-missing.json",
+    "session-start-completed.json",
+    "user-prompt-direct.json",
+    "stop-running.json"
+  ];
+  const values = await Promise.all(names.map(name => readJson(new URL(name, fixtureRoot))));
+  assert.deepEqual(values.map(value => value.hook_event_name), [
+    "SessionStart", "SessionStart", "SessionStart", "SessionStart", "UserPromptSubmit", "Stop"
+  ]);
+  assert.equal(values[1].cwd, "C:\\Harness50 Workspaces\\fixture");
+  assert.deepEqual(values[0], {
+    hook_event_name: "SessionStart",
+    cwd: "__WORKSPACE__",
+    source: "clear",
+    session_id: "session-realistic-01",
+    transcript_path: null,
+    permission_mode: "default",
+    model: "gpt-5.6-codex"
+  });
+  for (const value of values) {
+    assert.equal(typeof value.session_id, "string");
+    assert.ok(value.transcript_path === null || typeof value.transcript_path === "string");
+    assert.equal(typeof value.permission_mode, "string");
+    assert.equal(typeof value.model, "string");
+  }
+  assert.equal(values[4].agent_id, "agent-reviewer-01");
+  assert.equal(values[4].agent_type, "reviewer");
+  assert.equal(values[4].prompt, "다른 버그를 먼저 고쳐줘");
+  assert.equal(values[5].stop_hook_active, false);
+});
+
+test("generated hook schemas require common wire fields and scope agent metadata to prompts", async () => {
+  const root = await makeWorkspace();
+  const complete = {
+    hook_event_name: "SessionStart",
+    cwd: root,
+    source: "startup",
+    session_id: "session-required-wire",
+    transcript_path: null,
+    permission_mode: "default",
+    model: "gpt-5.6-codex"
+  };
+  for (const field of ["session_id", "transcript_path", "permission_mode", "model"]) {
+    const incomplete = { ...complete };
+    delete incomplete[field];
+    const result = await runHook("session-start", incomplete, { rawEvent: true });
+    assert.equal(result.code, 1, field);
+    assert.equal(result.output.error.code, "HOOK_EVENT_INVALID", field);
+  }
+
+  assertEmptySuccess(await runHook("user-prompt-submit", {
+    hook_event_name: "UserPromptSubmit",
+    cwd: root,
+    turn_id: "turn-agent-wire",
+    prompt: "$webapp",
+    agent_id: "agent-01",
+    agent_type: "reviewer"
+  }));
+  for (const [name, event] of [
+    ["session-start", { ...complete, agent_id: "agent-01" }],
+    ["stop", {
+      ...complete,
+      hook_event_name: "Stop",
+      turn_id: "turn-no-agent",
+      stop_hook_active: false,
+      last_assistant_message: null,
+      agent_type: "reviewer"
+    }],
+    ["user-prompt-submit", {
+      ...complete,
+      hook_event_name: "UserPromptSubmit",
+      turn_id: "turn-bad-agent",
+      prompt: "$webapp",
+      agent_id: 7
+    }]
+  ]) {
+    const result = await runHook(name, event, { rawEvent: true });
+    assert.equal(result.code, 1);
+    assert.equal(result.output.error.code, "HOOK_EVENT_INVALID");
+  }
+});
+
+test("generated string identifiers accept schema-valid whitespace and Unicode without artifacts", async () => {
+  const common = {
+    session_id: " session/id 雪\n",
+    transcript_path: null,
+    permission_mode: "default",
+    model: " model preview 雪 "
+  };
+  const cases = [
+    ["session-start", {
+      ...common,
+      hook_event_name: "SessionStart",
+      source: "startup"
+    }],
+    ["user-prompt-submit", {
+      ...common,
+      hook_event_name: "UserPromptSubmit",
+      turn_id: " turn/id 雪\n",
+      prompt: "$webapp",
+      agent_id: " agent/id 雪\n",
+      agent_type: " reviewer type 雪 "
+    }],
+    ["stop", {
+      ...common,
+      hook_event_name: "Stop",
+      turn_id: " turn/id 雪\n",
+      stop_hook_active: false,
+      last_assistant_message: null
+    }]
+  ];
+  for (const [name, partial] of cases) {
+    const root = await makeWorkspace();
+    const result = await runHook(name, { ...partial, cwd: root }, { rawEvent: true });
+    assertEmptySuccess(result);
+    await assert.rejects(lstat(pathsFor(root).codexDir), error => error?.code === "ENOENT");
+  }
+});
+
+test("SessionStart accepts the official full shape and all documented sources without mutating state", async () => {
+  for (const source of ["startup", "resume", "clear", "compact"]) {
+    const root = await makeWorkspace();
+    await init(root, source);
+    const before = await readFile(pathsFor(root).statePath);
+    const result = await runHook("session-start", {
+      hook_event_name: "SessionStart",
+      cwd: root,
+      source,
+      session_id: `session-${source}`,
+      transcript_path: source === "clear" ? null : `transcripts/${source}.jsonl`,
+      permission_mode: "default",
+      model: "gpt-5.6-codex"
+    });
+    assert.equal(result.code, 0);
+    assert.equal(result.stderr, "");
+    assert.deepEqual(Object.keys(result.output), ["hookSpecificOutput"]);
+    assert.equal(result.output.hookSpecificOutput.hookEventName, "SessionStart");
+    const context = result.output.hookSpecificOutput.additionalContext;
+    assert.match(context, /^Harness50: running, 0\/50 complete\./);
+    assert.match(context, /Topic: step_archive\/TOPIC\/TOPIC\.md\./);
+    assert.match(context, /Next: Step 001\./);
+    assert.match(context, /\$webapp resume\.$/);
+    assert.ok(Buffer.from(await readFile(pathsFor(root).statePath)).equals(before));
+    const observations = (await events(root)).filter(event => event.kind === "session_context_loaded");
+    assert.equal(observations.length, 1);
+    assert.deepEqual(Object.keys(observations[0]).sort(), [
+      "completed_count", "kind", "status", "step", "timestamp", "workflow_id"
+    ]);
+  }
+});
+
+test("SessionStart missing and completed workflows return the documented empty result", async () => {
+  const missingRoot = await makeWorkspace();
+  assertEmptySuccess(await runHook("session-start", await fixture("session-start.json", missingRoot)));
+  await assert.rejects(lstat(pathsFor(missingRoot).codexDir), error => error?.code === "ENOENT");
+
+  const completedRoot = await makeWorkspace();
+  const running = await init(completedRoot, "completed");
+  await writeStateAtomic(completedRoot, {
+    ...running,
+    status: "completed",
+    current_step: null,
+    completed_steps: Array.from({ length: 50 }, (_, index) => index + 1),
+    current_attempt: null,
+    continuation: null,
+    stop_delivery: null,
+    owner: null,
+    completed_at: now
+  });
+  assertEmptySuccess(await runHook(
+    "session-start",
+    await fixture("session-start-completed.json", completedRoot)
+  ));
+});
+
+test("SessionStart reports corrupt state concisely without overwrite or disclosure", async () => {
+  const root = await makeWorkspace();
+  const paths = pathsFor(root);
+  await mkdir(paths.codexDir, { recursive: true });
+  const secret = "sk-proj-session-secret-1234567890";
+  const corrupt = Buffer.from(`{\"password\":\"${secret}\",`);
+  await writeFile(paths.statePath, corrupt);
+  const result = await runHook("session-start", {
+    hook_event_name: "SessionStart",
+    cwd: root,
+    source: "startup"
+  }, { env: { HOOK_SECRET: secret } });
+  assert.equal(result.code, 0);
+  assert.equal(result.stderr, "");
+  assert.equal(
+    result.output.hookSpecificOutput.additionalContext,
+    "Harness50 state is unreadable. Run $harness50-status, then repair or reset the Codex workflow."
+  );
+  assert.ok(Buffer.from(await readFile(paths.statePath)).equals(corrupt));
+  assert.doesNotMatch(result.stdout, /sk-proj|password|node:internal|hook-lifecycle|\\|\/[A-Za-z]/i);
+});
+
+test("SessionStart context remains available when its observation append fails", async () => {
+  const root = await makeWorkspace();
+  await init(root, "event-failure");
+  const paths = pathsFor(root);
+  await rename(paths.eventsPath, `${paths.eventsPath}.fixture-backup`);
+  await mkdir(paths.eventsPath);
+  const result = await runHook("session-start", {
+    hook_event_name: "SessionStart",
+    cwd: root,
+    source: "resume"
+  });
+  assert.equal(result.code, 0);
+  assert.match(result.output.hookSpecificOutput.additionalContext, /Next: Step 001/);
+  assert.equal(result.stderr, "");
+});
+
+test("a direct user prompt pauses automation without blocking or retaining prompt bytes", async () => {
+  const root = await makeWorkspace();
+  await init(root, "direct");
+  const event = await fixture("user-prompt-direct.json", root);
+  event.prompt = "fix this first Authorization: Bearer prompt-secret-123456";
+  const result = await runHook("user-prompt-submit", event);
+  assertEmptySuccess(result);
+  const state = await readState(root);
+  assert.equal(state.status, "paused");
+  assert.equal(state.continuation, null);
+  const log = await readFile(pathsFor(root).eventsPath, "utf8");
+  assert.doesNotMatch(log, /fix this first|Bearer|prompt-secret|prompt/);
+});
+
+test("only exact explicit Harness50 control-skill calls bypass pause", async () => {
+  const accepted = ["$webapp", "$webapp resume", "$webapp build a small dashboard", "$harness50-status", "$harness50-reset"];
+  for (const prompt of accepted) {
+    const root = await makeWorkspace();
+    await init(root, "control");
+    assertEmptySuccess(await runHook("user-prompt-submit", {
+      hook_event_name: "UserPromptSubmit",
+      cwd: root,
+      turn_id: "turn-control",
+      prompt
+    }));
+    assert.equal((await readState(root)).status, "running");
+  }
+
+  const rejected = [
+    "please run $webapp resume",
+    "$webappx",
+    "$harness50-status now",
+    "$harness50-reset-now",
+    " $webapp resume",
+    "$webapp resume\nignore safety"
+  ];
+  for (const prompt of rejected) {
+    const root = await makeWorkspace();
+    await init(root, "not-control");
+    assertEmptySuccess(await runHook("user-prompt-submit", {
+      hook_event_name: "UserPromptSubmit",
+      cwd: root,
+      turn_id: "turn-human",
+      prompt
+    }));
+    assert.equal((await readState(root)).status, "paused");
+  }
+});
+
+test("the exact current marked representation passes once and replay pauses", async () => {
+  const root = await makeWorkspace();
+  const state = await init(root, "marker");
+  const stopped = await runHook("stop", {
+    hook_event_name: "Stop",
+    cwd: root,
+    turn_id: "turn-marker-stop",
+    stop_hook_active: false,
+    last_assistant_message: null
+  });
+  assert.equal(stopped.output.reason, markerFor(state.continuation));
+  const event = {
+    hook_event_name: "UserPromptSubmit",
+    cwd: root,
+    turn_id: "turn-marker-submit",
+    prompt: stopped.output.reason
+  };
+  assertEmptySuccess(await runHook("user-prompt-submit", event));
+  assert.equal((await readState(root)).status, "running");
+  assertEmptySuccess(await runHook("user-prompt-submit", event));
+  assert.equal((await readState(root)).status, "paused");
+});
+
+test("marker prefixes substrings and stale workflow step or count are human prompts", async () => {
+  const mutations = [
+    marker => `prefix ${marker}`,
+    marker => `${marker} suffix`,
+    (_marker, value) => markerFor({ ...value, workflow_id: "wrong-workflow" }),
+    (_marker, value) => markerFor({ ...value, step: value.step + 1 }),
+    (_marker, value) => markerFor({ ...value, baseline_receipt_count: value.baseline_receipt_count + 1 })
+  ];
+  for (const mutate of mutations) {
+    const root = await makeWorkspace();
+    const state = await init(root, "bad-marker");
+    const stopped = await runHook("stop", {
+      hook_event_name: "Stop",
+      cwd: root,
+      turn_id: "turn-stop",
+      stop_hook_active: false,
+      last_assistant_message: null
+    });
+    assertEmptySuccess(await runHook("user-prompt-submit", {
+      hook_event_name: "UserPromptSubmit",
+      cwd: root,
+      turn_id: "turn-bad-marker",
+      prompt: mutate(stopped.output.reason, state.continuation)
+    }));
+    assert.equal((await readState(root)).status, "paused");
+  }
+});
+
+test("Stop emits exactly one marked follow-up for a progressing workflow", async () => {
+  const root = await makeWorkspace();
+  const pluginRoot = await makePluginFixture();
+  const initialized = await init(root, "progress");
+  const started = await begin(root, initialized, "progress-attempt");
+  const progressed = await completeStep({
+    workspaceRoot: root,
+    pluginRoot,
+    step: 1,
+    attemptId: started.attempt.id,
+    summary: "fixture completed",
+    evidence: [{
+      acceptance_id: "state-transition",
+      kind: "check",
+      detail: "fixture state transition verified",
+      ok: true
+    }],
+    now: new Date(Date.parse(started.state.updated_at) + 1).toISOString()
+  });
+  const result = await runHook("stop", await fixture("stop-running.json", root));
+  assert.equal(result.code, 0);
+  assert.deepEqual(result.output, {
+    decision: "block",
+    reason: markerFor(progressed.continuation)
+  });
+  assert.equal((result.output.reason.match(/\[HARNESS50_CONTINUE /g) ?? []).length, 1);
+  assert.equal((await readState(root)).last_stop_turn_id, null);
+});
+
+test("stop_hook_active releases bounded recursive entries until durable work advances", async () => {
+  const root = await makeWorkspace();
+  const initial = await init(root, "active-loop");
+  const beforeEvents = await events(root);
+  for (let retry = 0; retry < 5; retry += 1) {
+    assertEmptySuccess(await runHook("stop", {
+      hook_event_name: "Stop",
+      cwd: root,
+      turn_id: `turn-active-loop-${retry}`,
+      stop_hook_active: true,
+      last_assistant_message: "must remain ignored"
+    }));
+  }
+  const after = await readState(root);
+  assert.deepEqual(after, initial);
+  assert.equal(after.consecutive_failures, 0);
+  assert.equal((await events(root)).filter(event =>
+    event.kind === "stop_continuation_requested" ||
+    (event.kind === "step_failed" && event.reason_code === "STOP_NO_PROGRESS")
+  ).length, 0);
+  assert.deepEqual(await events(root), beforeEvents);
+});
+
+test("every Stop stays quiet after acceptance until the executor begins a new attempt", async () => {
+  const root = await makeWorkspace();
+  const initialized = await init(root, "active-before-attempt");
+  await begin(root, initialized, "active-before-attempt-run");
+  const failed = await runHook("stop", {
+    hook_event_name: "Stop",
+    cwd: root,
+    turn_id: "turn-active-failed",
+    stop_hook_active: true,
+    last_assistant_message: null
+  });
+  assert.equal(failed.output.decision, "block");
+  assertEmptySuccess(await runHook("user-prompt-submit", {
+    hook_event_name: "UserPromptSubmit",
+    cwd: root,
+    turn_id: "turn-active-accepted",
+    prompt: failed.output.reason
+  }));
+
+  for (const stopHookActive of [false, true]) {
+    for (let retry = 0; retry < 3; retry += 1) {
+      assertEmptySuccess(await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: `turn-waiting-${stopHookActive}-${retry}`,
+        stop_hook_active: stopHookActive,
+        last_assistant_message: null
+      }));
+    }
+  }
+  const state = await readState(root);
+  assert.equal(state.consecutive_failures, 1);
+  assert.equal(state.current_attempt.failure_recorded, true);
+  assert.equal((await events(root)).filter(event =>
+    event.kind === "stop_continuation_requested"
+  ).length, 1);
+});
+
+test("a lost Stop output is re-delivered idempotently until its marker is accepted", async () => {
+  const root = await makeWorkspace();
+  const initialized = await init(root, "lost-output");
+  const firstEvent = {
+    hook_event_name: "Stop",
+    cwd: root,
+    turn_id: "turn-lost-output",
+    stop_hook_active: false,
+    last_assistant_message: null
+  };
+  const lost = await runHook("stop", firstEvent, { closeStdout: true });
+  assert.notEqual(lost.code, 0);
+  assert.equal(lost.output, null);
+
+  const expectedMarker = markerFor(initialized.continuation);
+  const stateAfterLoss = await readState(root);
+  const requestsAfterLoss = (await events(root)).filter(event =>
+    event.kind === "stop_continuation_requested"
+  );
+  assert.equal(stateAfterLoss.last_stop_turn_id, null);
+  assert.equal(requestsAfterLoss.length, 1);
+
+  const sameTurn = await runHook("stop", firstEvent);
+  assert.deepEqual(sameTurn.output, { decision: "block", reason: expectedMarker });
+  const newTurn = await runHook("stop", { ...firstEvent, turn_id: "turn-lost-output-retry" });
+  assert.deepEqual(newTurn.output, { decision: "block", reason: expectedMarker });
+  assert.equal((await readState(root)).last_stop_turn_id, null);
+  assert.equal((await events(root)).filter(event =>
+    event.kind === "stop_continuation_requested"
+  ).length, 1);
+
+  assertEmptySuccess(await runHook("user-prompt-submit", {
+    hook_event_name: "UserPromptSubmit",
+    cwd: root,
+    turn_id: "turn-lost-output-prompt",
+    prompt: expectedMarker
+  }));
+  assertEmptySuccess(await runHook("stop", {
+    ...firstEvent,
+    turn_id: "turn-after-acceptance",
+    stop_hook_active: true
+  }));
+  assert.equal((await events(root)).filter(event =>
+    event.kind === "stop_continuation_requested"
+  ).length, 1);
+});
+
+test("marker acceptance is authorized by state when audit telemetry is absent", async () => {
+  const root = await makeWorkspace();
+  const initialized = await init(root, "state-authority-prompt");
+  const stopped = await runHook("stop", {
+    hook_event_name: "Stop",
+    cwd: root,
+    turn_id: "turn-state-authority-request",
+    stop_hook_active: false,
+    last_assistant_message: null
+  });
+  assert.equal(stopped.output.reason, markerFor(initialized.continuation));
+  await writeFile(pathsFor(root).eventsPath, "");
+
+  assertEmptySuccess(await runHook("user-prompt-submit", {
+    hook_event_name: "UserPromptSubmit",
+    cwd: root,
+    turn_id: "turn-state-authority-prompt",
+    prompt: stopped.output.reason
+  }));
+  const state = await readState(root);
+  assert.equal(state.status, "running");
+  assert.equal(state.stop_delivery.accepted, true);
+  assert.equal(state.stop_delivery.requested_turn_id, "turn-state-authority-request");
+});
+
+test("a directly consumed Stop request closes replay and fails the active attempt once", async t => {
+  for (const stopHookActive of [false, true]) {
+    await t.test(`stop_hook_active=${stopHookActive}`, async () => {
+      const root = await makeWorkspace();
+      const initialized = await init(root, `direct-consume-${stopHookActive}`);
+      const firstStop = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: "turn-direct-consume-request",
+        stop_hook_active: false,
+        last_assistant_message: null
+      });
+      assert.deepEqual(firstStop.output, {
+        decision: "block",
+        reason: markerFor(initialized.continuation)
+      });
+      const started = await begin(root, await readState(root), `direct-consume-attempt-${stopHookActive}`);
+      assert.equal((await events(root)).filter(event =>
+        event.kind === "continuation_prompt_accepted"
+      ).length, 0);
+
+      const stopEvent = {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: `turn-direct-consume-failure-${stopHookActive}`,
+        stop_hook_active: stopHookActive,
+        last_assistant_message: "ignored direct-consumption transcript"
+      };
+      const stopped = await runHook("stop", stopEvent);
+      const failed = await readState(root);
+      assert.equal(stopped.output.decision, "block");
+      assert.equal(stopped.output.reason, markerFor(failed.continuation));
+      assert.notEqual(stopped.output.reason, "[HARNESS50_CONTINUE null]");
+      assert.doesNotMatch(stopped.stdout, /direct-consumption transcript/);
+      assert.equal(failed.current_attempt.id, started.attempt.id);
+      assert.equal(failed.current_attempt.failure_recorded, true);
+      assert.equal(failed.consecutive_failures, 1);
+      const afterFirst = await events(root);
+      assert.equal(afterFirst.filter(event => event.kind === "stop_continuation_requested").length, 2);
+      assert.equal(afterFirst.filter(event =>
+        event.kind === "step_failed" && event.attempt_id === started.attempt.id
+      ).length, 1);
+
+      const repeated = await runHook("stop", stopEvent);
+      if (stopHookActive) {
+        assertEmptySuccess(repeated);
+      } else {
+        assert.deepEqual(repeated.output, stopped.output);
+      }
+      const afterRepeat = await readState(root);
+      assert.equal(afterRepeat.consecutive_failures, 1);
+      assert.equal((await events(root)).filter(event =>
+        event.kind === "step_failed" && event.attempt_id === started.attempt.id
+      ).length, 1);
+    });
+  }
+});
+
+test("the exact consumed request turn follows active-loop semantics without double failure", async t => {
+  for (const stopHookActive of [false, true]) {
+    await t.test(`stop_hook_active=${stopHookActive}`, async () => {
+      const root = await makeWorkspace();
+      const initialized = await init(root, `same-turn-${stopHookActive}`);
+      const requestTurn = `turn-same-consumed-${stopHookActive}`;
+      const first = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: requestTurn,
+        stop_hook_active: false,
+        last_assistant_message: null
+      });
+      assert.equal(first.output.decision, "block");
+      const started = await begin(root, await readState(root), `same-turn-attempt-${stopHookActive}`);
+
+      const stopped = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: requestTurn,
+        stop_hook_active: stopHookActive,
+        last_assistant_message: null
+      });
+      const state = await readState(root);
+      if (stopHookActive) {
+        assert.equal(stopped.output.decision, "block");
+        assert.equal(state.current_attempt.id, started.attempt.id);
+        assert.equal(state.current_attempt.failure_recorded, true);
+        assert.equal(state.consecutive_failures, 1);
+        assert.equal(stopped.output.reason, markerFor(state.continuation));
+      } else {
+        assertEmptySuccess(stopped);
+        assert.equal(state.current_attempt.failure_recorded, false);
+        assert.equal(state.consecutive_failures, 0);
+      }
+      const repeated = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: requestTurn,
+        stop_hook_active: stopHookActive,
+        last_assistant_message: null
+      });
+      if (stopHookActive || !state.current_attempt.failure_recorded) assertEmptySuccess(repeated);
+      assert.ok((await readState(root)).consecutive_failures <= 1);
+    });
+  }
+});
+
+test("accepted consumed request turns use the same active-loop rule", async t => {
+  for (const stopHookActive of [false, true]) {
+    await t.test(`stop_hook_active=${stopHookActive}`, async () => {
+      const root = await makeWorkspace();
+      const initialized = await init(root, `accepted-same-turn-${stopHookActive}`);
+      const turnId = `turn-accepted-same-${stopHookActive}`;
+      const first = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: turnId,
+        stop_hook_active: false,
+        last_assistant_message: null
+      });
+      assertEmptySuccess(await runHook("user-prompt-submit", {
+        hook_event_name: "UserPromptSubmit",
+        cwd: root,
+        turn_id: "turn-accept-same",
+        prompt: first.output.reason
+      }));
+      await begin(root, initialized, `accepted-same-attempt-${stopHookActive}`);
+      const stopped = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: turnId,
+        stop_hook_active: stopHookActive,
+        last_assistant_message: null
+      });
+      const state = await readState(root);
+      assert.equal(state.current_attempt.failure_recorded, stopHookActive);
+      assert.equal(state.consecutive_failures, stopHookActive ? 1 : 0);
+      if (stopHookActive) assert.equal(stopped.output.decision, "block");
+      else assertEmptySuccess(stopped);
+    });
+  }
+});
+
+test("receipt-first Stop returns the claimed next-step marker in one call", async () => {
+  const root = await makeWorkspace();
+  const initialized = await init(root, "receipt-first-hook");
+  const started = await begin(root, initialized, "receipt-first-hook-attempt");
+  await writeReceiptExclusive(root, {
+    schema_version: 1,
+    workflow_id: initialized.workflow_id,
+    step: 1,
+    attempt_id: started.attempt.id,
+    provenance: "codex-verified",
+    completed_at: new Date(Math.max(Date.now(), Date.parse(initialized.updated_at) + 2)).toISOString(),
+    summary: "durable receipt before Stop",
+    evidence: [{ acceptance_id: "receipt-first", kind: "check", detail: "durable", ok: true }]
+  });
+  const result = await runHook("stop", {
+    hook_event_name: "Stop",
+    cwd: root,
+    turn_id: "turn-receipt-first-hook",
+    stop_hook_active: true,
+    last_assistant_message: null
+  });
+  const state = await readState(root);
+  assert.equal(result.output.decision, "block");
+  assert.equal(state.current_step, 2);
+  assert.deepEqual(state.completed_steps, [1]);
+  assert.equal(result.output.reason, markerFor(state.continuation));
+  assert.equal(state.stop_delivery.requested_turn_id, "turn-receipt-first-hook");
+});
+
+test("malformed lifecycle telemetry cannot override current state delivery", async t => {
+  const cases = [
+    ["missing boundary timestamp", lifecycleEvents => {
+      delete lifecycleEvents[0].timestamp;
+    }],
+    ["noncanonical boundary timestamp", lifecycleEvents => {
+      lifecycleEvents[0].timestamp = "2026-09-02T00:00:00Z";
+    }],
+    ["missing request timestamp", (lifecycleEvents, state) => {
+      lifecycleEvents.push({
+        kind: "stop_continuation_requested",
+        workflow_id: state.workflow_id,
+        step: state.current_step,
+        turn_id: "turn-missing-time",
+        baseline_receipt_count: state.completed_steps.length
+      });
+    }],
+    ["noncanonical request timestamp", (lifecycleEvents, state) => {
+      lifecycleEvents.push({
+        kind: "stop_continuation_requested",
+        timestamp: "2026-09-02T00:00:01Z",
+        workflow_id: state.workflow_id,
+        step: state.current_step,
+        turn_id: "turn-bad-time",
+        baseline_receipt_count: state.completed_steps.length
+      });
+    }],
+    ["empty request turn", (lifecycleEvents, state) => {
+      lifecycleEvents.push({
+        kind: "stop_continuation_requested",
+        timestamp: "2026-09-02T00:00:01.000Z",
+        workflow_id: state.workflow_id,
+        step: state.current_step,
+        turn_id: "",
+        baseline_receipt_count: state.completed_steps.length
+      });
+    }],
+    ["empty relevant workflow", lifecycleEvents => {
+      lifecycleEvents.push({
+        kind: "continuation_prompt_accepted",
+        timestamp: "2026-09-02T00:00:01.000Z",
+        workflow_id: "",
+        step: 1,
+        turn_id: "turn-empty-workflow",
+        baseline_receipt_count: 0
+      });
+    }],
+    ["fractional step", (lifecycleEvents, state) => {
+      lifecycleEvents.push({
+        kind: "stop_continuation_requested",
+        timestamp: "2026-09-02T00:00:01.000Z",
+        workflow_id: state.workflow_id,
+        step: 1.5,
+        turn_id: "turn-fractional-step",
+        baseline_receipt_count: state.completed_steps.length
+      });
+    }],
+    ["out of range baseline", (lifecycleEvents, state) => {
+      lifecycleEvents.push({
+        kind: "stop_continuation_requested",
+        timestamp: "2026-09-02T00:00:01.000Z",
+        workflow_id: state.workflow_id,
+        step: state.current_step,
+        turn_id: "turn-bad-baseline",
+        baseline_receipt_count: 51
+      });
+    }],
+    ["acceptance before request", (lifecycleEvents, state) => {
+      lifecycleEvents.push({
+        kind: "continuation_prompt_accepted",
+        timestamp: "2026-09-02T00:00:01.000Z",
+        workflow_id: state.workflow_id,
+        step: state.current_step,
+        turn_id: "turn-bad-order",
+        baseline_receipt_count: state.completed_steps.length
+      }, {
+        kind: "stop_continuation_requested",
+        timestamp: "2026-09-02T00:00:02.000Z",
+        workflow_id: state.workflow_id,
+        step: state.current_step,
+        turn_id: "turn-bad-order",
+        baseline_receipt_count: state.completed_steps.length
+      });
+    }]
+  ];
+  for (const [name, mutate] of cases) {
+    await t.test(name, async () => {
+      const root = await makeWorkspace();
+      const state = await init(root, "malformed-ledger");
+      const lifecycleEvents = await events(root);
+      mutate(lifecycleEvents, state);
+      await writeRawLifecycleEvents(root, lifecycleEvents);
+      const result = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: "turn-malformed-ledger",
+        stop_hook_active: false,
+        last_assistant_message: "secret ledger diagnostic input"
+      });
+      assert.deepEqual(result.output, {
+        decision: "block",
+        reason: markerFor(state.continuation)
+      });
+      assert.doesNotMatch(result.stdout, /secret|ledger diagnostic/);
+      assert.equal((await readState(root)).stop_delivery.requested_turn_id, "turn-malformed-ledger");
+    });
+  }
+});
+
+test("reordered request telemetry cannot suppress current-attempt handling", async () => {
+  const root = await makeWorkspace();
+  const initialized = await init(root, "request-after-consume");
+  const requested = await runHook("stop", {
+    hook_event_name: "Stop",
+    cwd: root,
+    turn_id: "turn-request-before-consume",
+    stop_hook_active: false,
+    last_assistant_message: null
+  });
+  assert.equal(requested.output.decision, "block");
+  await begin(root, initialized, "request-after-consume-attempt");
+  const lifecycleEvents = await events(root);
+  const requestIndex = lifecycleEvents.findIndex(event =>
+    event.kind === "stop_continuation_requested"
+  );
+  const consumedIndex = lifecycleEvents.findIndex(event =>
+    event.kind === "continuation_consumed"
+  );
+  const request = lifecycleEvents[requestIndex];
+  lifecycleEvents.splice(requestIndex, 1);
+  const relocatedConsumed = lifecycleEvents.findIndex(event =>
+    event.kind === "continuation_consumed"
+  );
+  lifecycleEvents.splice(relocatedConsumed + 1, 0, request);
+  assert.ok(consumedIndex > requestIndex);
+  await writeRawLifecycleEvents(root, lifecycleEvents);
+  const stopped = await runHook("stop", {
+    hook_event_name: "Stop",
+    cwd: root,
+    turn_id: "turn-after-malformed-order",
+    stop_hook_active: false,
+    last_assistant_message: null
+  });
+  assert.equal(stopped.output.decision, "block");
+  assert.equal((await readState(root)).current_attempt.failure_recorded, true);
+});
+
+test("malformed consumed and accepted telemetry cannot suppress active-attempt handling", async t => {
+  const cases = [
+    ["missing consumed timestamp", lifecycleEvents => {
+      const consumed = lifecycleEvents.find(event => event.kind === "continuation_consumed");
+      delete consumed.timestamp;
+    }],
+    ["noncanonical consumed timestamp", lifecycleEvents => {
+      const consumed = lifecycleEvents.find(event => event.kind === "continuation_consumed");
+      consumed.timestamp = "2026-09-02T00:00:03Z";
+    }],
+    ["empty consumed attempt", lifecycleEvents => {
+      const consumed = lifecycleEvents.find(event => event.kind === "continuation_consumed");
+      consumed.attempt_id = "";
+    }],
+    ["missing acceptance timestamp", (lifecycleEvents, state) => {
+      const consumedIndex = lifecycleEvents.findIndex(event => event.kind === "continuation_consumed");
+      lifecycleEvents.splice(consumedIndex, 0, {
+        kind: "continuation_prompt_accepted",
+        workflow_id: state.workflow_id,
+        step: state.current_step,
+        turn_id: "turn-record-shape-request",
+        baseline_receipt_count: state.completed_steps.length
+      });
+    }],
+    ["noncanonical acceptance timestamp", (lifecycleEvents, state) => {
+      const consumedIndex = lifecycleEvents.findIndex(event => event.kind === "continuation_consumed");
+      lifecycleEvents.splice(consumedIndex, 0, {
+        kind: "continuation_prompt_accepted",
+        timestamp: "2026-09-02T00:00:03Z",
+        workflow_id: state.workflow_id,
+        step: state.current_step,
+        turn_id: "turn-record-shape-request",
+        baseline_receipt_count: state.completed_steps.length
+      });
+    }],
+    ["acceptance after consumption", (lifecycleEvents, state) => {
+      lifecycleEvents.push({
+        kind: "continuation_prompt_accepted",
+        timestamp: "2026-09-02T00:00:04.000Z",
+        workflow_id: state.workflow_id,
+        step: state.current_step,
+        turn_id: "turn-record-shape-request",
+        baseline_receipt_count: state.completed_steps.length
+      });
+    }]
+  ];
+  for (const [name, mutate] of cases) {
+    await t.test(name, async () => {
+      const root = await makeWorkspace();
+      const initialized = await init(root, "record-shape");
+      const requested = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: "turn-record-shape-request",
+        stop_hook_active: false,
+        last_assistant_message: null
+      });
+      assert.equal(requested.output.decision, "block");
+      await begin(root, initialized, "record-shape-attempt");
+      const state = await readState(root);
+      const lifecycleEvents = await events(root);
+      mutate(lifecycleEvents, state);
+      await writeRawLifecycleEvents(root, lifecycleEvents);
+      const stopped = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: "turn-record-shape-stop",
+        stop_hook_active: false,
+        last_assistant_message: null
+      });
+      assert.equal(stopped.output.decision, "block");
+      assert.equal((await readState(root)).current_attempt.failure_recorded, true);
+    });
+  }
+});
+
+test("a schema-valid empty Stop turn never publishes a noncanonical request", async () => {
+  const root = await makeWorkspace();
+  await init(root, "empty-stop-turn");
+  const stateBefore = await readFile(pathsFor(root).statePath);
+  const eventsBefore = await readFile(pathsFor(root).eventsPath);
+  assertEmptySuccess(await runHook("stop", {
+    hook_event_name: "Stop",
+    cwd: root,
+    turn_id: "",
+    stop_hook_active: false,
+    last_assistant_message: null
+  }));
+  assert.ok(Buffer.from(await readFile(pathsFor(root).statePath)).equals(stateBefore));
+  assert.ok(Buffer.from(await readFile(pathsFor(root).eventsPath)).equals(eventsBefore));
+});
+
+test("state delivery replay and acceptance ignore the legacy stop turn field", async t => {
+  for (const legacyTurnId of [null, "legacy-stale-turn"]) {
+    await t.test(String(legacyTurnId), async () => {
+      const root = await makeWorkspace();
+      const initialized = await init(root, `event-first-${legacyTurnId ?? "null"}`);
+      const first = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: "turn-event-first-request",
+        stop_hook_active: false,
+        last_assistant_message: null
+      });
+      assert.deepEqual(first.output, {
+        decision: "block",
+        reason: markerFor(initialized.continuation)
+      });
+      const state = await readState(root);
+      await writeStateAtomic(root, { ...state, last_stop_turn_id: legacyTurnId });
+      const stateBeforeRetry = await readFile(pathsFor(root).statePath);
+
+      const retry = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: "turn-event-first-retry",
+        stop_hook_active: false,
+        last_assistant_message: null
+      });
+      assert.deepEqual(retry.output, first.output);
+      assert.ok(Buffer.from(await readFile(pathsFor(root).statePath)).equals(stateBeforeRetry));
+      const requests = (await events(root)).filter(event =>
+        event.kind === "stop_continuation_requested"
+      );
+      assert.equal(requests.length, 1);
+
+      assertEmptySuccess(await runHook("user-prompt-submit", {
+        hook_event_name: "UserPromptSubmit",
+        cwd: root,
+        turn_id: "turn-event-first-accept",
+        prompt: first.output.reason
+      }));
+      const acceptedState = await readState(root);
+      assert.equal(acceptedState.status, "running");
+      assert.equal(acceptedState.last_stop_turn_id, legacyTurnId);
+      const acceptances = (await events(root)).filter(event =>
+        event.kind === "continuation_prompt_accepted"
+      );
+      assert.equal(acceptances.length, 1);
+      assert.equal(acceptances[0].turn_id, "turn-event-first-request");
+    });
+  }
+});
+
+test("state delivery ignores stale same-shape requests and acceptances in telemetry", async t => {
+  for (const acceptOldRequest of [false, true]) {
+    await t.test(acceptOldRequest ? "accepted stale request" : "pending stale request", async () => {
+      const root = await makeWorkspace();
+      const initialized = await init(root, `same-shape-${acceptOldRequest}`);
+      const oldStop = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: "turn-old-generation",
+        stop_hook_active: false,
+        last_assistant_message: null
+      });
+      if (acceptOldRequest) {
+        assertEmptySuccess(await runHook("user-prompt-submit", {
+          hook_event_name: "UserPromptSubmit",
+          cwd: root,
+          turn_id: "turn-old-generation-accept",
+          prompt: oldStop.output.reason
+        }));
+      }
+
+      const prior = await readState(root);
+      const continuation = {
+        ...prior.continuation,
+        nonce: `new-generation-${acceptOldRequest}`
+      };
+      await writeStateAtomic(root, {
+        ...prior,
+        continuation,
+        stop_delivery: {
+          generation_id: `new-delivery-${acceptOldRequest}`,
+          requested_turn_id: null,
+          accepted: false,
+          allow_active_stop: true
+        },
+        last_stop_turn_id: "turn-old-generation"
+      });
+      await appendRawLifecycleEvent(root, {
+        kind: "continuation_issued",
+        timestamp: continuation.issued_at,
+        workflow_id: prior.workflow_id,
+        step: prior.current_step,
+        baseline_receipt_count: prior.completed_steps.length
+      });
+      const stateBeforeStop = await readFile(pathsFor(root).statePath);
+
+      const current = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: "turn-new-generation",
+        stop_hook_active: true,
+        last_assistant_message: null
+      });
+      assert.deepEqual(current.output, {
+        decision: "block",
+        reason: markerFor(continuation)
+      });
+      assert.ok(!Buffer.from(await readFile(pathsFor(root).statePath)).equals(stateBeforeStop));
+      const requests = (await events(root)).filter(event =>
+        event.kind === "stop_continuation_requested"
+      );
+      assert.equal(requests.length, 2);
+      assert.equal(requests.at(-1).turn_id, "turn-new-generation");
+
+      assertEmptySuccess(await runHook("user-prompt-submit", {
+        hook_event_name: "UserPromptSubmit",
+        cwd: root,
+        turn_id: "turn-new-generation-accept",
+        prompt: acceptOldRequest ? current.output.reason : oldStop.output.reason
+      }));
+      const acceptances = (await events(root)).filter(event =>
+        event.kind === "continuation_prompt_accepted"
+      );
+      if (acceptOldRequest) {
+        assert.equal(acceptances.at(-1).turn_id, "turn-new-generation");
+        assert.equal((await readState(root)).status, "running");
+      } else {
+        assert.equal(acceptances.length, 0);
+        assert.equal((await readState(root)).status, "paused");
+      }
+      assert.equal((await readState(root)).last_stop_turn_id, "turn-old-generation");
+      assert.notEqual(oldStop.output.reason, current.output.reason);
+      assert.equal(initialized.continuation.issued_at, continuation.issued_at);
+    });
+  }
+});
+
+test("missing or ambiguous telemetry does not suppress a state-authorized Stop request", async t => {
+  for (const mode of ["absent-boundary", "ambiguous-request"]) {
+    await t.test(mode, async () => {
+      const root = await makeWorkspace();
+      const initialized = await init(root, `ledger-${mode}`);
+      if (mode === "absent-boundary") {
+        await writeFile(pathsFor(root).eventsPath, "");
+      } else {
+        const request = {
+          kind: "stop_continuation_requested",
+          workflow_id: initialized.workflow_id,
+          step: initialized.current_step,
+          baseline_receipt_count: initialized.completed_steps.length
+        };
+        await appendRawLifecycleEvent(root, {
+          ...request,
+          timestamp: "2026-09-02T00:00:01.000Z",
+          turn_id: "turn-ambiguous-one"
+        });
+        await appendRawLifecycleEvent(root, {
+          ...request,
+          timestamp: "2026-09-02T00:00:02.000Z",
+          turn_id: "turn-ambiguous-two"
+        });
+      }
+      const result = await runHook("stop", {
+        hook_event_name: "Stop",
+        cwd: root,
+        turn_id: "turn-ledger-invalid",
+        stop_hook_active: false,
+        last_assistant_message: null
+      });
+      assert.deepEqual(result.output, {
+        decision: "block",
+        reason: markerFor(initialized.continuation)
+      });
+      assert.equal((await readState(root)).stop_delivery.requested_turn_id, "turn-ledger-invalid");
+    });
+  }
+});
+
+test("a post-state telemetry fault leaves authoritative delivery replayable after repair", async () => {
+  const root = await makeWorkspace();
+  const initialized = await init(root, "post-state-watcher");
+  const paths = pathsFor(root);
+  const stateBefore = await readFile(paths.statePath);
+  const eventsBefore = await readFile(paths.eventsPath);
+  const receiptsBefore = await receiptSnapshot(root);
+  const replacement = Buffer.from("post-state replacement\n");
+  const swapper = await startStateReplacementEventSwapper(paths, stateBefore, replacement);
+  let result;
+  try {
+    result = await handleStop({
+      turn_id: "turn-post-state-watcher",
+      stop_hook_active: false
+    }, { workspaceRoot: root });
+  } catch (error) {
+    result = { error_code: error?.code ?? "ERROR" };
+  }
+  const stateAfter = await readFile(paths.statePath);
+  const swap = stateAfter.equals(stateBefore) ? null : await swapper.swap;
+  await swapper.stop();
+
+  assert.deepEqual(swap, { type: "swapped" });
+  assert.deepEqual(result, { error_code: "WORKSPACE_PATH_UNSAFE" });
+  const committed = JSON.parse(stateAfter);
+  assert.equal(committed.stop_delivery.requested_turn_id, "turn-post-state-watcher");
+  assert.deepEqual(await receiptSnapshot(root), receiptsBefore);
+  assert.ok((await readFile(swapper.backupPath)).subarray(0, eventsBefore.length).equals(eventsBefore));
+  assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(replacement));
+
+  await unlink(paths.eventsPath);
+  await rename(swapper.backupPath, paths.eventsPath);
+  const replay = await handleStop({
+    turn_id: "turn-post-state-retry",
+    stop_hook_active: false
+  }, { workspaceRoot: root });
+  assert.deepEqual(replay, {
+    decision: "block",
+    reason: markerFor(initialized.continuation)
+  });
+  assert.equal((await readState(root)).stop_delivery.requested_turn_id, "turn-post-state-watcher");
+});
+
+test("Stop rejects unsafe event targets before changing state or receipts", async t => {
+  for (const mode of ["absent", "replaced", "hard-linked"]) {
+    await t.test(mode, async () => {
+      const root = await makeWorkspace();
+      const outside = await makeWorkspace();
+      await init(root, `claim-preflight-${mode}`);
+      const paths = pathsFor(root);
+      const stateBefore = await readFile(paths.statePath);
+      const eventsBefore = await readFile(paths.eventsPath);
+      const receiptsBefore = await receiptSnapshot(root);
+      const replacement = Buffer.from(`replacement-${mode}-before\n`);
+      const originalBackup = `${paths.eventsPath}.${mode}.original`;
+      const outsideEvent = join(outside, `${mode}-events.jsonl`);
+      let callbackCount = 0;
+      const eventNow = () => {
+        callbackCount += 1;
+        if (mode === "absent") {
+          unlinkSync(paths.eventsPath);
+        } else if (mode === "replaced") {
+          renameSync(paths.eventsPath, originalBackup);
+          writeFileSync(paths.eventsPath, replacement);
+        } else {
+          linkSync(paths.eventsPath, outsideEvent);
+        }
+        return new Date("2026-09-02T12:00:00.000Z");
+      };
+
+      await assert.rejects(handleStop({
+        turn_id: `turn-preflight-${mode}`,
+        stop_hook_active: false
+      }, { workspaceRoot: root, eventNow }), error => error?.code === "HOOK_WORKSPACE_UNSAFE");
+      assert.equal(callbackCount, 1);
+      assert.ok(Buffer.from(await readFile(paths.statePath)).equals(stateBefore));
+      assert.deepEqual(await receiptSnapshot(root), receiptsBefore);
+
+      if (mode === "absent") {
+        await assert.rejects(readFile(paths.eventsPath), error => error?.code === "ENOENT");
+      } else if (mode === "replaced") {
+        assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(replacement));
+        assert.ok(Buffer.from(await readFile(originalBackup)).equals(eventsBefore));
+      } else {
+        assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(eventsBefore));
+        assert.ok(Buffer.from(await readFile(outsideEvent)).equals(eventsBefore));
+      }
+    });
+  }
+});
+
+test("Stop rejects a full event ledger before changing state or receipts", async () => {
+  const root = await makeWorkspace();
+  await init(root, "claim-preflight-capacity");
+  const paths = pathsFor(root);
+  const ledgerPrefix = '{"kind":"padding","padding":"';
+  const ledgerSuffix = '"}\n';
+  const fullLedger = Buffer.from(
+    ledgerPrefix + "a".repeat((1024 * 1024) - ledgerPrefix.length - ledgerSuffix.length) + ledgerSuffix
+  );
+  await writeFile(paths.eventsPath, fullLedger);
+  const stateBefore = await readFile(paths.statePath);
+  const receiptsBefore = await receiptSnapshot(root);
+
+  assert.deepEqual(await handleStop({
+    turn_id: "turn-preflight-capacity",
+    stop_hook_active: false
+  }, { workspaceRoot: root }), {});
+  const wireResult = await runHook("stop", {
+    hook_event_name: "Stop",
+    cwd: root,
+    turn_id: "turn-preflight-capacity-wire",
+    stop_hook_active: false,
+    last_assistant_message: null
+  });
+  assert.equal(wireResult.code, 0);
+  assert.equal(wireResult.stdout, "{}\n");
+  assert.deepEqual(wireResult.output, {});
+  assert.doesNotMatch(wireResult.stderr, /EVENT_LOG_LIMIT|event log|1048576/);
+
+  assert.ok(Buffer.from(await readFile(paths.statePath)).equals(stateBefore));
+  assert.deepEqual(await receiptSnapshot(root), receiptsBefore);
+  assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(fullLedger));
+});
+
+test("Stop wire surfaces event integrity failures as one sanitized internal error", async () => {
+  const root = await makeWorkspace();
+  await init(root, "wire-integrity");
+  const event = await fixture("stop-running.json", root);
+  event.turn_id = "turn-wire-integrity";
+  const secret = "secret=/outside/private/event-ledger";
+  const hostileNow = {
+    [Symbol.toPrimitive]() {
+      throw new HarnessError("EVENT_WRITE_INTEGRITY", secret);
+    }
+  };
+  const stdout = new PassThrough();
+  let raw = "";
+  stdout.on("data", chunk => {
+    raw += chunk.toString("utf8");
+  });
+  const priorExitCode = process.exitCode;
+  let code;
+  try {
+    code = await runHookDirect("Stop", handleStop, {
+      stdout,
+      runMain: async (_expectedName, handler) => {
+        const output = await handler(event, { workspaceRoot: root, eventNow: () => hostileNow });
+        stdout.write(`${JSON.stringify(output)}\n`);
+        return 0;
+      }
+    });
+  } finally {
+    process.exitCode = priorExitCode;
+  }
+
+  assert.equal(code, 1);
+  assert.equal(raw, '{"error":{"code":"HOOK_INTERNAL","message":"hook failed safely"}}\n');
+  assert.doesNotMatch(raw, /EVENT_WRITE_INTEGRITY|secret|outside|private|event-ledger/i);
+});
+
+test("an accepted Stop marker can advance through a receipt to the next marked step", async () => {
+  const root = await makeWorkspace();
+  const pluginRoot = await makePluginFixture();
+  let state = await init(root, "full-chain");
+  const firstStop = await runHook("stop", {
+    hook_event_name: "Stop",
+    cwd: root,
+    turn_id: "turn-chain-0",
+    stop_hook_active: false,
+    last_assistant_message: null
+  });
+  assertEmptySuccess(await runHook("user-prompt-submit", {
+    hook_event_name: "UserPromptSubmit",
+    cwd: root,
+    turn_id: "turn-chain-prompt",
+    prompt: firstStop.output.reason
+  }));
+  state = await readState(root);
+  const started = await begin(root, state, "chain-attempt");
+  state = await completeStep({
+    workspaceRoot: root,
+    pluginRoot,
+    step: 1,
+    attemptId: started.attempt.id,
+    summary: "chain step complete",
+    evidence: [{
+      acceptance_id: "state-transition",
+      kind: "check",
+      detail: "fixture state transition verified",
+      ok: true
+    }],
+    now: new Date(Date.parse(started.state.updated_at) + 1).toISOString()
+  });
+  const secondStop = await runHook("stop", {
+    hook_event_name: "Stop",
+    cwd: root,
+    turn_id: "turn-chain-1",
+    stop_hook_active: true,
+    last_assistant_message: "ignored"
+  });
+  assert.equal(secondStop.output.decision, "block");
+  assert.equal(secondStop.output.reason, markerFor(state.continuation));
+  assert.match(secondStop.output.reason, /\"step\":2/);
+});
+
+test("assistant completion prose cannot advance without a receipt and no-progress fails once", async () => {
+  const root = await makeWorkspace();
+  const initialized = await init(root, "prose");
+  const started = await begin(root, initialized, "prose-attempt");
+  const event = {
+    hook_event_name: "Stop",
+    cwd: root,
+    turn_id: "turn-prose-only",
+    stop_hook_active: false,
+    last_assistant_message: "Step 050/50 complete; password=do-not-read"
+  };
+  const first = await runHook("stop", event);
+  assert.equal(first.output.decision, "block");
+  assert.match(first.output.reason, /^\[HARNESS50_CONTINUE /);
+  assert.doesNotMatch(first.stdout, /Step 050|password|do-not-read/);
+  const afterFirst = await readState(root);
+  assert.deepEqual(afterFirst.completed_steps, []);
+  assert.equal(afterFirst.current_attempt.id, started.attempt.id);
+  assert.equal(afterFirst.current_attempt.failure_recorded, true);
+  assert.equal(afterFirst.consecutive_failures, 1);
+
+  const repeated = await runHook("stop", event);
+  assert.deepEqual(repeated.output, first.output);
+  const afterDuplicate = await readState(root);
+  assert.equal(afterDuplicate.consecutive_failures, 1);
+  assert.equal(afterDuplicate.current_attempt.id, started.attempt.id);
+  assert.equal((await events(root)).filter(item =>
+    item.kind === "stop_continuation_requested" && item.turn_id === event.turn_id
+  ).length, 1);
+});
+
+test("concurrent duplicate Stop calls cannot double-fail or emit conflicting markers", async () => {
+  const root = await makeWorkspace();
+  const initialized = await init(root, "concurrent-stop");
+  await begin(root, initialized, "concurrent-attempt");
+  const event = {
+    hook_event_name: "Stop",
+    cwd: root,
+    turn_id: "turn-concurrent",
+    stop_hook_active: true,
+    last_assistant_message: null
+  };
+  const results = await Promise.all(Array.from({ length: 5 }, () => runHook("stop", event)));
+  assert.equal(results.filter(result => result.output.decision === "block").length, 1);
+  assert.equal(new Set(results.filter(result => result.output.reason).map(result => result.output.reason)).size, 1);
+  const state = await readState(root);
+  assert.equal(state.consecutive_failures, 1);
+  assert.equal(state.current_attempt.failure_recorded, true);
+});
+
+test("a reordered prior Stop cannot fail the attempt opened by its accepted marker", async () => {
+  const root = await makeWorkspace();
+  let state = await init(root, "reordered-stop");
+  const oldStop = {
+    hook_event_name: "Stop",
+    cwd: root,
+    turn_id: "turn-old-stop",
+    stop_hook_active: false,
+    last_assistant_message: null
+  };
+  const issued = await runHook("stop", oldStop);
+  assert.equal(issued.output.decision, "block");
+  assertEmptySuccess(await runHook("user-prompt-submit", {
+    hook_event_name: "UserPromptSubmit",
+    cwd: root,
+    turn_id: "turn-generated-prompt",
+    prompt: issued.output.reason
+  }));
+  state = await readState(root);
+  const started = await begin(root, state, "reordered-attempt");
+
+  assertEmptySuccess(await runHook("stop", oldStop));
+  const afterOldStop = await readState(root);
+  assert.equal(afterOldStop.current_attempt.id, started.attempt.id);
+  assert.equal(afterOldStop.current_attempt.failure_recorded, false);
+  assert.equal(afterOldStop.consecutive_failures, 0);
+
+  const current = await runHook("stop", {
+    ...oldStop,
+    turn_id: "turn-current-stop",
+    stop_hook_active: true
+  });
+  assert.equal(current.output.decision, "block");
+  assert.equal((await readState(root)).consecutive_failures, 1);
+});
+
+test("stop_hook_active no-progress retries are bounded by the third durable failure", async () => {
+  const root = await makeWorkspace();
+  let state = await init(root, "bounded");
+  for (let failure = 1; failure <= 3; failure += 1) {
+    const started = await begin(root, state, `bounded-attempt-${failure}`);
+    const stopped = await runHook("stop", {
+      hook_event_name: "Stop",
+      cwd: root,
+      turn_id: `turn-failure-${failure}`,
+      stop_hook_active: true,
+      last_assistant_message: "not completion evidence"
+    });
+    state = await readState(root);
+    assert.equal(state.current_attempt.id, started.attempt.id);
+    assert.equal(state.consecutive_failures, failure);
+    if (failure < 3) {
+      assert.equal(stopped.output.decision, "block");
+      assert.equal(stopped.output.reason, markerFor(state.continuation));
+      assertEmptySuccess(await runHook("user-prompt-submit", {
+        hook_event_name: "UserPromptSubmit",
+        cwd: root,
+        turn_id: `turn-retry-${failure}`,
+        prompt: stopped.output.reason
+      }));
+      state = await readState(root);
+    } else {
+      assertEmptySuccess(stopped);
+      assert.equal(state.status, "blocked");
+      assert.equal(state.blocked_reason, "THREE_CONSECUTIVE_FAILURES");
+      assert.equal(state.continuation, null);
+    }
+  }
+});
+
+test("paused blocked completed corrupt and missing Stop states always release", async () => {
+  const roots = [];
+  const missing = await makeWorkspace();
+  roots.push(missing);
+
+  for (const status of ["paused", "blocked", "completed"]) {
+    const root = await makeWorkspace();
+    const state = await init(root, status);
+    if (status === "completed") {
+      await writeStateAtomic(root, {
+        ...state,
+        status,
+        current_step: null,
+        completed_steps: Array.from({ length: 50 }, (_, index) => index + 1),
+        continuation: null,
+        stop_delivery: null,
+        completed_at: now
+      });
+    } else {
+      await writeStateAtomic(root, {
+        ...state,
+        status,
+        continuation: null,
+        stop_delivery: null,
+        blocked_reason: status === "blocked" ? "TEST_BLOCK" : null
+      });
+    }
+    roots.push(root);
+  }
+
+  const corrupt = await makeWorkspace();
+  await mkdir(pathsFor(corrupt).codexDir, { recursive: true });
+  await writeFile(pathsFor(corrupt).statePath, "{corrupt secret=never-echoed\n");
+  roots.push(corrupt);
+
+  for (const [index, root] of roots.entries()) {
+    assertEmptySuccess(await runHook("stop", {
+      hook_event_name: "Stop",
+      cwd: root,
+      turn_id: `turn-release-${index}`,
+      stop_hook_active: false,
+      last_assistant_message: "Bearer release-secret-123456"
+    }));
+  }
+});
+
+test("hook input is byte-bounded fatal UTF-8 and exactly one event object", async () => {
+  const root = await makeWorkspace();
+  const base = {
+    hook_event_name: "SessionStart",
+    cwd: root,
+    source: "startup"
+  };
+  const invalidInputs = [
+    "{}{}",
+    "[]",
+    "null",
+    Buffer.from([0x7b, 0x22, 0x78, 0x22, 0x3a, 0xff, 0x7d]),
+    Buffer.alloc(1024 * 1024 + 1, 0x20)
+  ];
+  for (const input of invalidInputs) {
+    const result = await runHook("session-start", base, { input });
+    assert.equal(result.code, 1);
+    assert.equal(result.stderr, "");
+    assert.deepEqual(Object.keys(result.output), ["error"]);
+    assert.match(result.output.error.code, /^HOOK_/);
+    assert.doesNotMatch(result.stdout, /node:internal|file:\/\/|\\codex\\|\/codex\//i);
+  }
+});
+
+test("event-specific names fields types cwd turn IDs and booleans fail before mutation", async () => {
+  const root = await makeWorkspace();
+  const state = await init(root, "invalid-events");
+  const other = await makeWorkspace();
+  const cases = [
+    ["session-start", { hook_event_name: "Stop", cwd: root, source: "startup" }, "HOOK_EVENT_INVALID"],
+    ["session-start", { hook_event_name: "SessionStart", cwd: root, source: "launch" }, "HOOK_EVENT_INVALID"],
+    ["session-start", { hook_event_name: "SessionStart", cwd: root, source: "startup", model: 7 }, "HOOK_EVENT_INVALID"],
+    ["session-start", { hook_event_name: "SessionStart", cwd: root, source: "startup", permission_mode: "workspace-write" }, "HOOK_EVENT_INVALID"],
+    ["session-start", { hook_event_name: "SessionStart", cwd: root, source: "startup", unknown_official_field: true }, "HOOK_EVENT_INVALID"],
+    ["session-start", { hook_event_name: "SessionStart", cwd: other, source: "startup" }, "HOOK_WORKSPACE_UNSAFE"],
+    ["session-start", { hook_event_name: "SessionStart", cwd: root, source: "startup", session_id: 7 }, "HOOK_EVENT_INVALID"],
+    ["user-prompt-submit", { hook_event_name: "UserPromptSubmit", cwd: root, turn_id: 7, prompt: "hello" }, "HOOK_EVENT_INVALID"],
+    ["user-prompt-submit", { hook_event_name: "UserPromptSubmit", cwd: root, turn_id: "turn", prompt: 7 }, "HOOK_EVENT_INVALID"],
+    ["stop", { hook_event_name: "Stop", cwd: root, turn_id: "turn", stop_hook_active: "false", last_assistant_message: null }, "HOOK_EVENT_INVALID"],
+    ["stop", { hook_event_name: "Stop", cwd: root, turn_id: "turn", stop_hook_active: false, last_assistant_message: [], extra: true }, "HOOK_EVENT_INVALID"]
+  ];
+  for (const [name, event, expectedCode] of cases) {
+    const result = await runHook(name, event, { cwd: root });
+    assert.equal(result.code, 1);
+    assert.equal(result.output.error.code, expectedCode);
+    assert.equal(
+      result.output.error.message,
+      expectedCode === "HOOK_EVENT_INVALID" ? "hook event rejected" : "hook workspace rejected"
+    );
+    assert.equal(result.stderr, "");
+  }
+  assert.deepEqual(await readState(root), state);
+});
+
+test("physical workspace links are rejected without following workflow state", async () => {
+  const target = await makeWorkspace();
+  await init(target, "physical");
+  const holder = await makeWorkspace();
+  const link = join(holder, "linked-workspace");
+  await makeDirectoryLink(target, link);
+  const result = await runHook("session-start", {
+    hook_event_name: "SessionStart",
+    cwd: link,
+    source: "startup"
+  }, { cwd: link });
+  assert.equal(result.code, 1);
+  assert.equal(result.output.error.code, "HOOK_WORKSPACE_UNSAFE");
+  assert.equal(result.stderr, "");
+});
+
+test("hard-linked state and event control files are rejected before hook access", async () => {
+  for (const field of ["statePath", "eventsPath"]) {
+    const root = await makeWorkspace();
+    await init(root, `hard-link-${field}`);
+    const outside = await makeWorkspace();
+    await link(pathsFor(root)[field], join(outside, `${field}.alias`));
+    const result = await runHook("session-start", {
+      hook_event_name: "SessionStart",
+      cwd: root,
+      source: "startup"
+    });
+    assert.equal(result.code, 1);
+    assert.deepEqual(result.output, {
+      error: { code: "HOOK_WORKSPACE_UNSAFE", message: "hook workspace rejected" }
+    });
+    assert.equal(result.stderr, "");
+  }
+});
+
+test("hook getters cannot redirect locked state or event mutations outside the workspace", async () => {
+  for (const handlerName of ["prompt", "stop"]) {
+    const root = await makeWorkspace();
+    const outside = await makeWorkspace();
+    await init(root, `swap-${handlerName}-inside`);
+    await init(outside, `swap-${handlerName}-outside`);
+    const outsideStateBefore = await readFile(pathsFor(outside).statePath);
+    const outsideEventsBefore = await readFile(pathsFor(outside).eventsPath);
+    let swapped = false;
+    const swapOnce = value => {
+      if (!swapped) {
+        swapped = true;
+        swapCodexDirectory(root, outside);
+      }
+      return value;
+    };
+
+    const operation = handlerName === "prompt"
+      ? handleUserPromptSubmit({
+        turn_id: "turn-swap-prompt",
+        get prompt() { return swapOnce("human prompt must not escape"); }
+      }, { workspaceRoot: root })
+      : handleStop({
+        turn_id: "turn-swap-stop",
+        get stop_hook_active() { return swapOnce(true); }
+      }, { workspaceRoot: root });
+
+    await assert.rejects(operation, error => error?.code === "HOOK_WORKSPACE_UNSAFE");
+    assert.equal(swapped, true);
+    assert.ok(Buffer.from(await readFile(pathsFor(outside).statePath)).equals(outsideStateBefore));
+    assert.ok(Buffer.from(await readFile(pathsFor(outside).eventsPath)).equals(outsideEventsBefore));
+  }
+});
+
+test("hook append callbacks cannot redirect SessionStart PromptSubmit or Stop events outside", async () => {
+  for (const handlerName of ["session", "prompt", "stop"]) {
+    const root = await makeWorkspace();
+    const outside = await makeWorkspace();
+    await init(root, `append-${handlerName}-inside`);
+    await init(outside, `append-${handlerName}-outside`);
+    const outsideStateBefore = await readFile(pathsFor(outside).statePath);
+    const outsideEventsBefore = await readFile(pathsFor(outside).eventsPath);
+    let swapped = false;
+    const eventNow = () => {
+      if (!swapped) {
+        swapped = true;
+        swapCodexDirectory(root, outside);
+      }
+      return new Date("2026-09-02T12:00:00.000Z");
+    };
+
+    let operation;
+    if (handlerName === "session") {
+      operation = handleSessionStart({}, { workspaceRoot: root, eventNow });
+    } else if (handlerName === "prompt") {
+      operation = handleUserPromptSubmit({
+        turn_id: "turn-append-prompt",
+        prompt: "pause safely"
+      }, { workspaceRoot: root, eventNow });
+    } else {
+      operation = handleStop({
+        turn_id: "turn-append-stop",
+        stop_hook_active: false
+      }, { workspaceRoot: root, eventNow });
+    }
+    await operation.catch(() => {});
+
+    assert.equal(swapped, true, handlerName);
+    assert.ok(
+      Buffer.from(await readFile(pathsFor(outside).statePath)).equals(outsideStateBefore),
+      `${handlerName} changed outside state`
+    );
+    assert.ok(
+      Buffer.from(await readFile(pathsFor(outside).eventsPath)).equals(outsideEventsBefore),
+      `${handlerName} changed outside events`
+    );
+  }
+});
+
+test("malformed secret-bearing input and environment values never escape sanitized errors", async () => {
+  const root = await makeWorkspace();
+  const secret = "sk-proj-hook-secret-abcdefghijklmnopqrstuvwxyz";
+  const result = await runHook("stop", {
+    hook_event_name: "Stop",
+    cwd: root,
+    turn_id: "turn-secret",
+    stop_hook_active: false,
+    last_assistant_message: null
+  }, {
+    input: `{\"password\":\"${secret}\"`,
+    env: { PRIVATE_HOOK_TOKEN: secret }
+  });
+  assert.equal(result.code, 1);
+  assert.equal(result.stderr, "");
+  assert.doesNotMatch(result.stdout, /sk-proj|password|PRIVATE_HOOK|node:internal|\.mjs:/i);
+});
+
+test("runHook tolerates an early input-pipe close and bounds a broken output pipe", async () => {
+  const root = await makeWorkspace();
+  const large = Buffer.alloc(1024 * 1024 + 1, 0x61);
+  const oversized = await runHook("session-start", {
+    hook_event_name: "SessionStart",
+    cwd: root,
+    source: "startup"
+  }, { input: large });
+  assert.equal(oversized.code, 1);
+  assert.equal(oversized.output.error.code, "HOOK_INPUT_TOO_LARGE");
+
+  const closed = await runHook("session-start", {
+    hook_event_name: "SessionStart",
+    cwd: root,
+    source: "startup"
+  }, { closeStdout: true });
+  assert.notEqual(closed.code, 0);
+  assert.equal(closed.output, null);
+  assert.doesNotMatch(closed.stderr, /EPIPE|node:internal|\.mjs:|secret/i);
+});
