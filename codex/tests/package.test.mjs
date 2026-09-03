@@ -57,6 +57,29 @@ function documentSection(text, heading) {
   return text.slice(contentStart, next === -1 ? text.length : next);
 }
 
+function forbidAffirmativeDocumentationClaim(errors, text, patterns, label) {
+  const found = instructionClauses(text).some(clause =>
+    !/\b(?:never|not|no|must not|does not|do not|don't|cannot|can't)\b/i.test(clause) &&
+    patterns.every(pattern => pattern.test(clause))
+  );
+  if (found) errors.push(`unsafe documentation claim: ${label}`);
+}
+
+function internalAnchorErrors(text) {
+  const headings = new Set(
+    [...text.matchAll(/^#{1,6}\s+(.+)$/gm)].map(match =>
+      match[1]
+        .trim()
+        .toLocaleLowerCase("en-US")
+        .replace(/[^\p{Letter}\p{Number}\s-]/gu, "")
+        .replace(/\s/g, "-")
+    )
+  );
+  return [...text.matchAll(/\]\(#([^)]+)\)/g)]
+    .map(match => decodeURIComponent(match[1]))
+    .filter(anchor => !headings.has(anchor));
+}
+
 function documentationContractErrors(text) {
   const errors = [];
   const requiredSections = [
@@ -171,10 +194,30 @@ function documentationContractErrors(text) {
   if (/Codex (?:provides|has|supports|uses)[^\n.]*`\/webapp`/i.test(text)) {
     errors.push("Codex slash-command claim found");
   }
-  if (/Codex[^\n.]*auto[- ]?approv/i.test(permissions) &&
-      !/Harness50 never auto-approves commands/.test(permissions)) {
-    errors.push("Codex auto-approval claim found");
-  }
+  forbidAffirmativeDocumentationClaim(
+    errors,
+    text,
+    [/\b(?:Codex|Harness50)\b/i, /\b(?:auto[- ]?approv\w*|automatically approv\w*)\b/i],
+    "Codex command auto-approval"
+  );
+  forbidAffirmativeDocumentationClaim(
+    errors,
+    text,
+    [/\bCodex\b/i, /\b(?:write\w* back|merge\w*)\b/i, /\bClaude\b/i],
+    "Codex write-back or later Claude merge"
+  );
+  forbidAffirmativeDocumentationClaim(
+    errors,
+    text,
+    [/\bhook hashes?\b/i, /\btrust\w*\b/i, /\b(?:automatically|without (?:another )?review)\b/i],
+    "automatic hook-hash trust"
+  );
+  forbidAffirmativeDocumentationClaim(
+    errors,
+    text,
+    [/\bSubmitted command evidence\b/i, /\b(?:execute|run)\w*\b/i, /\bHarness50 runtime\b/i],
+    "runtime executes submitted command evidence"
+  );
   return errors;
 }
 
@@ -904,7 +947,11 @@ test("documentation contract rejects unsafe host, migration, and trust mutations
       "Changed hook hashes require review and manual trust again; never bypass or automate this trust step.",
       "Changed hook hashes are trusted automatically with --dangerously-bypass-hook-trust."
     ),
-    value => `${value}\nRun node C:\\Users\\example\\harness50\\codex\\scripts\\harness-state.mjs --plugin-root C:\\Users\\example\\harness50.\n`
+    value => `${value}\nRun node C:\\Users\\example\\harness50\\codex\\scripts\\harness-state.mjs --plugin-root C:\\Users\\example\\harness50.\n`,
+    value => `${value}\nCodex automatically approves every command.\n`,
+    value => `${value}\nCodex writes back to Claude progress and merges later Claude changes.\n`,
+    value => `${value}\nChanged hook hashes are trusted automatically without another review.\n`,
+    value => `${value}\nSubmitted command evidence is executed by the Harness50 runtime.\n`
   ];
 
   for (const [documentIndex, text] of documents.entries()) {
@@ -918,4 +965,11 @@ test("documentation contract rejects unsafe host, migration, and trust mutations
 test("JavaScript modules are normalized to LF in git attributes", async () => {
   const attributes = await readRepo(".gitattributes");
   assert.match(attributes, /(?:^|\n)\*\.mjs text eol=lf(?:\n|$)/);
+});
+
+test("local Markdown anchors resolve to headings in each guide", async () => {
+  const documents = [await readRepo("README.md"), await readRepo("codex/README.md")];
+  for (const [index, text] of documents.entries()) {
+    assert.deepEqual(internalAnchorErrors(text), [], `document ${index + 1}`);
+  }
 });
