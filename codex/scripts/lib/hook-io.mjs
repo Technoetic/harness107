@@ -68,6 +68,8 @@ const SAFE_HOOK_EVENT_FIELDS = new Set([
   "step",
   "turn_id",
   "status",
+  "tool_name",
+  "rule_id",
   "reason_code",
   "baseline_receipt_count",
   "completed_count",

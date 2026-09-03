@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { renameSync, symlinkSync } from "node:fs";
 import {
   link,
   mkdir,
@@ -45,6 +46,41 @@ function eventFor(command, toolName = "Bash") {
     tool_use_id: "guard-tool-use",
     tool_input: { command }
   };
+}
+
+function swapCodexDirectory(workspaceRoot, outsideRoot) {
+  const original = pathsFor(workspaceRoot).codexDir;
+  renameSync(original, `${original}.before-swap`);
+  symlinkSync(
+    pathsFor(outsideRoot).codexDir,
+    original,
+    process.platform === "win32" ? "junction" : "dir"
+  );
+}
+
+async function assertPreToolUseStorageSwap(command, expected) {
+  const root = await makeWorkspace();
+  const outside = await makeWorkspace();
+  await init(root, "pre-tool-swap-inside");
+  await init(outside, "pre-tool-swap-outside");
+  const outsideStateBefore = await readFile(pathsFor(outside).statePath);
+  const outsideEventsBefore = await readFile(pathsFor(outside).eventsPath);
+  let swapped = false;
+  const output = await handlePreToolUse(eventFor(command), {
+    workspaceRoot: root,
+    eventNow: () => {
+      if (!swapped) {
+        swapped = true;
+        swapCodexDirectory(root, outside);
+      }
+      return new Date("2026-09-02T12:00:00.000Z");
+    }
+  });
+
+  assert.equal(swapped, true);
+  assert.deepEqual(output, expected);
+  assert.ok(Buffer.from(await readFile(pathsFor(outside).statePath)).equals(outsideStateBefore));
+  assert.ok(Buffer.from(await readFile(pathsFor(outside).eventsPath)).equals(outsideEventsBefore));
 }
 
 async function inspect(command, { workspaceRoot, active = true } = {}) {
@@ -1393,6 +1429,14 @@ test("telemetry failure cannot change a deny or defer decision", async () => {
     readStateFn: async () => running,
     appendEventFn: boom
   }), {});
+});
+
+test("PreToolUse keeps a benign defer decision when hook storage is swapped after validation", async () => {
+  await assertPreToolUseStorageSwap("npm test", {});
+});
+
+test("PreToolUse keeps a destructive deny decision when hook storage is swapped after validation", async () => {
+  await assertPreToolUseStorageSwap("rm -rf /", expectedDeny("protected-root"));
 });
 
 test("a real full telemetry ledger leaves wire decisions unchanged", async () => {
