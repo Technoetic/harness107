@@ -1,9 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { makeWorkspace } from '../codex/tests/helpers/workspace.mjs';
 import { verifyOutput } from '../scripts/verify-output.mjs';
+
+test('browser CLI invoked through a directory alias rejects a missing artifact', async () => {
+  const root = await makeWorkspace();
+  const alias = join(root, 'cli');
+  await symlink(fileURLToPath(new URL('../scripts/', import.meta.url)), alias, process.platform === 'win32' ? 'junction' : 'dir');
+  await assert.rejects(promisify(execFile)(process.execPath, [join(alias, 'verify-output.mjs'), '--workspace', root]),
+    error => error.code === 1 && JSON.parse(error.stdout).verdict === 'FAIL');
+});
 
 const document = body => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,"><title>Interactive example</title><style>body{margin:24px;background:#fff;color:#111;font:18px Arial}button{font:inherit;padding:12px}</style></head><body><main><h1>Interactive example</h1>${body}</main></body></html>`;
 async function fixture(body) {

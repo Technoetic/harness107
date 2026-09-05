@@ -416,3 +416,17 @@ test("default CLI requires 50/50 while range validates only its selected porting
   const rangeRun = await runFile(process.execPath, [script, "--range", "1:1"], { cwd: root });
   assert.equal(rangeRun.stdout, "validated 1 indexed step(s)\n");
 });
+
+test("CLI invoked through a directory alias still enforces the full validation gate", async t => {
+  const root = await fixtureRoot(t, { includeCli: true });
+  const alias = join(root, "cli-entry");
+  await symlink(join(root, "codex", "scripts"), alias, process.platform === "win32" ? "junction" : "dir");
+  const script = join(alias, "validate-steps.mjs");
+  const index = await loadFixtureIndex(root);
+  index.steps[49].ported = false;
+  await writeFixtureIndex(root, index);
+  await assert.rejects(() => runFile(process.execPath, [script], { cwd: root }),
+    error => error.code !== 0 && /step050.*ported/i.test(error.stderr));
+  const rangeRun = await runFile(process.execPath, [script, "--range", "1:1"], { cwd: root });
+  assert.equal(rangeRun.stdout, "validated 1 indexed step(s)\n");
+});

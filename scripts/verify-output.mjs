@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { pathToFileURL } from 'node:url';
+import { realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { physicalWorkspace, readSafe, writeSafe, sha256 } from './lib/quality-files.mjs';
 import { validateHtmlBytes } from './lib/html-document.mjs';
 
@@ -65,7 +66,13 @@ export async function verifyOutput(workspaceRoot, { timeoutMs = 60000 } = {}) {
   return report;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  try { return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url)); }
+  catch { return false; }
+}
+
+if (isMainModule()) {
   const args = process.argv.slice(2);
   const offset = args.indexOf('--workspace');
   const root = offset === -1 ? process.cwd() : args[offset + 1];

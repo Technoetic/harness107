@@ -1,7 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { once } from "node:events";
 import { linkSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { link, lstat, mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -12,7 +10,7 @@ import { handleStop } from "../hooks/stop.mjs";
 import { handleUserPromptSubmit } from "../hooks/user-prompt-submit.mjs";
 import { HarnessError } from "../scripts/lib/errors.mjs";
 import { runHookDirect } from "../scripts/lib/hook-io.mjs";
-import { beginStep, completeStep, initWorkflow } from "../scripts/lib/workflow.mjs";
+import { beginStep, completeStep, initWorkflow, processStop } from "../scripts/lib/workflow.mjs";
 import { pathsFor } from "../scripts/lib/paths.mjs";
 import { writeReceiptExclusive } from "../scripts/lib/receipts.mjs";
 import { readState, writeStateAtomic } from "../scripts/lib/state-store.mjs";
@@ -87,87 +85,6 @@ async function writeRawLifecycleEvents(root, lifecycleEvents) {
     pathsFor(root).eventsPath,
     lifecycleEvents.map(event => `${JSON.stringify(event)}\n`).join("")
   );
-}
-
-async function startStateReplacementEventSwapper(paths, stateBefore, replacement) {
-  const backupPath = `${paths.eventsPath}.post-state-original`;
-  const source = String.raw`
-    const { watch } = require("node:fs");
-    const { readFile, rename, writeFile } = require("node:fs/promises");
-    const { basename, dirname } = require("node:path");
-    const [statePath, eventsPath, backupPath, originalState, replacement] = process.argv.slice(1);
-    let finished = false;
-    let reading = false;
-    const watcher = watch(dirname(statePath), async (_eventType, filename) => {
-      if (finished || reading || String(filename) !== basename(statePath)) return;
-      reading = true;
-      try {
-        const current = await readFile(statePath);
-        if (current.toString("base64") === originalState) return;
-        finished = true;
-        watcher.close();
-        await rename(eventsPath, backupPath);
-        await writeFile(eventsPath, Buffer.from(replacement, "base64"));
-        process.send?.({ type: "swapped" });
-      } catch (error) {
-        process.send?.({ type: "error", code: error?.code ?? "ERROR" });
-      } finally {
-        reading = false;
-      }
-    });
-    process.on("message", message => {
-      if (message?.type !== "stop") return;
-      finished = true;
-      watcher.close();
-      process.exit(0);
-    });
-    process.send?.({ type: "ready" });
-  `;
-  const child = spawn(process.execPath, [
-    "-e",
-    source,
-    paths.statePath,
-    paths.eventsPath,
-    backupPath,
-    stateBefore.toString("base64"),
-    replacement.toString("base64")
-  ], {
-    stdio: ["ignore", "ignore", "pipe", "ipc"],
-    windowsHide: true
-  });
-  let resolveReady;
-  let rejectReady;
-  const ready = new Promise((resolve, reject) => {
-    resolveReady = resolve;
-    rejectReady = reject;
-  });
-  let resolveSwap;
-  const swap = new Promise(resolve => {
-    resolveSwap = resolve;
-  });
-  child.on("message", message => {
-    if (message?.type === "ready") resolveReady();
-    if (message?.type === "swapped" || message?.type === "error") resolveSwap(message);
-  });
-  child.once("error", error => {
-    rejectReady(error);
-    resolveSwap({ type: "error", code: error?.code ?? "ERROR" });
-  });
-  child.once("exit", code => {
-    if (code !== 0) rejectReady(new Error(`event swapper exited with ${code}`));
-    resolveSwap(null);
-  });
-  await ready;
-  return {
-    backupPath,
-    swap,
-    async stop() {
-      if (child.exitCode !== null) return;
-      const exited = once(child, "exit");
-      child.send({ type: "stop" });
-      await exited;
-    }
-  };
 }
 
 function markerFor(continuation) {
@@ -1287,30 +1204,37 @@ test("a post-state telemetry fault leaves authoritative delivery replayable afte
   const eventsBefore = await readFile(paths.eventsPath);
   const receiptsBefore = await receiptSnapshot(root);
   const replacement = Buffer.from("post-state replacement\n");
-  const swapper = await startStateReplacementEventSwapper(paths, stateBefore, replacement);
-  let result;
-  try {
-    result = await handleStop({
-      turn_id: "turn-post-state-watcher",
-      stop_hook_active: false
-    }, { workspaceRoot: root });
-  } catch (error) {
-    result = { error_code: error?.code ?? "ERROR" };
-  }
+  const backupPath = `${paths.eventsPath}.post-state-original`;
+  let swapped = false;
+  await assert.rejects(processStop({
+    workspaceRoot: root,
+    turnId: "turn-post-state-watcher",
+    stopHookActive: false,
+    eventBatchOptions: {
+      beforeAppend: async () => {
+        // Run at the existing transaction seam, after durable state publication
+        // and before telemetry append. fs.watch delivery can arrive after Stop
+        // has already returned, particularly on macOS.
+        const committed = JSON.parse(await readFile(paths.statePath, "utf8"));
+        assert.equal(committed.stop_delivery.requested_turn_id, "turn-post-state-watcher");
+        await rename(paths.eventsPath, backupPath);
+        await writeFile(paths.eventsPath, replacement);
+        swapped = true;
+      }
+    }
+  }), error => error.code === "WORKSPACE_PATH_UNSAFE");
   const stateAfter = await readFile(paths.statePath);
-  const swap = stateAfter.equals(stateBefore) ? null : await swapper.swap;
-  await swapper.stop();
 
-  assert.deepEqual(swap, { type: "swapped" });
-  assert.deepEqual(result, { error_code: "WORKSPACE_PATH_UNSAFE" });
+  assert.equal(swapped, true);
+  assert.equal(stateAfter.equals(stateBefore), false);
   const committed = JSON.parse(stateAfter);
   assert.equal(committed.stop_delivery.requested_turn_id, "turn-post-state-watcher");
   assert.deepEqual(await receiptSnapshot(root), receiptsBefore);
-  assert.ok((await readFile(swapper.backupPath)).subarray(0, eventsBefore.length).equals(eventsBefore));
+  assert.ok((await readFile(backupPath)).equals(eventsBefore));
   assert.ok(Buffer.from(await readFile(paths.eventsPath)).equals(replacement));
 
   await unlink(paths.eventsPath);
-  await rename(swapper.backupPath, paths.eventsPath);
+  await rename(backupPath, paths.eventsPath);
   const replay = await handleStop({
     turn_id: "turn-post-state-retry",
     stop_hook_active: false

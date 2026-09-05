@@ -21,6 +21,8 @@ Create `harness50.quality.json` in the generated project. Each command is an exe
 
 The example expects a project-specific test file, type configuration and reviewed local Semgrep rules; it does not install them. Security checks must use meaningful rules. An empty test or `exit 0` does not establish quality. Coverage is calculated from measured covered/total counts for lines, statements, functions and branches, each at least 85%; zero denominators are incomplete. The test command must generate fresh coverage evidence.
 
+Before running tests, the runner removes the configured generated coverage report under `coverage/` so an earlier run cannot satisfy the gate. It captures the replacement immediately after the test command and rejects later changes to it.
+
 Run explicitly with normal host permissions:
 
 ```text
