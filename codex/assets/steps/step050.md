@@ -36,6 +36,10 @@ phase: e2e
 
 ## 실행 역할
 
+Required output: `step_archive/outputs/browser-output.json` (`browser-output-report`).
+Run the explicit browser verifier after the final build. Completion requires its
+passing desktop and mobile results to match the current `dist/index.html` digest.
+
 가능한 경우 콘솔 오류 보정자 역할과 콘솔 오류 독립 검증자 역할을 서로 다른 실행
 주체에 맡긴다. 보정자는 재현된 오류 원인만 수정하며, 독립 검증자는 산출물과
 application source를 수정하지 않는다. 위임 기능을 사용할 수 없으면 현재 실행자가 두
@@ -67,6 +71,18 @@ finding이 하나라도 미해결이면 차단한다. 필수 입력, 필수 증�
 아니다.
 
 ## 최종 build와 완료 순서
+
+플러그인의 `docs/QUALITY.md`에 따라 실제 품질 검사와 브라우저 검사를 실행한다.
+브라우저 의존성은 안내서대로 별도 검증 체크아웃에 준비하며 훅에서 설치하지 않는다.
+
+```text
+node "<plugin-root>/scripts/quality-gate.mjs" --workspace "<project-root>"
+node "<validation-checkout>/scripts/verify-output.mjs" --workspace "<project-root>"
+```
+
+아래 최종 build가 끝난 뒤 위 두 명령을 실행한다. 두 종료 코드가 0이고 보고서가 현재
+dist를 가리켜야 한다. `browser-output-report` 증거를 제출하면 상태 관리자가 두 화면의
+측정 결과와 현재 HTML SHA-256을 검증한다. 실패·누락·오래된 보고서는 완료할 수 없다.
 
 console 검증이 `PASS`인 뒤 project manifest에 선언된 정확한 build 명령을 정상 권한
 흐름으로 실행하고 exit code 0만 성공으로 인정한다. build가 만든 `dist/index.html`은

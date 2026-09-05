@@ -1,6 +1,6 @@
 {
   "name": "harness50",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Web tutorial generator with 50-step deterministic autopilot harness. One prompt triggers step001~050 self-driving execution with hooks, gates, and Trust5 evaluation. Windows + macOS/Linux.",
   "author": {
     "name": "Technoetic"

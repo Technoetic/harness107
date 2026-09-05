@@ -6,9 +6,15 @@ case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) exit 0 ;; esac
 # writes TOPIC.md, resets progress.json, emits a system-reminder forcing step001 entry.
 
 set -u
+RAW="$(cat || true)"
+EVENT_CWD=""
+if command -v python3 >/dev/null 2>&1; then
+  EVENT_CWD="$(printf '%s' "$RAW" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("cwd", "") if isinstance(d,dict) else "")' 2>/dev/null || true)"
+fi
+PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-${EVENT_CWD:-$PWD}}"
 
 PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
+
 STEP_ARCHIVE="$PROJECT_ROOT/step_archive"
 ARCHIVED_DIR="$STEP_ARCHIVE/archived"
 TOPIC_DIR="$STEP_ARCHIVE/TOPIC"
@@ -21,7 +27,6 @@ log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >>"$LOG_FILE" 2>/dev/null || true
 }
 
-RAW="$(cat || true)"
 [ -z "$RAW" ] && exit 0
 
 # extract "prompt" field from stdin JSON without jq dependency: fall back to python3 if present

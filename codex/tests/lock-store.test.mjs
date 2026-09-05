@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { fork, spawn } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
-import { mkdir, open, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, utimes, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,7 +25,7 @@ import {
   withPinnedEventBatch,
   writeStateAtomic
 } from "../scripts/lib/state-store.mjs";
-import { makeWorkspace } from "./helpers/workspace.mjs";
+import { makeDirectoryLink, makeWorkspace } from "./helpers/workspace.mjs";
 
 const childMutatePath = fileURLToPath(new URL("./helpers/child-mutate.mjs", import.meta.url));
 const baseTime = "2026-09-02T00:00:00.000Z";
@@ -241,6 +241,154 @@ test("foreign-host and live-owner locks are never reclaimed", async t => {
       assert.deepEqual(await readLockRecord(lockPath), fixture.record);
     });
   }
+});
+
+test("an aged empty lock left before owner publication is recovered", async () => {
+  const { lockPath } = pathsFor(await makeWorkspace());
+  await mkdir(lockPath, { recursive: true });
+  const old = new Date(Date.now() - 60_000);
+  await utimes(lockPath, old, old);
+  let entered = false;
+  await withRunLock(lockPath, () => { entered = true; }, { waitMs: 0 });
+  assert.equal(entered, true);
+});
+
+test("a fresh empty lock is not reclaimed", async () => {
+  const { lockPath } = pathsFor(await makeWorkspace());
+  await mkdir(lockPath, { recursive: true });
+  await assert.rejects(withRunLock(lockPath, () => assert.fail("entered"), { waitMs: 0 }),
+    error => error.code === "LOCK_TIMEOUT");
+});
+
+test("interrupted reclaim transition becomes recoverable after the orphan interval", async () => {
+  const { lockPath } = pathsFor(await makeWorkspace());
+  await writeLock(lockPath, {
+    pid: await exitedPid(), hostname: hostname(),
+    acquired_at: "2020-01-01T00:00:00.000Z", token: "crash-reclaim"
+  });
+  await assert.rejects(withRunLock(lockPath, () => assert.fail("entered"), {
+    waitMs: 0, afterReclaimTransition: () => { throw new Error("crash after rename"); }
+  }), /crash after rename/);
+  assert.deepEqual(await readdir(lockPath), []);
+  await assert.rejects(withRunLock(lockPath, () => {}, { waitMs: 0 }),
+    error => error.code === "LOCK_TIMEOUT");
+  const old = new Date(Date.now() - 60_000);
+  await utimes(lockPath, old, old);
+  await withRunLock(lockPath, () => {}, { waitMs: 0 });
+});
+
+test("interrupted release with its owner archived leaves a recoverable orphan", async () => {
+  const { lockPath } = pathsFor(await makeWorkspace());
+  await withRunLock(lockPath, () => {}, {
+    beforeRelease: async owner => {
+      await rename(owner.claimPath, `${lockPath}.released-${owner.token}.json`);
+    }
+  });
+  assert.deepEqual(await readdir(lockPath), []);
+  const old = new Date(Date.now() - 60_000);
+  await utimes(lockPath, old, old);
+  await withRunLock(lockPath, () => {}, { waitMs: 0 });
+});
+
+test("a paused initializer cannot replace an owner published by a competitor", async () => {
+  const { lockPath } = pathsFor(await makeWorkspace());
+  const ready = deferred();
+  const resume = deferred();
+  let unpublished = false;
+  const initializer = withRunLock(lockPath, () => assert.fail("initializer stole live lock"), {
+    waitMs: 0,
+    beforePublish: async () => {
+      unpublished = !existsSync(lockPath);
+      ready.resolve();
+      await resume.promise;
+    }
+  });
+  const rejected = assert.rejects(initializer, error => error.code === "LOCK_TIMEOUT");
+  await ready.promise;
+  assert.equal(unpublished, true);
+  await withRunLock(lockPath, async () => {
+    const owner = await readLockRecord(lockPath);
+    resume.resolve();
+    await rejected;
+    assert.deepEqual(await readLockRecord(lockPath), owner);
+  });
+  assert.deepEqual(await readdir(dirname(lockPath)), []);
+});
+
+test("an interrupted initializer leaves no published lock or staging files", async () => {
+  const { lockPath } = pathsFor(await makeWorkspace());
+  await assert.rejects(withRunLock(lockPath, () => assert.fail("entered"), {
+    beforePublish: () => { throw new Error("initialization interrupted"); }
+  }), /initialization interrupted/);
+  assert.deepEqual(await readdir(dirname(lockPath)), []);
+  await withRunLock(lockPath, () => {}, { waitMs: 0 });
+});
+
+test("a killed initializer's private staging directory cannot block the next owner", async () => {
+  const { lockPath } = pathsFor(await makeWorkspace());
+  const actor = spawn(process.execPath, ["--input-type=module", "-e", `
+    const { withRunLock } = await import(process.argv[1]);
+    process.on("message", () => {});
+    await withRunLock(process.argv[2], () => {}, {
+      beforePublish: async () => {
+        process.send({ type: "prepared" });
+        await new Promise(() => {});
+      }
+    });
+  `, new URL("../scripts/lib/lock.mjs", import.meta.url).href, lockPath], {
+    stdio: ["ignore", "ignore", "inherit", "ipc"], windowsHide: true
+  });
+  const exited = once(actor, "exit");
+  try {
+    await nextMessage(actor, message => message?.type === "prepared");
+    actor.kill("SIGKILL");
+    await exited;
+    assert.equal(actor.signalCode, "SIGKILL");
+    assert.equal(existsSync(lockPath), false);
+    const leftovers = await readdir(dirname(lockPath));
+    assert.equal(leftovers.length, 1);
+    assert.match(leftovers[0], /^run\.lock\.initializing-/);
+    await withRunLock(lockPath, () => {}, { waitMs: 0 });
+    assert.deepEqual(await readdir(dirname(lockPath)), leftovers);
+  } finally {
+    if (actor.exitCode === null && actor.signalCode === null) actor.kill("SIGKILL");
+  }
+});
+
+test("a paused orphan reclaimer preserves a fresh successor generation", async () => {
+  const { lockPath } = pathsFor(await makeWorkspace());
+  await mkdir(lockPath, { recursive: true });
+  const old = new Date(Date.now() - 60_000);
+  await utimes(lockPath, old, old);
+  const observed = deferred();
+  const resume = deferred();
+  const reclaimer = withRunLock(lockPath, () => assert.fail("entered successor"), {
+    waitMs: 0,
+    beforeReclaim: async () => { observed.resolve(); await resume.promise; }
+  });
+  const rejected = assert.rejects(reclaimer, error => error.code === "LOCK_TIMEOUT");
+  await observed.promise;
+  await rename(lockPath, `${lockPath}.retired-orphan`);
+  await withRunLock(lockPath, async () => {
+    const owner = await readLockRecord(lockPath);
+    resume.resolve();
+    await rejected;
+    assert.deepEqual(await readLockRecord(lockPath), owner);
+  });
+});
+
+test("orphan reclamation never follows a directory link", async () => {
+  const { lockPath } = pathsFor(await makeWorkspace());
+  const external = await makeWorkspace();
+  await mkdir(dirname(lockPath), { recursive: true });
+  const old = new Date(Date.now() - 60_000);
+  await utimes(external, old, old);
+  await makeDirectoryLink(external, lockPath);
+  await assert.rejects(withRunLock(lockPath, () => assert.fail("entered linked lock"), {
+    waitMs: 0, staleMs: 0
+  }), error => error.code === "LOCK_TIMEOUT");
+  assert.equal(existsSync(lockPath), true);
+  assert.deepEqual(await readdir(external), []);
 });
 
 test("two stale reclaimers cannot remove the successor acquired by the first", async () => {

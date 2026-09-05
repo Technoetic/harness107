@@ -3,7 +3,7 @@
 #
 # 목적: README의 "위험 명령 차단" 주장을 재현 가능한 스위트로 검증한다.
 #   - MUST_BLOCK: destructive-guard.sh가 exit 2로 차단해야 하는 위험 명령
-#   - MUST_ALLOW: 하네스 정상 명령 — auto-approve.sh가 allow를 발급해야 함 (오차단 회귀 방지)
+#   - MUST_DEFER: ordinary shell commands retain host permission checks.
 #   - GATE: progress.json 부재 시 auto-approve가 allow를 발급하지 않아야 함 (전역 자동승인 결함 방지)
 #
 # 사용: bash tests/security-regression.sh
@@ -61,8 +61,8 @@ MUST_BLOCK=(
   'git push --force origin main'
 )
 
-# --- MUST_ALLOW: 하네스 정상 명령 (auto-approve가 allow) ---
-MUST_ALLOW=(
+# --- MUST_DEFER: shell commands must not receive hook approval ---
+MUST_DEFER=(
   'npm run build'
   'npx biome check src/'
   'rm -rf dist'                                       # 산출물 정리는 안전 (루트/홈/와일드카드 아님)
@@ -80,10 +80,10 @@ for c in "${MUST_BLOCK[@]}"; do
   if [ "$rc" -eq 2 ]; then ok; else fail "차단 안 됨 (rc=$rc): $c"; fi
 done
 
-echo "== MUST_ALLOW (auto-approve allow) =="
-for c in "${MUST_ALLOW[@]}"; do
+echo "== MUST_DEFER (auto-approve defer) =="
+for c in "${MUST_DEFER[@]}"; do
   out="$(json_bash "$c" | bash "$AA" 2>/dev/null)"
-  if printf '%s' "$out" | grep -q '"permissionDecision":"allow"'; then ok; else fail "정상 명령이 승인 안 됨: $c"; fi
+  if printf '%s' "$out" | grep -q '"permissionDecision":"allow"'; then fail "Shell command bypassed host permission: $c"; else ok; fi
 done
 
 echo "== MUST_BLOCK: auto-approve는 allow 미발급 =="

@@ -3,6 +3,10 @@ name: step044
 persistence: session
 ---
 
+> 2.2 품질 게이트: 변경 뒤 플러그인 `scripts/quality-gate.mjs`를 `--workspace
+> "<project-root>"`로 실행하고 종료 코드 0 및 현재 소스에 대한 PASS를 확인한다.
+> 설정은 `docs/QUALITY.md`를 따른다. 누락·실패·오래된 증거는 다음 단계로 넘기지 않는다.
+
 # Step 44 - HTML 컴포넌트화
 
 <!-- MOAI-ENRICHED v1 -->
@@ -51,5 +55,4 @@ persistence: session
 ---
 
 이 지침을 완료한 즉시 자동으로 step045.md를 읽고 수행한다. 사용자 확인을 기다리지 않는다.
-
 

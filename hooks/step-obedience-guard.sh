@@ -3,7 +3,13 @@
 case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) exit 0 ;; esac
 # step-obedience-guard.sh — UserPromptSubmit hook (macOS/Linux)
 set -u
-PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
+RAW="$(cat || true)"
+EVENT_CWD=""
+if command -v python3 >/dev/null 2>&1; then
+  EVENT_CWD="$(printf '%s' "$RAW" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("cwd", "") if isinstance(d,dict) else "")' 2>/dev/null || true)"
+fi
+PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-${EVENT_CWD:-$PWD}}"
+
 PROGRESS_FILE="$PROJECT_ROOT/step_archive/progress.json"
 ARCHIVED_DIR="$PROJECT_ROOT/step_archive/archived"
 [ -f "$PROGRESS_FILE" ] || exit 0

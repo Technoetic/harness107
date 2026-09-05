@@ -1,4 +1,4 @@
-# mx-tag-validator.ps1 - @MX 태그 시스템 검증 (PostToolUse: Write/Edit)
+﻿# mx-tag-validator.ps1 - @MX 태그 시스템 검증 (PostToolUse: Write/Edit)
 #
 # MoAI-ADK mx-tag-protocol SoT 준수 (출처: MoAI/.claude/rules/moai/workflow/mx-tag-protocol.md):
 # 정식 4종 태그로 코드 레벨 컨텍스트를 AI에게 전달.
@@ -16,6 +16,16 @@
 
 param()
 
+$harnessRaw = ""
+$harnessEvent = $null
+try {
+    $harnessReader = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8)
+    $harnessRaw = $harnessReader.ReadToEnd()
+    $harnessReader.Close()
+    if ($harnessRaw) { $harnessEvent = $harnessRaw | ConvertFrom-Json -ErrorAction Stop }
+} catch {}
+
+
 $ErrorActionPreference = "Continue"
 $logFile = Join-Path $PSScriptRoot "mx-tag-validator.log"
 function Write-MxLog($msg) {
@@ -26,8 +36,8 @@ function Write-MxLog($msg) {
 # stdin 이벤트 JSON
 $inputJson = $null
 try {
-    $stdinStream = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8)
-    $raw = $stdinStream.ReadToEnd()
+    $stdinStream = [System.IO.StringReader]::new($harnessRaw)
+    $raw = $harnessRaw
     $stdinStream.Close()
     if ($raw) { $inputJson = $raw | ConvertFrom-Json }
 } catch {
@@ -51,7 +61,7 @@ $ext = [System.IO.Path]::GetExtension($filePath).ToLower()
 if ($targetExts -notcontains $ext) { exit 0 }
 
 # Step 015 이후 구현 단계에서만 검증 (이전은 도구 설치/조사 Step)
-$projectRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$projectRoot = if ($env:CLAUDE_PROJECT_DIR) { $env:CLAUDE_PROJECT_DIR } elseif ($harnessEvent.cwd) { [string]$harnessEvent.cwd } else { (Get-Location).Path }
 $progressFile = Join-Path $projectRoot "step_archive\progress.json"
 if (-not (Test-Path $progressFile)) { exit 0 }
 

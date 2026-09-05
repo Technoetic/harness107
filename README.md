@@ -41,27 +41,29 @@
 
 Codex does not provide a `/webapp` slash command. Codex에서 기존 작업을 이어가려면 `$webapp resume`, 자동 이어가기를 멈추려면 `$webapp pause`를 사용합니다.
 
+플러그인 이름이 표시되는 Codex에서는 `$harness50:webapp`, `$harness50:harness50-status`, `$harness50:harness50-reset`을 선택합니다. 짧은 이름과 같은 제어 요청으로 처리됩니다.
+
 ## Codex installation / 설치
 
-### Local checkout (works before publication)
+### Local checkout
 
-이 브랜치처럼 아직 GitHub에 배포되지 않은 Codex 변경은 로컬 체크아웃에서 설치합니다. 아래 명령의 `<path-to-harness50>`에는 이 저장소 루트를 지정합니다.
+개발용 체크아웃을 설치하려면 아래 `<path-to-harness50>`에 저장소 루트를 지정합니다.
 
 ```text
 codex plugin marketplace add <path-to-harness50>
 codex plugin add harness50@harness50
 ```
 
-### GitHub source (only after publication)
+### GitHub source
 
-아래 원격 경로는 이 변경들이 GitHub에 게시된 뒤에만 사용합니다.
+공개 저장소에서 Claude Code와 Codex 어댑터를 함께 설치할 수 있습니다.
 
 ```text
 codex plugin marketplace add Technoetic/harness50
 codex plugin add harness50@harness50
 ```
 
-The current upstream repository must not be assumed to include these Codex changes until they are published. 설치 후에는 새 Codex 세션을 열고 아래 신뢰 게이트를 완료해야 합니다.
+The published repository includes both Claude Code and Codex adapters. 설치 후에는 새 Codex 세션을 열고 아래 신뢰 게이트를 완료해야 합니다.
 
 ## Permissions and continuation / 권한과 이어가기
 
@@ -91,9 +93,17 @@ Local installation stops at this trust gate until the user confirms the review. 
 
 ## Host compatibility / 호스트 호환성
 
-Claude Code behavior remains compatible, and the protected original 16 Claude files are unchanged. 이 문서 아래의 기존 `/webapp`, 자동 승인, 50단계 연속 실행 설명은 Claude Code 어댑터에 해당합니다.
+Claude Code keeps its slash commands; version 2.2 repairs installed hooks and limits automatic approval to eligible project edits and WebSearch. Bash와 WebFetch는 정상 권한 확인을 거칩니다. 완료·일시정지·손상된 진행 상태에서는 자동 승인하지 않습니다.
 
 The full continuation lifecycle requires Codex CLI hooks; other hosts may discover the skills but must not claim continuation-hook support.
+
+## 2.2 실행 신뢰성과 품질 검증
+
+Windows PowerShell 원본 훅 실행, 프로젝트별 중단 상태, Codex 하위 에이전트 분리와 중단된 잠금 복구를 회귀 검사합니다. 두 호스트 모두 Node.js 22 이상이 필요합니다.
+
+Trust5는 폴더 존재에 점수를 주지 않습니다. 실제 테스트·린트·타입·보안 명령의 종료 코드와 85% 이상 커버리지를 확인하며, 없거나 오래된 증거는 미완료로 표시합니다. 최종 HTML은 Chromium의 데스크톱·모바일 화면에서 오류, 접근성, 가로 넘침을 검사합니다. 설정과 실행 명령은 [품질 검증 안내](docs/QUALITY.md)를 참고하세요.
+
+자동 검사는 학습 효과나 디자인 완성도 점수를 대신하지 않습니다. 실제 생성물의 평가는 별도 주제별 실행과 사용자 검증이 필요합니다.
 
 <div align="center">
 
@@ -214,13 +224,12 @@ flowchart TB
 
 </div>
 
-`--dangerously-skip-permissions`의 효과를 **권한 팝업 없이도** 누리되, 위험 명령은 즉시 차단.<br/>
-공식 hooks 스펙 `permissionDecision:"allow"` 메커니즘 위에 **9회차에 걸쳐 누적된 200+ 안전 패턴**을 얹었다.
+활성 작업의 프로젝트 내부 파일 편집과 WebSearch만 제한적으로 자동 승인합니다. 셸 명령과 WebFetch는 호스트의 권한 정책을 따르며, 알려진 위험 명령과 민감 경로는 계속 차단합니다.
 
 > [!IMPORTANT]
-> **auto-approve는 하네스 자율주행이 실제 가동 중일 때만 발화한다.** 프로젝트에 `step_archive/progress.json`이 없으면(= `/webapp` 미트리거, 무관한 일반 세션) 자동승인을 발급하지 않고 정상 권한 흐름으로 떨어뜨린다. 플러그인 설치만으로 모든 세션이 상시 자동승인되는 전역 결함을 차단한다.
+> **auto-approve는 유효한 진행 상태에서만 발화합니다.** 완료 단계가 연속되고 현재 단계가 일치해야 합니다. 파일이 없거나 JSON이 손상됐거나 일시정지·완료 상태라면 정상 권한 흐름을 따릅니다. 경로는 `..`, 버전이 포함된 플러그인 캐시, 디렉터리 링크를 포함해 검사합니다.
 >
-> 아래 표는 **개발 과정의 감사 회차 서사**다. 실제로 **재현 가능한 검증**은 저장소에 커밋된 [`tests/security-regression.sh`](tests/security-regression.sh)로, 위험 명령 18종 차단 + 정상 명령 8종 승인 유지 + 하네스 비활성 게이트를 45개 케이스로 검사한다 (`bash tests/security-regression.sh`, POSIX 대상). 블랙리스트 방식의 본질적 불완전성(셸 동치표현의 무한성)은 여전하며, 이 스위트는 알려진 우회의 회귀만 보장한다.
+> 아래 감사 기록은 이전 버전의 이력입니다. 현재 회귀 검사는 [`tests/security-regression.sh`](tests/security-regression.sh)와 [`codex/tests/claude-security.test.mjs`](codex/tests/claude-security.test.mjs)에서 위험 명령 차단, 일반 셸 명령의 권한 위임, 비활성 상태와 경로 우회를 확인합니다. 경로 검사는 파일시스템 샌드박스를 대신하지 않습니다.
 
 ```mermaid
 flowchart LR
@@ -231,7 +240,7 @@ flowchart LR
     end
 
     subgraph layer2["2️⃣ auto-approve"]
-        AA["하네스 활성 게이트<br/>+ 사전 검증 패턴<br/>경로 정규화 + WSL2 fallback<br/>progress.json 없으면 미발화"]
+        AA["유효한 활성 상태<br/>프로젝트 경로 검사<br/>허용된 파일 편집·WebSearch"]
     end
 
     subgraph layer3["3️⃣ permission-request-guard"]
@@ -240,7 +249,7 @@ flowchart LR
 
     Tool --> DG
     DG -->|safe| AA
-    AA -->|safe + whitelist| PRG
+    AA -->|eligible scoped action| PRG
     PRG -->|safe| Pass(["✅ allow"])
     DG -.위험.-> Block1(["🚫 BLOCK"])
     AA -.위험.-> Block2(["🚫 BLOCK"])
@@ -614,8 +623,8 @@ npx playwright install chromium
 | 5 | **진행 추적이 transcript 정규식 스캔 의존** (H8) | 완료 문구 변형 시 미기록→재개, 예시 인용 시 오집계 위험 | 코드펜스·인용 가드로 오탐 완화. 상태전이가 LLM 산문에 걸리는 구조적 약점은 잔존 |
 | 6 | **step 본문이 참조하는 검증기 다수 미번들** (H5) | tokei/c8/biome/semgrep 등 `*-validator.ps1` 24종 부재 | 부재 시 해당 단계 fail-open(건너뜀). 목록·정책은 [`docs/RETIRED-VALIDATORS.md`](docs/RETIRED-VALIDATORS.md) |
 
-`--dangerously-skip-permissions`와 100% 등가가 아닌 이유: 위 한계 + 화이트리스트 7종만 자동 승인.<br/>
-**다만 harness50 자율주행 목적에는 충분 + 위험 명령은 오히려 더 안전.**
+2.2부터 Bash와 WebFetch는 정상 권한 확인을 거칩니다. 위험 패턴 검사는 추가 방어이며,
+호스트 권한 정책이나 파일시스템 샌드박스를 대체하지 않습니다.
 
 ### 재현 가능한 검증
 

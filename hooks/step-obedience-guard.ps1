@@ -1,4 +1,4 @@
-# step-obedience-guard.ps1 - 매 user prompt마다 미완료 step 리마인더 주입
+﻿# step-obedience-guard.ps1 - 매 user prompt마다 미완료 step 리마인더 주입
 # UserPromptSubmit hook으로 사용.
 # 미완료 step이 있으면 다음 step 경로를 컨텍스트에 주입해 하네스 복귀를 유도한다.
 # 단, 사용자의 명시적 직접 요청은 우선한다 (2026-06-10 A5-07 방향 확정:
@@ -6,8 +6,18 @@
 
 param()
 
+$harnessRaw = ""
+$harnessEvent = $null
+try {
+    $harnessReader = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8)
+    $harnessRaw = $harnessReader.ReadToEnd()
+    $harnessReader.Close()
+    if ($harnessRaw) { $harnessEvent = $harnessRaw | ConvertFrom-Json -ErrorAction Stop }
+} catch {}
+
+
 $ErrorActionPreference = "Continue"
-$projectRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$projectRoot = if ($env:CLAUDE_PROJECT_DIR) { $env:CLAUDE_PROJECT_DIR } elseif ($harnessEvent.cwd) { [string]$harnessEvent.cwd } else { (Get-Location).Path }
 $stepArchive = Join-Path $projectRoot "step_archive"
 $archivedDir = Join-Path $stepArchive "archived"
 $progressFile = Join-Path $stepArchive "progress.json"

@@ -59,6 +59,11 @@ dist metadata·digest·boundary 검사, cycle 방식·대상·0개 결과, advis
 
 ## 독립 검증
 
+플러그인 `docs/QUALITY.md`에 따라 `harness50.quality.json`에 실제 프로젝트 검사 명령을
+설정하고 `node "<plugin-root>/scripts/quality-gate.mjs" --workspace "<project-root>"`를
+정상 권한으로 실행한다. 테스트·린트·타입·보안 명령과 측정 커버리지의 PASS가 필요하다.
+종료 코드가 0이 아니거나 결과가 현재 소스와 일치하지 않으면 완료하지 않는다.
+
 독립 검증자는 manifest의 script와 기록된 command가 정확히 일치하는지, build 뒤 생성된
 dist file인지, HTML boundary와 cycle graph가 전체 대상을 다루는지 다시 확인한다.
 두 gate 중 하나라도 실패한 보고서나 milestone을 완료 증거로 인정하지 않는다.

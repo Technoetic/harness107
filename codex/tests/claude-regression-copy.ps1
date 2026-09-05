@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory = $true)]
     [string]$SourceRoot
 )
@@ -122,47 +122,6 @@ function Assert-ProtectedHashesUnchanged {
     }
 }
 
-function Write-Utf8BomExecutionCopy {
-    param(
-        [Parameter(Mandatory = $true)][string]$SourcePath,
-        [Parameter(Mandatory = $true)][string]$DestinationPath
-    )
-
-    $sourceFull = [System.IO.Path]::GetFullPath($SourcePath)
-    $destinationFull = [System.IO.Path]::GetFullPath($DestinationPath)
-    if ([string]::Equals($sourceFull, $destinationFull, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "EXECUTION_COPY_MUST_BE_DISTINCT: $sourceFull"
-    }
-
-    $sourceItem = Get-Item -LiteralPath $sourceFull -Force -ErrorAction Stop
-    if ($sourceItem.PSIsContainer -or
-        ($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "UNSAFE_EXECUTION_SOURCE: $sourceFull"
-    }
-
-    [byte[]]$sourceBytes = [System.IO.File]::ReadAllBytes($sourceItem.FullName)
-    $hasUtf8Bom = $sourceBytes.Length -ge 3 -and
-        $sourceBytes[0] -eq 0xEF -and
-        $sourceBytes[1] -eq 0xBB -and
-        $sourceBytes[2] -eq 0xBF
-    if ($hasUtf8Bom) {
-        [byte[]]$executionBytes = $sourceBytes.Clone()
-    } else {
-        [byte[]]$executionBytes = New-Object byte[] ($sourceBytes.Length + 3)
-        $executionBytes[0] = 0xEF
-        $executionBytes[1] = 0xBB
-        $executionBytes[2] = 0xBF
-        [System.Array]::Copy($sourceBytes, 0, $executionBytes, 3, $sourceBytes.Length)
-    }
-
-    [System.IO.File]::WriteAllBytes($destinationFull, $executionBytes)
-    $destinationItem = Get-Item -LiteralPath $destinationFull -Force -ErrorAction Stop
-    if ($destinationItem.PSIsContainer -or
-        ($destinationItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "UNSAFE_EXECUTION_COPY: $destinationFull"
-    }
-}
-
 function Copy-DirectoryContents {
     param(
         [Parameter(Mandatory = $true)][string]$From,
@@ -232,34 +191,8 @@ try {
     $stagedHashes = Get-ProtectedHashes -Root $stageRoot
     Assert-ProtectedHashesUnchanged -Before $beforeHashes -After $stagedHashes -ErrorCode "STAGED_COPY_CHANGED"
 
-    $executionCandidate = Join-Path -Path $stageRoot -ChildPath (
-        ".harness50-execution-" + [guid]::NewGuid().ToString("N")
-    )
-    [System.IO.Directory]::CreateDirectory($executionCandidate) | Out-Null
-    $executionRoot = Resolve-StrictChildDirectory -LiteralPath $executionCandidate -Parent $stageRoot
-
-    foreach ($relativePath in $protectedPaths) {
-        if (-not $relativePath.EndsWith(".ps1", [System.StringComparison]::OrdinalIgnoreCase)) {
-            continue
-        }
-
-        $executionSource = Join-RepositoryPath -Root $stageRoot -RelativePath $relativePath
-        $executionDestinationCandidate = Join-RepositoryPath -Root $executionRoot -RelativePath $relativePath
-        $executionDirectoryCandidate = [System.IO.Path]::GetDirectoryName($executionDestinationCandidate)
-        [System.IO.Directory]::CreateDirectory($executionDirectoryCandidate) | Out-Null
-        $executionDirectory = Resolve-StrictChildDirectory -LiteralPath $executionDirectoryCandidate -Parent $executionRoot
-        $executionDestination = Join-Path -Path $executionDirectory -ChildPath (
-            [System.IO.Path]::GetFileName($executionDestinationCandidate)
-        )
-        Assert-StrictTempChild -Child $executionDestination -Parent $executionRoot
-        if (Test-Path -LiteralPath $executionDestination) {
-            throw "EXECUTION_COPY_COLLISION: $relativePath"
-        }
-        Write-Utf8BomExecutionCopy -SourcePath $executionSource -DestinationPath $executionDestination
-    }
-
-    $executionRegression = Join-RepositoryPath -Root $executionRoot -RelativePath "tests/security-regression.ps1"
-    Get-Item -LiteralPath $executionRegression -Force -ErrorAction Stop | Out-Null
+    $executionRoot = $stageRoot
+    $executionRegression = $copiedRegression
 
     try {
         Push-Location -LiteralPath $executionRoot

@@ -1,4 +1,4 @@
-# spec-generator.ps1 - Step별 SPEC-XXX.md 자동 생성 (Stop hook)
+﻿# spec-generator.ps1 - Step별 SPEC-XXX.md 자동 생성 (Stop hook)
 #
 # MoAI-ADK Plan→Run→Sync 벤치마킹: 각 Step 시작 시 SPEC 자동 생성.
 # 주의: 본 구현이 생성하는 SPEC은 MoAI 정식 EARS("When [trigger], [system] shall [response]"
@@ -12,6 +12,16 @@
 
 param()
 
+$harnessRaw = ""
+$harnessEvent = $null
+try {
+    $harnessReader = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8)
+    $harnessRaw = $harnessReader.ReadToEnd()
+    $harnessReader.Close()
+    if ($harnessRaw) { $harnessEvent = $harnessRaw | ConvertFrom-Json -ErrorAction Stop }
+} catch {}
+
+
 $ErrorActionPreference = "Continue"
 $logFile = Join-Path $PSScriptRoot "spec-generator.log"
 function Write-SpecLog($msg) {
@@ -19,7 +29,7 @@ function Write-SpecLog($msg) {
     try { Add-Content -Path $logFile -Value "[$ts] $msg" -Encoding UTF8 } catch {}
 }
 
-$projectRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$projectRoot = if ($env:CLAUDE_PROJECT_DIR) { $env:CLAUDE_PROJECT_DIR } elseif ($harnessEvent.cwd) { [string]$harnessEvent.cwd } else { (Get-Location).Path }
 $progressFile = Join-Path $projectRoot "step_archive\progress.json"
 $specDir = Join-Path $projectRoot "step_archive\specs"
 

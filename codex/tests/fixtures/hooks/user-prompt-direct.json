@@ -6,7 +6,5 @@
   "session_id": "session-user-prompt",
   "transcript_path": "transcripts/user-prompt.jsonl",
   "permission_mode": "acceptEdits",
-  "model": "gpt-5.6-codex",
-  "agent_id": "agent-reviewer-01",
-  "agent_type": "reviewer"
+  "model": "gpt-5.6-codex"
 }

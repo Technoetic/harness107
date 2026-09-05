@@ -9,8 +9,7 @@ import {
   renameSync,
   rmdirSync,
   symlinkSync,
-  unlinkSync,
-  watch
+  unlinkSync
 } from "node:fs";
 import {
   mkdir,
@@ -147,41 +146,52 @@ function callbackEvidence(callback, detail = "callback evidence") {
 }
 
 async function crashChildAfterReceipt({ root, pluginRoot, step, attemptId, summary, evidence, now }) {
-  await mkdir(pathsFor(root).receiptsDir, { recursive: true });
-  let publish;
-  const published = new Promise(resolve => {
-    publish = resolve;
-  });
-  const watcher = watch(pathsFor(root).receiptsDir, (eventType, filename) => {
-    if (filename === `step${String(step).padStart(3, "0")}.json`) publish();
-  });
+  const paths = pathsFor(root);
   const moduleUrl = new URL("../scripts/lib/workflow.mjs", import.meta.url).href;
   const input = { workspaceRoot: root, pluginRoot, step, attemptId, summary, evidence, now };
   const script = `
-    import { completeStep } from ${JSON.stringify(moduleUrl)};
+    import fs from "node:fs/promises";
+    import { existsSync } from "node:fs";
+    import { syncBuiltinESMExports } from "node:module";
+    const statePath = ${JSON.stringify(paths.statePath)};
+    const receiptPath = ${JSON.stringify(receiptPath(root, step))};
+    const rename = fs.rename;
+    fs.rename = async (source, destination) => {
+      if (destination === statePath && existsSync(receiptPath)) {
+        process.send({ type: "before-state-publication" });
+        await new Promise(() => {});
+      }
+      return rename(source, destination);
+    };
+    syncBuiltinESMExports();
+    process.on("message", () => {});
+    const { completeStep } = await import(${JSON.stringify(moduleUrl)});
     await completeStep(${JSON.stringify(input)});
+    throw new Error("completion bypassed the state publication fault point");
   `;
   const child = spawn(process.execPath, ["--input-type=module", "--eval", script], {
-    stdio: ["ignore", "ignore", "ignore"]
+    stdio: ["ignore", "ignore", "inherit", "ipc"], windowsHide: true
   });
   const exited = once(child, "exit");
   let timeout;
   try {
     await Promise.race([
-      published,
+      once(child, "message").then(([message]) => assert.equal(message.type, "before-state-publication")),
+      exited.then(() => { throw new Error("completion exited before the state publication fault point"); }),
       new Promise((resolve, reject) => {
-        timeout = setTimeout(() => reject(new Error("receipt publication timeout")), 5000);
+        timeout = setTimeout(() => reject(new Error("state publication fault point timeout")), 5000);
       })
     ]);
-    child.kill();
+    child.kill("SIGKILL");
     await exited;
-    if (existsSync(pathsFor(root).lockPath)) {
-      await rename(pathsFor(root).lockPath, `${pathsFor(root).lockPath}.crashed-test-lock`);
-    }
+    assert.equal(child.signalCode, "SIGKILL");
+    if (existsSync(paths.lockPath)) await rename(paths.lockPath, `${paths.lockPath}.crashed-test-lock`);
   } finally {
     clearTimeout(timeout);
-    watcher.close();
-    if (child.exitCode === null) child.kill();
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+      await exited;
+    }
   }
   assert.equal(existsSync(receiptPath(root, step)), true);
 }

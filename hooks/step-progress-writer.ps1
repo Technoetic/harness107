@@ -1,7 +1,17 @@
-# step-progress-writer.ps1 - Step 완료 상태 자동 기록 (Stop 훅)
+﻿# step-progress-writer.ps1 - Step 완료 상태 자동 기록 (Stop 훅)
 # 전략: 매 턴 끝에 transcript 전체를 스캔해 모든 "Step NNN 완료" 패턴을 추출.
 # 멱등 동작: 이미 completed_steps에 있으면 스킵. 누락된 과거 완료도 자동 복구.
 param()
+
+$harnessRaw = ""
+$harnessEvent = $null
+try {
+    $harnessReader = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8)
+    $harnessRaw = $harnessReader.ReadToEnd()
+    $harnessReader.Close()
+    if ($harnessRaw) { $harnessEvent = $harnessRaw | ConvertFrom-Json -ErrorAction Stop }
+} catch {}
+
 
 $ErrorActionPreference = "Continue"
 $logFile = Join-Path $PSScriptRoot "step-progress-writer.log"
@@ -10,15 +20,15 @@ function Write-WriterLog($msg) {
     try { Add-Content -Path $logFile -Value "[$ts] $msg" -Encoding UTF8 } catch {}
 }
 Write-WriterLog "=== invoked ==="
-$projectRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$projectRoot = if ($env:CLAUDE_PROJECT_DIR) { $env:CLAUDE_PROJECT_DIR } elseif ($harnessEvent.cwd) { [string]$harnessEvent.cwd } else { (Get-Location).Path }
 $stepArchive = Join-Path $projectRoot "step_archive"
 $progressFile = Join-Path $stepArchive "progress.json"
 
 # stdin 이벤트 JSON — UTF-8 명시 read (PS 5.1 default는 시스템 코드페이지로 한글 mojibake 위험)
 $inputJson = $null
 try {
-    $stdinStream = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8)
-    $raw = $stdinStream.ReadToEnd()
+    $stdinStream = [System.IO.StringReader]::new($harnessRaw)
+    $raw = $harnessRaw
     $stdinStream.Close()
     if ($raw) { $inputJson = $raw | ConvertFrom-Json }
 } catch {

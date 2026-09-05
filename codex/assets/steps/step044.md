@@ -3,6 +3,10 @@ name: step044
 phase: review
 ---
 
+> 2.2 품질 게이트: 변경 뒤 플러그인 `scripts/quality-gate.mjs`를 `--workspace
+> "<project-root>"`로 실행하고 종료 코드 0 및 현재 소스에 대한 PASS를 확인한다.
+> 설정은 `docs/QUALITY.md`를 따른다. 누락·실패·오래된 증거로 마일스톤을 완료하지 않는다.
+
 # Step 44 - HTML 컴포넌트화
 
 ## 목표

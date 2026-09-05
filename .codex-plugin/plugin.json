@@ -1,6 +1,6 @@
 {
   "name": "harness50",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Run the Harness50 web tutorial workflow in Codex with explicit progress receipts and normal Codex permissions.",
   "author": { "name": "Technoetic" },
   "homepage": "https://github.com/Technoetic/harness50",

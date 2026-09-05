@@ -81,10 +81,73 @@ async function materializeRepresentativeFixture(contract, workspaceRoot = null) 
   for (const item of contract.acceptance.filter(value => value.required && value.kind === "artifact")) {
     const path = join(root, ...item.path.split("/"));
     await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, `fixture bytes for ${contract.id}/${item.id}\n`, "utf8");
+    await writeFile(path, item.validator === "html-document"
+      ? '<!doctype html><html lang="en"><head><title>Fixture</title></head><body>Fixture</body></html>'
+      : `fixture bytes for ${contract.id}/${item.id}\n`, "utf8");
+  }
+  for (const item of contract.acceptance.filter(value => value.validator === "browser-output")) {
+    await writeFile(join(root, item.path), JSON.stringify(browserReport(await hashFile(join(root, "dist/index.html")))));
   }
   return { workspaceRoot: root, evidence: evidenceFor(contract) };
 }
+
+function browserReport(digest) {
+  return {
+    schema_version: 1, generated_at: new Date().toISOString(), verdict: "PASS",
+    artifact_path: "dist/index.html", artifact_sha256: digest,
+    viewports: [{ name: "desktop", width: 1440, height: 900 }, { name: "mobile", width: 390, height: 844 }].map(view => ({
+      ...view, pass: true, errors: [], blocked_requests: 0, violations: [],
+      accessibility_incomplete: [], horizontal_overflow: false, visible_text_length: 7,
+      focusable_elements: 0, keyboard_focus: false,
+      screenshot: `step_archive/screenshots/verified-${view.name}.png`
+    }))
+  };
+}
+
+test("Step 50 requires a passing browser report bound to its current HTML", async () => {
+  const contract = await loadStepContract(repoRoot, 50);
+  assert.ok(contract.acceptance.some(item => item.id === "browser-output-report" && item.required && item.validator === "browser-output"));
+  const { workspaceRoot, evidence } = await materializeRepresentativeFixture(contract);
+  const reportPath = join(workspaceRoot, "step_archive/outputs/browser-output.json");
+  const valid = JSON.parse(await readFile(reportPath, "utf8"));
+  for (const mutate of [
+    report => { report.verdict = "FAIL"; },
+    report => { report.viewports[0].pass = false; },
+    report => { report.viewports = []; },
+    report => { report.viewports[1].name = "desktop"; },
+    report => { report.viewports[0].errors = ["pageerror"]; },
+    report => { report.artifact_sha256 = "0".repeat(64); }
+  ]) {
+    const report = structuredClone(valid);
+    mutate(report);
+    await writeFile(reportPath, JSON.stringify(report));
+    await assert.rejects(validateCompletionEvidence({ contract, evidence, workspaceRoot }),
+      error => ["ACCEPTANCE_ARTIFACT_CONTENT", "ACCEPTANCE_ARTIFACT_HASH_MISMATCH"].includes(error.code));
+  }
+  await writeFile(reportPath, JSON.stringify(valid));
+  await assert.rejects(validateCompletionEvidence({ contract, workspaceRoot,
+    evidence: evidence.filter(item => item.acceptance_id !== "browser-output-report")
+  }), error => error.code === "ACCEPTANCE_MISSING");
+  await writeFile(join(workspaceRoot, "dist/index.html"), "<html><body>Changed after browser verification</body></html>");
+  await assert.rejects(validateCompletionEvidence({ contract, evidence, workspaceRoot }),
+    error => ["ACCEPTANCE_ARTIFACT_CONTENT", "ACCEPTANCE_ARTIFACT_HASH_MISMATCH"].includes(error.code));
+});
+
+test("Step 50 browser binding survives evidence reordering and rejects a replaced final build", async () => {
+  const contract = await loadStepContract(repoRoot, 50);
+  for (const reverse of [false, true]) {
+    const fixture = await materializeRepresentativeFixture(contract);
+    const evidence = reverse ? fixture.evidence.toReversed() : fixture.evidence;
+    await validateCompletionEvidence({ contract, evidence, workspaceRoot: fixture.workspaceRoot });
+    await assert.rejects(validateCompletionEvidence({ contract, evidence, workspaceRoot: fixture.workspaceRoot,
+      afterArtifactOpen: async ({ absolutePath }) => {
+        if (absolutePath.endsWith("browser-output.json")) {
+          await writeFile(join(fixture.workspaceRoot, "dist/index.html"), "<html><body>Replaced while binding browser evidence</body></html>");
+        }
+      }
+    }), error => ["ACCEPTANCE_ARTIFACT_CONTENT", "ACCEPTANCE_ARTIFACT_HASH_MISMATCH"].includes(error.code));
+  }
+});
 
 async function beginRepresentativeStep() {
   const root = await makeWorkspace();

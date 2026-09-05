@@ -1,9 +1,19 @@
-# step-progress-loader.ps1 - Step 진행 상태 로드 (SessionStart)
+﻿# step-progress-loader.ps1 - Step 진행 상태 로드 (SessionStart)
 # 새 세션 시작 시 이전 진행 상태를 로드하여 컨텍스트에 주입
 param()
 
+$harnessRaw = ""
+$harnessEvent = $null
+try {
+    $harnessReader = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8)
+    $harnessRaw = $harnessReader.ReadToEnd()
+    $harnessReader.Close()
+    if ($harnessRaw) { $harnessEvent = $harnessRaw | ConvertFrom-Json -ErrorAction Stop }
+} catch {}
+
+
 $ErrorActionPreference = "Continue"
-$projectRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$projectRoot = if ($env:CLAUDE_PROJECT_DIR) { $env:CLAUDE_PROJECT_DIR } elseif ($harnessEvent.cwd) { [string]$harnessEvent.cwd } else { (Get-Location).Path }
 $stepArchive = Join-Path $projectRoot "step_archive"
 $progressFile = Join-Path $stepArchive "progress.json"
 
@@ -14,7 +24,9 @@ function Write-ProgressAtomic($obj) {
     $mutex = New-Object System.Threading.Mutex($false, "Global\step-progress-writer-mutex")
     $acquired = $false
     try { $acquired = $mutex.WaitOne(5000) } catch {}
+    if (-not $acquired) { $mutex.Dispose(); return }
     try {
+        New-Item -ItemType Directory -Path $stepArchive -Force | Out-Null
         $json = $obj | ConvertTo-Json -Depth 32
         if ([string]::IsNullOrWhiteSpace($json) -or $json -eq 'null') { return }
         $tempFile = "$progressFile.tmp.$PID"
@@ -39,7 +51,7 @@ if (-not (Test-Path $progressFile)) {
     Write-Host "Next step: step001"
 
     # F1 guard (2026-06-10): 직전 런의 stall 상태 파일이 남아 있으면 SoT 불일치 경고 후 리셋
-    $staleStates = @(Get-ChildItem -Path $PSScriptRoot -Filter "step-auto-continue*.state" -ErrorAction SilentlyContinue)
+    $staleStates = @(Get-ChildItem -Path $stepArchive -Filter "step-auto-continue*.state" -ErrorAction SilentlyContinue)
     if ($staleStates.Count -gt 0) {
         Write-Host "WARNING: progress.json absent but stale auto-continue state found (previous run remnant). Resetting state files."
         $staleStates | Remove-Item -ErrorAction SilentlyContinue
@@ -92,7 +104,8 @@ if (-not (Test-Path $progressFile)) {
 }
 
 # 기존 progress.json이 있어도 total_steps가 실제 파일 수와 다르면 경고
-$existingProgress = Get-Content $progressFile -Raw -Encoding UTF8 | ConvertFrom-Json
+try { $existingProgress = Get-Content $progressFile -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop } catch { exit 0 }
+if ($null -eq $existingProgress) { exit 0 }
 # stepNNN.md 개수: flat + archived/ 둘 다 스캔 후 파일명 기준 unique (재가동 시 archived/ 이동 대응)
 $stepFiles = @(Get-ChildItem -Path $stepArchive -Filter "step???.md" -ErrorAction SilentlyContinue)
 $archivedDir2 = Join-Path $stepArchive "archived"

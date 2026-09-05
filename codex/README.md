@@ -11,9 +11,11 @@ Harness50의 Codex 어댑터는 원본 Claude Code 절차를 50개의 검증 가
 
 Codex does not provide a `/webapp` slash command. 진행 중인 Codex 워크플로를 이어가려면 `$webapp resume`, 자동 이어가기를 일시 정지하려면 `$webapp pause`를 사용하세요.
 
+플러그인 이름을 포함한 `$harness50:webapp`, `$harness50:harness50-status`, `$harness50:harness50-reset`도 지원합니다. 하위 에이전트의 요청은 부모 워크플로를 일시정지하지 않습니다.
+
 ## Codex installation / 설치
 
-### Local checkout (works before publication)
+### Local checkout
 
 현재 브랜치의 Codex 지원을 확인하려면 저장소를 체크아웃한 뒤 그 루트를 로컬 마켓플레이스로 등록합니다.
 
@@ -22,16 +24,16 @@ codex plugin marketplace add <path-to-harness50>
 codex plugin add harness50@harness50
 ```
 
-### GitHub source (only after publication)
+### GitHub source
 
-이 브랜치의 변경이 원격 저장소에 게시된 뒤에는 다음 경로를 사용할 수 있습니다.
+공개 저장소에서 다음 경로로 설치할 수 있습니다.
 
 ```text
 codex plugin marketplace add Technoetic/harness50
 codex plugin add harness50@harness50
 ```
 
-The current upstream repository must not be assumed to include these Codex changes until they are published. 어느 경로를 사용하든 설치만으로 후크가 신뢰되지는 않습니다.
+The published repository includes both Claude Code and Codex adapters. 어느 경로를 사용하든 설치만으로 후크가 신뢰되지는 않습니다.
 
 ## Permissions and continuation / 권한과 이어가기
 
@@ -63,8 +65,10 @@ The current upstream repository must not be assumed to include these Codex chang
 
 ## Host compatibility / 호스트 호환성
 
-Claude Code behavior remains compatible, and the protected original 16 Claude files are unchanged. Codex 전용 코드는 [`codex/`](./) 아래에 격리되며 Claude의 슬래시 명령·후크 동작은 그대로 유지됩니다.
+Claude Code keeps its slash commands; version 2.2 repairs installed hooks and limits automatic approval to eligible project edits and WebSearch. Codex는 자동 승인하지 않으며 기존 영수증·마이그레이션 규칙을 유지합니다.
 
 The full continuation lifecycle requires Codex CLI hooks; other hosts may discover the skills but must not claim continuation-hook support.
 
 패키지 진입점은 [Codex manifest](../.codex-plugin/plugin.json), 신뢰 검토 대상은 [hook definition](hooks/hooks.json), 실행 절차는 [`skills/`](skills/)에서 확인할 수 있습니다.
+
+최종 HTML의 내용 검증, 실제 명령 종료 코드에 근거한 품질 게이트와 Chromium 검사는 [품질 검증 안내](../docs/QUALITY.md)에 설명합니다. 자동 검사와 별개로 실제 사용자에게 유용한 튜토리얼인지 검토해야 합니다.

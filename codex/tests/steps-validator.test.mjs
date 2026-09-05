@@ -2588,7 +2588,7 @@ const EXPECTED_IMPLEMENTATION_TARGET_SHA256 = Object.freeze({
   step035: "9db05334af746fe8e0f02bac6ba1f9c4fce56855adbad3667ff30a8d1b65e249",
   step036: "309f1fc4c9ab8f7d23eb31b8d37d5648ce35e274154f4e70ffd7213cb4f05c7e",
   step037: "5821c2a72f358aaf2c31694d3db91f63dcdde16313bb0c722218b5206ac31fae",
-  step038: "bb0bb81a91aff6e48d6b1f1597e995a426557aed3d740414af307b24327a6937"
+  step038: "d3e8f82a16eea134b15f1b4bda779fd1136919a0693b8b6da9bb991c46d0f910"
 });
 
 async function assertImplementationTargetDigests(root) {
@@ -2839,7 +2839,7 @@ test("implementation batch declares the exact Codex-native evidence contracts", 
       phase: "implementation",
       source: "assets/steps/step038.md",
       target: "codex/assets/steps/step038.md",
-      source_sha256: "a582363f00adf1a81f0a55471ac5bce95b2819bb4cc096e43cb4decc2118565e",
+      source_sha256: "f250caba0c63b654ecbe011b7591e6dff23cdeb8c83e4e6347dde937a94be8f0",
       inputs: [
         "step_archive/step031_환경준비.md",
         "step_archive/step033_jscpd베이스라인.md",
@@ -2879,7 +2879,7 @@ test("implementation source hashes bind the untouched source steps 031 through 0
     step035: "664d663cc7ed8cbb8605e3c5c5d2653fb139421eb469e81d1f08201fbf284acd",
     step036: "27787a5adeff811a6ce6b1f8c58fe9afc0703139f049e88a705b6e911b2fcec0",
     step037: "dbfc0b0c5f6412dbb13615bb1b7e60140a084ff8eab0254eb67c6c582378b82e",
-    step038: "a582363f00adf1a81f0a55471ac5bce95b2819bb4cc096e43cb4decc2118565e"
+    step038: "f250caba0c63b654ecbe011b7591e6dff23cdeb8c83e4e6347dde937a94be8f0"
   });
 });
 
@@ -3349,7 +3349,7 @@ const EXPECTED_REVIEW_TARGET_SHA256 = Object.freeze({
   step041: "c7062942a31f2ce520dfdcad0634082be2a21500ead63cc402fda1be6240e19d",
   step042: "a94fcec2f5371b57985e37587356aa00a866af34adaaf0c7cd9832812ad74ca0",
   step043: "41e449abf5e854c6328b1b067c7fe3a707aba4b5c9dc46cb56469ad7c6a5a191",
-  step044: "285043f8efa128fd4a03ef9c07201d24de51abf893b5bcf866da8ef19b031f41"
+  step044: "a8cdc25ad2c4b9bc9819e626e85bb8e2e719721bcc4007f91fe8afc30350d974"
 });
 
 async function assertReviewTargetDigests(root) {
@@ -3592,7 +3592,7 @@ const EXPECTED_REVIEW_ROWS = [
     phase: "review",
     source: "assets/steps/step044.md",
     target: "codex/assets/steps/step044.md",
-    source_sha256: "ec05890b361b48d9b75cd7fc10f5aba52ec92655f8b17262e8799194ab37e018",
+    source_sha256: "35c37bcbffd852bfe580cbb617cbe5f2024d939c8256a028fa7bc4ac2c976646",
     inputs: [
       "step_archive/step030_레이아웃설계_chunk1.md",
       "step_archive/step030_전체설계_chunk1.md",
@@ -3649,7 +3649,7 @@ test("review source hashes bind untouched source steps 039 through 044", async (
     step041: "2357510e073c36067abf733cbea223afa0e8cd55415e6d5e5815725d5127432b",
     step042: "7f86d04d8afaf23759534c13826dfc9f172d3e3d477de8da836e6ea1d9f97700",
     step043: "ad1b240aae860a79b69f28521c0fbc195fda7d2d0142cfd2d5e604095dbaab4b",
-    step044: "ec05890b361b48d9b75cd7fc10f5aba52ec92655f8b17262e8799194ab37e018"
+    step044: "35c37bcbffd852bfe580cbb617cbe5f2024d939c8256a028fa7bc4ac2c976646"
   });
 });
 
@@ -4134,6 +4134,7 @@ const EXPECTED_E2E_ACCEPTANCE_DESCRIPTIONS = {
     "console-error-report": "Stores the reachable-state manifest, redacted event findings, bounded settle evidence, rounds, and final verdict.",
     "final-quality-milestone": "Stores the third quality milestone only after console, final build, dist, and independent verification gates pass.",
     "final-dist-index-html": "Requires the final build-produced dist/index.html artifact.",
+    "browser-output-report": "Requires passing desktop and mobile browser measurements bound to the final dist/index.html digest.",
     "console-errors-zero": "Confirms zero page errors, unhandled rejections, console errors, required-request failures, and crashes across every reachable state.",
     "final-build": "Runs the exact non-optional build script declared by the project manifest after console verification passes.",
     "final-dist-html-boundary": "Confirms the final dist/index.html is a regular nonempty file with valid HTML boundaries.",
@@ -4194,7 +4195,8 @@ function projectE2eStep(step) {
       kind: item.kind,
       required: item.required,
       ...(item.path === undefined ? {} : { path: item.path }),
-      ...(item.command_pattern === undefined ? {} : { command_pattern: item.command_pattern })
+      ...(item.command_pattern === undefined ? {} : { command_pattern: item.command_pattern }),
+      ...(item.validator === undefined ? {} : { validator: item.validator })
     })),
     ported: step.ported,
     next: step.next
@@ -4409,7 +4411,7 @@ const EXPECTED_E2E_ROWS = [
     phase: "e2e",
     source: "assets/steps/step050.md",
     target: "codex/assets/steps/step050.md",
-    source_sha256: "ddf3d929b6f586e3a5ac10c1aa7930de8064005556aba186ca6e6d45160f5af9",
+    source_sha256: "1185cf882f926822982cedb9f8fe6e472c0724616ad56607d017844ba0cf5bd7",
     inputs: [
       "step_archive/step038_smoke_test.md",
       "dist/index.html",
@@ -4429,7 +4431,8 @@ const EXPECTED_E2E_ROWS = [
     ],
     outputs: [
       "step_archive/outputs/step050_콘솔에러.md",
-      "step_archive/outputs/trust5_r3.md"
+      "step_archive/outputs/trust5_r3.md",
+      "step_archive/outputs/browser-output.json"
     ],
     requires: ["step038", "step044", "step045", "step046", "step047", "step048", "step049"],
     optional_requires: [],
@@ -4438,7 +4441,8 @@ const EXPECTED_E2E_ROWS = [
     acceptance: [
       { id: "console-error-report", kind: "artifact", required: true, path: "step_archive/outputs/step050_콘솔에러.md" },
       { id: "final-quality-milestone", kind: "artifact", required: true, path: "step_archive/outputs/trust5_r3.md" },
-      { id: "final-dist-index-html", kind: "artifact", required: true, path: "dist/index.html" },
+      { id: "final-dist-index-html", kind: "artifact", required: true, path: "dist/index.html", validator: "html-document" },
+      { id: "browser-output-report", kind: "artifact", required: true, path: "step_archive/outputs/browser-output.json", validator: "browser-output" },
       { id: "console-errors-zero", kind: "check", required: true },
       { id: "final-build", kind: "command", required: true, command_pattern: REVIEW_BUILD_COMMAND_PATTERN },
       { id: "final-dist-html-boundary", kind: "check", required: true },
@@ -4475,7 +4479,7 @@ test("e2e source hashes bind untouched source steps 045 through 050", async () =
     step047: "447c57b41a58bb991a3ed7d589ef96c3dda393264de7b6d358c50a5ab3d64339",
     step048: "31335bf010b806da9ad4faa9a37faa7a40884b309dc43069cea0b397f3b92a78",
     step049: "9e8ea302a121b9ed305bbb4487e652f15990452ee1e2edd343e00ac99ddd67af",
-    step050: "ddf3d929b6f586e3a5ac10c1aa7930de8064005556aba186ca6e6d45160f5af9"
+    step050: "1185cf882f926822982cedb9f8fe6e472c0724616ad56607d017844ba0cf5bd7"
   });
 });
 
@@ -4494,7 +4498,7 @@ const EXPECTED_E2E_TARGET_SHA256 = Object.freeze({
   step047: "91f410ddd5cb05eef476734abdc2f9b1260df0851006ab39e86685244fa52273",
   step048: "eadd652ad35f6c9af3aa07b8a348b12aed4d7c6ff8e31753a6efefd8835ad491",
   step049: "e4ec50a9e4136b5391d1ed217b89f18941da732cc74f3c18690e3a81cb64b4e0",
-  step050: "3c3f2c78049d9b9e36323ed7bd4b3094c0524f039509731c09ca3ae97f4f4a2e"
+  step050: "a537a1f17743a1fa46abea6abf730b93ed2a7e962b267b1f6d678f0303c153b9"
 });
 
 async function assertE2eTargetDigests(root) {

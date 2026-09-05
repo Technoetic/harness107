@@ -1,4 +1,4 @@
-# html-bundler.ps1 — src/ 구조를 단일 dist/index.html로 번들링 (file:// 호환)
+﻿# html-bundler.ps1 — src/ 구조를 단일 dist/index.html로 번들링 (file:// 호환)
 #
 # 역할 (step037/038/081 계약):
 #   - src/index.html 을 베이스로

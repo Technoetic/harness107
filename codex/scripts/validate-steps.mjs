@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { lstat, readFile, readdir } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -224,11 +224,12 @@ function validateStrictAcceptance(entry) {
       fail(`${label} command declaration must contain exactly one command or command_pattern`);
     }
     const expectedKeys = item.kind === "artifact"
-      ? [...ACCEPTANCE_COMMON_KEYS, "path"]
+      ? [...ACCEPTANCE_COMMON_KEYS, "path", ...(Object.hasOwn(item, "validator") ? ["validator"] : [])]
       : item.kind === "command"
         ? [...ACCEPTANCE_COMMON_KEYS, hasCommand ? "command" : "command_pattern"]
         : ACCEPTANCE_COMMON_KEYS;
     exactKeys(item, expectedKeys, `${label} acceptance`);
+    if (Object.hasOwn(item, "validator") && !["html-document", "browser-output"].includes(item.validator)) fail(`${label}.validator is unknown`);
     requireString(item.id, `${label}.id`);
     if (ids.has(item.id)) fail(`${entry.id}.acceptance ids must be unique`);
     ids.add(item.id);
@@ -573,7 +574,16 @@ async function main() {
   process.stdout.write(`validated ${report.steps.length} indexed step(s)\n`);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  try {
+    // Node canonicalizes module URLs, while argv may retain /var on macOS or
+    // a directory junction on Windows. Compare the same physical entrypoint.
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch { return false; }
+}
+
+if (isMainModule()) {
   main().catch((error) => {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 1;

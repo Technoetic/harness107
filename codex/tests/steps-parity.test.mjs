@@ -368,7 +368,7 @@ test("visual set and representative boundary contracts stay repository-executabl
       { number: 30, phase: "planning", network: false, visual_review: false, next: "step031", acceptance_ids: ["design-alternatives", "design-selection", "layout-design-chunk-1", "overall-design-chunk-1", "final-design-verification", "structured-brainstorming-first", "independent-selector", "class-architecture-contract", "async-lifecycle-contract", "responsive-accessibility-contract", "design-chunks-bounded", "pass-verdict"] },
       { number: 38, phase: "implementation", network: false, visual_review: false, next: "step039", acceptance_ids: ["build-smoke-report", "implementation-milestone", "dist-index-html", "project-build-command", "dist-html-boundary", "zero-cycle-gate", "advisory-diagnostics", "pass-only-build-gate"] },
       { number: 45, phase: "e2e", network: true, visual_review: false, next: "step046", acceptance_ids: ["e2e-test-report", "project-e2e-command", "local-playwright-only", "bounded-browser-readiness", "dynamic-scenario-coverage", "edge-case-coverage", "independent-e2e-verifier", "bounded-pass-loop"] },
-      { number: 50, phase: "e2e", network: false, visual_review: false, next: null, acceptance_ids: ["console-error-report", "final-quality-milestone", "final-dist-index-html", "console-errors-zero", "final-build", "final-dist-html-boundary", "reachable-state-manifest", "warning-classification", "bounded-settle-no-fixed-sleep", "secret-redaction", "independent-console-verifier", "receipt-first-completion", "pass-only-final-milestone"] }
+      { number: 50, phase: "e2e", network: false, visual_review: false, next: null, acceptance_ids: ["console-error-report", "final-quality-milestone", "final-dist-index-html", "browser-output-report", "console-errors-zero", "final-build", "final-dist-html-boundary", "reachable-state-manifest", "warning-classification", "bounded-settle-no-fixed-sleep", "secret-redaction", "independent-console-verifier", "receipt-first-completion", "pass-only-final-milestone"] }
     ]
   );
   const step50 = steps[49];
@@ -413,6 +413,20 @@ test("default CLI requires 50/50 while range validates only its selected porting
     () => runFile(process.execPath, [script], { cwd: root }),
     (error) => error.code !== 0 && /step050.*ported/i.test(error.stderr)
   );
+  const rangeRun = await runFile(process.execPath, [script, "--range", "1:1"], { cwd: root });
+  assert.equal(rangeRun.stdout, "validated 1 indexed step(s)\n");
+});
+
+test("CLI invoked through a directory alias still enforces the full validation gate", async t => {
+  const root = await fixtureRoot(t, { includeCli: true });
+  const alias = join(root, "cli-entry");
+  await symlink(join(root, "codex", "scripts"), alias, process.platform === "win32" ? "junction" : "dir");
+  const script = join(alias, "validate-steps.mjs");
+  const index = await loadFixtureIndex(root);
+  index.steps[49].ported = false;
+  await writeFixtureIndex(root, index);
+  await assert.rejects(() => runFile(process.execPath, [script], { cwd: root }),
+    error => error.code !== 0 && /step050.*ported/i.test(error.stderr));
   const rangeRun = await runFile(process.execPath, [script, "--range", "1:1"], { cwd: root });
   assert.equal(rangeRun.stdout, "validated 1 indexed step(s)\n");
 });
