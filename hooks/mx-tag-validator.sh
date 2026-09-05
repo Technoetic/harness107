@@ -3,10 +3,15 @@
 case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) exit 0 ;; esac
 # mx-tag-validator.sh - PostToolUse(Write|Edit) hook (macOS/Linux)
 set -u
+RAW="$(cat || true)"
+EVENT_CWD=""
+if command -v python3 >/dev/null 2>&1; then
+  EVENT_CWD="$(printf '%s' "$RAW" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("cwd", "") if isinstance(d,dict) else "")' 2>/dev/null || true)"
+fi
+PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-${EVENT_CWD:-$PWD}}"
 LOG_FILE="$(dirname "${BASH_SOURCE[0]}")/mx-tag-validator.log"
 log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >>"$LOG_FILE" 2>/dev/null || true; }
 
-RAW="$(cat || true)"
 [ -z "$RAW" ] && exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 
@@ -22,7 +27,7 @@ case "${FP##*.}" in
   *) exit 0 ;;
 esac
 
-PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
+
 PROGRESS_FILE="$PROJECT_ROOT/step_archive/progress.json"
 [ -f "$PROGRESS_FILE" ] || exit 0
 CUR="$(python3 -c "import json;print(int(json.load(open('$PROGRESS_FILE',encoding='utf-8')).get('current_step',1)))" 2>/dev/null || echo 1)"

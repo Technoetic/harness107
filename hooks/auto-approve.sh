@@ -4,7 +4,7 @@ case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) exit 0 ;; esac
 # auto-approve.sh — PreToolUse hook (macOS/Linux)
 #
 # harness50 자율주행을 위한 자동 권한 승인.
-# --dangerously-skip-permissions 와 동등 효과를 hook 차원에서 구현한다.
+# Approval is limited to eligible project edits and WebSearch during an active workflow.
 #
 # 출처 (재검증 2회차):
 #   https://code.claude.com/docs/en/hooks
@@ -18,6 +18,13 @@ case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) exit 0 ;; esac
 
 set -u
 RAW="$(cat 2>/dev/null || true)"
+
+# A missing runtime or failed policy check can never grant approval.
+command -v node >/dev/null 2>&1 || exit 0
+POLICY_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ELIGIBILITY="$(printf '%s' "$RAW" | node "$POLICY_ROOT/lib/approval-policy.mjs" auto 2>/dev/null)" || exit 0
+[ "$ELIGIBILITY" = eligible ] || exit 0
+
 
 TOOL=""
 CMD=""
@@ -40,8 +47,7 @@ esac
 # [보안 수정 — 하네스 활성 게이트] auto-approve는 harness50 자율주행이 실제
 # 가동 중일 때만 발화한다. progress.json이 없으면(무관한 일반 세션) 자동승인을
 # 발급하지 않고 정상 권한 흐름으로 떨어뜨린다 (전역 자동승인 결함 차단).
-PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
-[ -f "$PROJECT_ROOT/step_archive/progress.json" ] || exit 0
+ # Active workflow state is validated by approval-policy.mjs above.
 
 # 8회차 B-7: 코멘트 라인 스킵 헬퍼 (단일 라인 # 코멘트 false-positive 방지).
 # 단일/다중 라인 모두 코멘트가 아닌 비공백 라인만 남긴다.

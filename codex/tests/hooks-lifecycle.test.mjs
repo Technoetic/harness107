@@ -220,8 +220,8 @@ test("documented hook fixtures have distinct event-specific shapes", async () =>
     assert.equal(typeof value.permission_mode, "string");
     assert.equal(typeof value.model, "string");
   }
-  assert.equal(values[4].agent_id, "agent-reviewer-01");
-  assert.equal(values[4].agent_type, "reviewer");
+  assert.equal(values[4].agent_id, undefined);
+  assert.equal(values[4].agent_type, undefined);
   assert.equal(values[4].prompt, "다른 버그를 먼저 고쳐줘");
   assert.equal(values[5].stop_hook_active, false);
 });
@@ -422,8 +422,25 @@ test("a direct user prompt pauses automation without blocking or retaining promp
   assert.doesNotMatch(log, /fix this first|Bearer|prompt-secret|prompt/);
 });
 
+for (const agentType of ["worker", "reviewer", "default", "custom-role"]) {
+test(`${agentType} subagent prompts preserve parent state and lifecycle events`, async () => {
+  const root = await makeWorkspace();
+  await init(root, "parent");
+  const before = await readState(root);
+  const log = await events(root);
+  assertEmptySuccess(await runHook("user-prompt-submit", {
+    hook_event_name: "UserPromptSubmit", cwd: root,
+    session_id: "codex-0.150.1-session", transcript_path: null,
+    permission_mode: "default", model: "gpt-6", turn_id: "worker-turn",
+    agent_id: "worker1", agent_type: agentType, prompt: "Review"
+  }));
+  assert.deepEqual(await readState(root), before);
+  assert.deepEqual(await events(root), log);
+});
+}
+
 test("only exact explicit Harness50 control-skill calls bypass pause", async () => {
-  const accepted = ["$webapp", "$webapp resume", "$webapp build a small dashboard", "$harness50-status", "$harness50-reset"];
+  const accepted = ["$webapp", "$webapp resume", "$webapp build a small dashboard", "$harness50-status", "$harness50-reset", "$harness50:webapp", "$harness50:webapp resume", "$harness50:harness50-status", "$harness50:harness50-reset", "$harness50:status", "$harness50:reset"];
   for (const prompt of accepted) {
     const root = await makeWorkspace();
     await init(root, "control");
@@ -439,6 +456,8 @@ test("only exact explicit Harness50 control-skill calls bypass pause", async () 
   const rejected = [
     "please run $webapp resume",
     "$webappx",
+    "$harness50:webappx",
+    "$harness50:harness50-status now",
     "$harness50-status now",
     "$harness50-reset-now",
     " $webapp resume",

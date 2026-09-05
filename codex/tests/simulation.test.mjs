@@ -338,69 +338,36 @@ test("the platform Claude regression wrapper runs only in an isolated copy", asy
   assert.deepEqual(after, before);
 });
 
-test("the Windows wrapper executes a BOM-normalized copy and preserves the protected staged script", {
+test("the Windows wrapper executes exact shipping bytes without BOM rewriting", {
   skip: process.platform !== "win32"
 }, async () => {
   const fixtureRoot = await makeWorkspace();
   for (const relativePath of protectedClaudePaths) {
     const path = join(fixtureRoot, ...relativePath.split("/"));
     await mkdir(dirname(path), { recursive: true });
-    if (relativePath !== "tests/security-regression.ps1") {
-      const content = relativePath.endsWith(".ps1")
-        ? [
-            '$ErrorActionPreference = "Stop"',
-            "if ([int][char]'한' -ne 0xD55C) { throw \"HOOK_UTF8_DECODE\" }",
-            'Write-Output "HOOK_UTF8_EXECUTION_OK"',
-            ''
-          ].join("\n")
-        : `fixture for ${relativePath}\n`;
-      await writeFile(path, content, "utf8");
-    }
+    await writeFile(path, relativePath.endsWith(".ps1") ? '# ASCII shipping fixture\n' : '{}\n', 'utf8');
   }
-
   const protectedRegression = join(fixtureRoot, "tests", "security-regression.ps1");
   await writeFile(protectedRegression, [
     '$ErrorActionPreference = "Stop"',
-    '$runningPath = [System.IO.Path]::GetFullPath($MyInvocation.MyCommand.Path)',
-    '$executionRoot = [System.IO.Path]::GetFullPath((Split-Path $PSScriptRoot -Parent))',
-    '$stageRoot = [System.IO.Path]::GetFullPath((Split-Path $executionRoot -Parent))',
-    "if ((Split-Path $executionRoot -Leaf) -notmatch '^\\.harness50-execution-[0-9a-f]{32}$') { throw \"EXECUTION_ROOT_NOT_DISTINCT\" }",
-    '$protectedPath = [System.IO.Path]::GetFullPath((Join-Path $stageRoot "tests/security-regression.ps1"))',
-    'if ([string]::Equals($runningPath, $protectedPath, [System.StringComparison]::OrdinalIgnoreCase)) { throw "PROTECTED_SCRIPT_EXECUTED" }',
-    'function Assert-BomCopy($sourcePath, $executionPath) {',
-    '  $executionBytes = [System.IO.File]::ReadAllBytes($executionPath)',
-    '  $sourceBytes = [System.IO.File]::ReadAllBytes($sourcePath)',
-    '  if ($executionBytes.Length -ne ($sourceBytes.Length + 3)) { throw "EXECUTION_COPY_LENGTH" }',
-    '  if ($executionBytes[0] -ne 0xEF -or $executionBytes[1] -ne 0xBB -or $executionBytes[2] -ne 0xBF) { throw "EXECUTION_COPY_BOM" }',
-    '  for ($index = 0; $index -lt $sourceBytes.Length; $index++) {',
-    '    if ($executionBytes[$index + 3] -ne $sourceBytes[$index]) { throw "PROTECTED_COPY_BYTES" }',
-    '  }',
-    '}',
-    'Assert-BomCopy $protectedPath $runningPath',
-    '$protectedHooks = @(Get-ChildItem -LiteralPath (Join-Path $stageRoot "hooks") -Filter "*.ps1" -File)',
-    'foreach ($protectedHook in $protectedHooks) {',
-    '  $executionHook = Join-Path (Join-Path $executionRoot "hooks") $protectedHook.Name',
-    '  Assert-BomCopy $protectedHook.FullName $executionHook',
-    '}',
-    '$hookPath = Join-Path $executionRoot "hooks/destructive-guard.ps1"',
-    '$hookOutput = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $hookPath',
-    'if ($LASTEXITCODE -ne 0 -or ($hookOutput -join "`n") -notmatch "HOOK_UTF8_EXECUTION_OK") { throw "HOOK_EXECUTION_FAILED" }',
-    "if ([int][char]'한' -ne 0xD55C) { throw \"UTF8_DECODE\" }",
-    'Write-Output "UTF8_EXECUTION_COPY_OK"',
+    '$bytes = [System.IO.File]::ReadAllBytes($MyInvocation.MyCommand.Path)',
+    'if ($bytes[0] -eq 0xEF) { throw "UNEXPECTED_BOM_REWRITE" }',
+    '$root = Split-Path $PSScriptRoot -Parent',
+    'if ((Split-Path $root -Leaf) -notlike "harness50-claude-regression-*") { throw "NOT_STAGED" }',
+    '$hook = Join-Path $root "hooks/destructive-guard.ps1"',
+    '$hookBytes = [System.IO.File]::ReadAllBytes($hook)',
+    'if ($hookBytes[0] -eq 0xEF) { throw "HOOK_BOM_REWRITE" }',
+    'Write-Output "EXACT_BYTES_OK"',
     ''
   ].join("\n"), "utf8");
   const before = await readFile(protectedRegression);
-  assert.notDeepEqual([...before.subarray(0, 3)], [0xEF, 0xBB, 0xBF]);
-
   const result = await runProcess("powershell.exe", [
-    "-NoProfile",
-    "-ExecutionPolicy", "Bypass",
+    "-NoProfile", "-ExecutionPolicy", "Bypass",
     "-File", join(repoRoot, "codex", "tests", "claude-regression-copy.ps1"),
     "-SourceRoot", fixtureRoot
   ], powershellChildEnvironment(process.env));
-
   assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
-  assert.match(result.stdout, /UTF8_EXECUTION_COPY_OK/);
+  assert.match(result.stdout, /EXACT_BYTES_OK/);
   assert.match(result.stdout, /CLAUDE_REGRESSION_COPY_OK/);
   assert.deepEqual(await readFile(protectedRegression), before);
 });

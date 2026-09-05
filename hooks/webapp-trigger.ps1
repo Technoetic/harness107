@@ -1,4 +1,4 @@
-# webapp-trigger.ps1 — UserPromptSubmit hook
+﻿# webapp-trigger.ps1 — UserPromptSubmit hook
 # 사용자 prompt가 "웹앱 튜토리얼 생성" 트리거 패턴이면:
 #   1) step_archive/ 부트스트랩 (없으면 생성, step001~050 복사)
 #   2) TOPIC/TOPIC.md 작성 (사용자 prompt 원문 보존)
@@ -6,10 +6,20 @@
 #   4) stdout으로 system-reminder 주입 → step001 즉시 진입 강제
 
 param()
+
+$harnessRaw = ""
+$harnessEvent = $null
+try {
+    $harnessReader = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8)
+    $harnessRaw = $harnessReader.ReadToEnd()
+    $harnessReader.Close()
+    if ($harnessRaw) { $harnessEvent = $harnessRaw | ConvertFrom-Json -ErrorAction Stop }
+} catch {}
+
 $ErrorActionPreference = "Continue"
 
 $pluginRoot  = Split-Path $PSScriptRoot -Parent
-$projectRoot = if ($env:CLAUDE_PROJECT_DIR) { $env:CLAUDE_PROJECT_DIR } else { Get-Location }
+$projectRoot = if ($env:CLAUDE_PROJECT_DIR) { $env:CLAUDE_PROJECT_DIR } elseif ($harnessEvent.cwd) { [string]$harnessEvent.cwd } else { (Get-Location).Path }
 $stepArchive = Join-Path $projectRoot "step_archive"
 $archivedDir = Join-Path $stepArchive "archived"
 $topicDir    = Join-Path $stepArchive "TOPIC"
@@ -26,8 +36,8 @@ function Write-Log($msg) {
 # stdin JSON 수신
 $raw = ""
 try {
-  $r = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8)
-  $raw = $r.ReadToEnd(); $r.Close()
+  $r = [System.IO.StringReader]::new($harnessRaw)
+  $raw = $harnessRaw; $r.Close()
 } catch { Write-Log "stdin read failed: $_"; exit 0 }
 
 if (-not $raw) { exit 0 }

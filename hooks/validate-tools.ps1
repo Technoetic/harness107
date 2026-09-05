@@ -1,4 +1,4 @@
-# validate-tools.ps1 - on-demand wrapper for step003~014 환경 검증
+﻿# validate-tools.ps1 - on-demand wrapper for step003~014 환경 검증
 # 사용: powershell -File hooks/validate-tools.ps1 -Tool <playwright|axe|biome|stylelint|c8|jscpd>
 param([Parameter(Mandatory=$true)][string]$Tool)
 $ErrorActionPreference = "Continue"

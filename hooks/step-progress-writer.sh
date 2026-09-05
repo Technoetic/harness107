@@ -3,7 +3,13 @@
 case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) exit 0 ;; esac
 # step-progress-writer.sh — Stop hook (macOS/Linux)
 set -u
-PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$PWD}"
+RAW="$(cat || true)"
+EVENT_CWD=""
+if command -v python3 >/dev/null 2>&1; then
+  EVENT_CWD="$(printf '%s' "$RAW" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("cwd", "") if isinstance(d,dict) else "")' 2>/dev/null || true)"
+fi
+PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-${EVENT_CWD:-$PWD}}"
+
 STEP_ARCHIVE="$PROJECT_ROOT/step_archive"
 ARCHIVED_DIR="$STEP_ARCHIVE/archived"
 PROGRESS_FILE="$STEP_ARCHIVE/progress.json"
@@ -16,7 +22,6 @@ log "invoked"
 [ -f "$PROGRESS_FILE" ] || exit 0
 command -v python3 >/dev/null 2>&1 || { log "python3 missing"; exit 0; }
 
-RAW="$(cat || true)"
 
 # advisory file lock (best effort)
 exec 9>"$LOCK_FILE" 2>/dev/null || true
@@ -86,14 +91,13 @@ for line in response.split("\n"):
         n=int(mB.group(1))
         if 1<=n<=total: found.add(n)
 
-valid={n for n in found if os.path.exists(os.path.join(a_dir,f"step{n:03d}.md"))}
+valid={n for n in found if (os.path.isfile(os.path.join(a_dir,f"step{n:03d}.md")) or os.path.isfile(os.path.join(os.path.dirname(a_dir),f"step{n:03d}.md")))}
 existing=set(int(x) for x in (progress.get("completed_steps") or []))
 new_ones=sorted(valid - existing)
 if new_ones:
     all_done=sorted(existing | valid)
     progress["completed_steps"]=all_done
-    maxC=max(all_done)
-    progress["current_step"]=maxC+1 if maxC<total else total
+    progress["current_step"]=next((n for n in range(1,total+1) if n not in all_done),total)
     print(f"newly completed: {new_ones}, total {len(all_done)}/{total}")
 
 progress["last_updated"]=datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")

@@ -1,4 +1,4 @@
-# destructive-guard.ps1 - 파괴적 명령 차단
+﻿# destructive-guard.ps1 - 파괴적 명령 차단
 # PreToolUse(Bash) 훅: rm -rf, git push --force, DROP TABLE 등 위험 명령 차단
 param()
 

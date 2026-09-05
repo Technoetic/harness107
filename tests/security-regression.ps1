@@ -1,9 +1,9 @@
-# security-regression.ps1 — harness50 안전 모델 회귀 테스트 (Windows / PowerShell)
+﻿# security-regression.ps1 — harness50 안전 모델 회귀 테스트 (Windows / PowerShell)
 #
 # Windows에서는 .sh 가드가 OS 가드로 no-op되고 .ps1 훅이 실제 실행되므로,
 # 본 스위트가 Windows 대상 검증 SoT다 (POSIX는 security-regression.sh).
 #   - MUST_BLOCK: destructive-guard.ps1이 exit 2로 차단 + auto-approve.ps1이 allow 미발급
-#   - MUST_ALLOW: 하네스 정상 명령 — auto-approve.ps1이 allow 발급 (오차단 회귀 방지)
+#   - MUST_DEFER: ordinary shell commands retain host permission checks.
 #   - GATE: progress.json 부재 시 auto-approve가 allow 미발급 (전역 자동승인 결함 방지)
 #
 # 사용: powershell -NoProfile -ExecutionPolicy Bypass -File tests/security-regression.ps1
@@ -51,7 +51,7 @@ $MUST_BLOCK = @(
   'git push --force origin main'
 )
 
-$MUST_ALLOW = @(
+$MUST_DEFER = @(
   'npm run build'
   'npx biome check src/'
   'rm -rf dist'                                            # 산출물 정리는 안전
@@ -68,10 +68,10 @@ foreach ($c in $MUST_BLOCK) {
   if ($r.rc -eq 2) { Ok } else { Fail "차단 안 됨 (rc=$($r.rc)): $c" }
 }
 
-Write-Host "== MUST_ALLOW (auto-approve.ps1 allow) =="
-foreach ($c in $MUST_ALLOW) {
+Write-Host "== MUST_DEFER (auto-approve.ps1 defer) =="
+foreach ($c in $MUST_DEFER) {
   $r = Invoke-Hook $AA $c
-  if ($r.out -match '"permissionDecision":"allow"') { Ok } else { Fail "정상 명령이 승인 안 됨: $c" }
+  if ($r.out -match '"permissionDecision":"allow"') { Fail "Shell command bypassed host permission: $c" } else { Ok }
 }
 
 Write-Host "== MUST_BLOCK: auto-approve.ps1는 allow 미발급 =="

@@ -6,13 +6,16 @@ import {
   runHookDirect
 } from "../scripts/lib/hook-io.mjs";
 
-const CONTROL_PROMPT = /^(?:\$harness50-status|\$harness50-reset|\$webapp(?: [^\r\n]+)?)$/;
+const CONTROL_PROMPT = /^(?:\$(?:harness50:)?harness50-(?:status|reset)|\$harness50:(?:status|reset)|\$(?:harness50:)?webapp(?: [^\r\n]+)?)$/;
 
 function unsafe(error) {
   return error?.code === "WORKSPACE_PATH_UNSAFE" || error?.code === "HOOK_WORKSPACE_UNSAFE";
 }
 
 export async function handleUserPromptSubmit(event, { workspaceRoot, eventNow } = {}) {
+  // Native Codex omits these fields for the primary agent. Subagent types are
+  // arbitrary role names, not a fixed "worker" enum (rust-v0.150.1 hook_runtime.rs).
+  if (typeof event.agent_id === "string" || typeof event.agent_type === "string") return {};
   const storage = await captureHookStorageGuard(workspaceRoot);
   if (!storage.identities.has(storage.paths.codexDir)) {
     await assertHookStorageGuard(storage);

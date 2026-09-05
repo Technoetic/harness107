@@ -54,6 +54,14 @@ Step 37 구현이 완료된 후, 다음 단계로 진행하기 전 빌드 안전
 
 step_archive/step038_smoke_test.md에 결과를 저장한다.
 
+### 실제 품질 게이트
+
+플러그인의 `docs/QUALITY.md`를 읽고 프로젝트에 `harness50.quality.json`을 구성한다.
+실제 테스트·린트·타입·보안 명령과 커버리지 보고서 경로를 지정하며 성공을 흉내 내는
+명령은 사용하지 않는다. `node "<plugin-root>/scripts/quality-gate.mjs" --workspace
+"<project-root>"`를 정상 권한으로 실행한다. 종료 코드 0과 `quality-gate.json`의 PASS를
+확인해야 이 마일스톤을 완료할 수 있다. 도구 미설치, 검사 실패, 커버리지 미달은 완료가 아니다.
+
 서브에이전트는 항상 haiku를 사용한다.
 
 **이 단계에서 절대로 superpowers:brainstorming을 사용하지 않는다.**
@@ -73,5 +81,4 @@ step_archive/step038_smoke_test.md에 결과를 저장한다.
 ---
 
 이 지침을 완료한 즉시 자동으로 step039.md를 읽고 수행한다. 사용자 확인을 기다리지 않는다.
-
 

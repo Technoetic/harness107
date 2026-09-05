@@ -1,4 +1,4 @@
-# permission-request-guard.ps1 - PermissionRequest hook
+﻿# permission-request-guard.ps1 - PermissionRequest hook
 # 4회차 신규 — 다른 플러그인의 PermissionRequest hook이 hookSpecificOutput.decision.updatedInput
 # 으로 명령을 사후 변조하는 시도를 차단한다.
 #
@@ -25,6 +25,8 @@
 
 param()
 $ErrorActionPreference = "Continue"
+# Preserve event paths and content when piping JSON to the Node policy helper.
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
 $j = $null
 try {
@@ -33,6 +35,15 @@ try {
   $r.Close()
   if ($raw) { $j = $raw | ConvertFrom-Json }
 } catch {}
+
+# Canonical and physical plugin protection supplements the existing deny catalog.
+if (Get-Command node -ErrorAction SilentlyContinue) {
+  $protection = $raw | & node (Join-Path $PSScriptRoot 'lib/approval-policy.mjs') guard 2>$null
+  if ($protection -eq 'protected') {
+    [Console]::Out.Write('{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","reason":"harness50: protected or invalid path"}}}')
+    exit 2
+  }
+}
 
 $toolName = "unknown"
 try { if ($j -and $j.tool_name) { $toolName = $j.tool_name } } catch {}

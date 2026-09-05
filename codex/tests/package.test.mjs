@@ -137,12 +137,12 @@ function documentationContractErrors(text) {
   ]) {
     if (!install.includes(command)) errors.push(`missing Codex install command: ${command}`);
   }
-  if (!install.includes("Local checkout (works before publication)") ||
-      !install.includes("GitHub source (only after publication)")) {
+  if (!install.includes("Local checkout") ||
+      !install.includes("GitHub source")) {
     errors.push("local and post-publication Codex install routes are not separated");
   }
-  if (!install.includes("The current upstream repository must not be assumed to include these Codex changes until they are published.")) {
-    errors.push("unpublished upstream limitation is missing");
+  if (!install.includes("The published repository includes both Claude Code and Codex adapters.")) {
+    errors.push("published adapter availability statement is missing");
   }
 
   const permissions = sections[requiredSections[2]];
@@ -181,7 +181,7 @@ function documentationContractErrors(text) {
   }
 
   const compatibility = sections[requiredSections[5]];
-  if (!compatibility.includes("Claude Code behavior remains compatible, and the protected original 16 Claude files are unchanged.")) {
+  if (!compatibility.includes("Claude Code keeps its slash commands; version 2.2 repairs installed hooks and limits automatic approval to eligible project edits and WebSearch.")) {
     errors.push("Claude compatibility statement is missing");
   }
   if (!compatibility.includes("The full continuation lifecycle requires Codex CLI hooks; other hosts may discover the skills but must not claim continuation-hook support.")) {
@@ -740,7 +740,7 @@ test("Codex manifest isolates Codex skills and hooks", async () => {
     "utf8"
   ));
   assert.equal(manifest.name, "harness50");
-  assert.equal(manifest.version, "2.1.0");
+  assert.equal(manifest.version, "2.2.0");
   assert.equal(manifest.skills, "./codex/skills/");
   assert.equal(manifest.hooks, "./codex/hooks/hooks.json");
   assert.notEqual(manifest.hooks, "./hooks/hooks.json");
@@ -931,15 +931,15 @@ test("Claude, Codex, and marketplace versions are synchronized", async () => {
   const entry = marketplace.plugins.find(plugin => plugin.name === "harness50");
 
   assert.equal(claude.name, "harness50");
-  assert.equal(claude.version, "2.1.0");
+  assert.equal(claude.version, "2.2.0");
   assert.equal(codex.name, "harness50");
-  assert.equal(codex.version, "2.1.0");
+  assert.equal(codex.version, "2.2.0");
   assert.equal(codex.skills, "./codex/skills/");
   assert.equal(codex.hooks, "./codex/hooks/hooks.json");
   assert.equal(marketplace.name, "harness50");
-  assert.equal(marketplace.metadata.version, "2.1.0");
+  assert.equal(marketplace.metadata.version, "2.2.0");
   assert.equal(entry?.source, "./");
-  assert.equal(entry?.version, "2.1.0");
+  assert.equal(entry?.version, "2.2.0");
 
   const marketplaceRoot = new URL(".claude-plugin/marketplace.json", REPO_URL);
   const pluginSource = new URL(entry.source, REPO_URL);

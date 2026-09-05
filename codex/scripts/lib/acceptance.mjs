@@ -10,6 +10,8 @@ import { isAbsolute, join, relative, resolve, sep, win32 } from "node:path";
 
 import { HarnessError } from "./errors.mjs";
 import { sanitizeEvidence } from "./receipts.mjs";
+import { validateHtmlBytes } from "../../../scripts/lib/html-document.mjs";
+import { validateBrowserReportBytes } from "../../../scripts/lib/browser-report.mjs";
 
 const STEP_COUNT = 50;
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -228,11 +230,14 @@ function validateAcceptanceDeclarations(contract) {
     const hasCommand = Object.hasOwn(declaration, "command");
     const hasPattern = Object.hasOwn(declaration, "command_pattern");
     const fields = declaration.kind === "artifact"
-      ? [...ACCEPTANCE_COMMON_KEYS, "path"]
+      ? [...ACCEPTANCE_COMMON_KEYS, "path", ...(Object.hasOwn(declaration, "validator") ? ["validator"] : [])]
       : declaration.kind === "command"
         ? [...ACCEPTANCE_COMMON_KEYS, hasCommand ? "command" : "command_pattern"]
         : ACCEPTANCE_COMMON_KEYS;
     exactFields(declaration, fields, "STEP_CONTRACT_INVALID", "acceptance declaration");
+    if (Object.hasOwn(declaration, "validator") && !["html-document", "browser-output"].includes(declaration.validator)) {
+      fail("STEP_CONTRACT_INVALID", "artifact validator is unknown");
+    }
     if (
       !nonempty(declaration.id) || seen.has(declaration.id) ||
       typeof declaration.required !== "boolean" || !nonempty(declaration.description)
@@ -378,7 +383,7 @@ async function digestHandle(handle) {
   return { digest: hash.digest("hex"), byteCount };
 }
 
-async function hashStableArtifact(workspaceRoot, declaration, suppliedDigest, afterArtifactOpen) {
+async function hashStableArtifact(workspaceRoot, declaration, suppliedDigest, afterArtifactOpen, browserBindings) {
   const { root, snapshot: rootBefore } = await physicalRoot(
     workspaceRoot,
     "ACCEPTANCE_WORKSPACE_UNSAFE"
@@ -410,6 +415,18 @@ async function hashStableArtifact(workspaceRoot, declaration, suppliedDigest, af
     const initialRead = await digestHandle(handle);
     if (initialRead.byteCount !== handleBefore.size) {
       fail("ACCEPTANCE_ARTIFACT_CHANGED", "artifact size changed during initial hashing");
+    }
+    if (declaration.validator === "html-document" || declaration.validator === "browser-output") {
+      try {
+        const limit = declaration.validator === "html-document" ? 8 * 1024 * 1024 : 1024 * 1024;
+        if (handleBefore.size > BigInt(limit)) throw new Error("Artifact exceeds its content validation limit");
+        const content = await handle.readFile();
+        if (createHash("sha256").update(content).digest("hex") !== initialRead.digest) throw new Error("Artifact changed during content validation");
+        if (declaration.validator === "html-document") validateHtmlBytes(content);
+        else browserBindings.set(declaration.id, validateBrowserReportBytes(content));
+      } catch (error) {
+        fail("ACCEPTANCE_ARTIFACT_CONTENT", error.message, { acceptance_id: declaration.id });
+      }
     }
     await afterArtifactOpen?.({ absolutePath, handle });
     const finalRead = await digestHandle(handle);
@@ -539,6 +556,7 @@ export async function validateCompletionEvidence({
   }
 
   const result = [];
+  const browserBindings = new Map();
   for (const item of canonical) {
     if (item.kind === "artifact" && item.ok) {
       const declaration = contract.acceptance.find(value => value.id === item.acceptance_id);
@@ -546,12 +564,24 @@ export async function validateCompletionEvidence({
         workspaceRoot,
         declaration,
         item.artifact_sha256,
-        afterArtifactOpen
+        afterArtifactOpen,
+        browserBindings
       );
       result.push({ ...item, artifact_sha256: digest });
     } else {
       result.push(item);
     }
+  }
+  for (const [acceptanceId, expectedDigest] of browserBindings) {
+    const html = result.find(item => item.kind === "artifact" && item.ok && item.artifact_path === "dist/index.html");
+    if (!html || html.artifact_sha256 !== expectedDigest) {
+      fail("ACCEPTANCE_ARTIFACT_CONTENT", "browser report does not describe the final HTML receipt", { acceptance_id: acceptanceId });
+    }
+    // Bind against the same bytes retained in the receipt, and check again after
+    // all artifact callbacks so a report cannot authorize a replaced final build.
+    await hashStableArtifact(workspaceRoot, {
+      id: acceptanceId, path: "dist/index.html", validator: "html-document"
+    }, expectedDigest);
   }
   return { evidence: result, missing_required: [] };
 }

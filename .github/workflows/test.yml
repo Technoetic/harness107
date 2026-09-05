@@ -10,25 +10,33 @@ permissions:
 
 jobs:
   codex-and-claude-regressions:
-    name: ${{ matrix.os }} / Node 22
+    name: ${{ matrix.os }} / Node ${{ matrix.node }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        node: [22, 24]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Install pinned validation dependencies
+        run: npm ci --ignore-scripts
       - name: Run Codex tests
         run: node --test codex/tests/*.test.mjs
       - name: Run isolated Claude regressions on Windows
         if: runner.os == 'Windows'
         shell: powershell
         run: powershell -NoProfile -ExecutionPolicy Bypass -File codex/tests/claude-regression-copy.ps1 -SourceRoot .
-      - name: Run isolated Claude regressions on Ubuntu
-        if: runner.os == 'Linux'
+      - name: Run installed-byte Claude regressions on POSIX
+        if: runner.os != 'Windows'
         shell: bash
         run: bash codex/tests/claude-regression-copy.sh .
+      - name: Install browser for output regression tests
+        run: npx --no-install playwright install --with-deps chromium
+      - name: Verify working and broken browser fixtures
+        run: npm run test:browser

@@ -15,6 +15,16 @@ case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) exit 0 ;; esac
 set -u
 RAW="$(cat 2>/dev/null || true)"
 
+POLICY_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+if command -v node >/dev/null 2>&1; then
+  PROTECTION="$(printf '%s' "$RAW" | node "$POLICY_ROOT/lib/approval-policy.mjs" guard 2>/dev/null)"
+  if [ "$PROTECTION" = protected ]; then
+    printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"deny","reason":"harness50: protected or invalid path"}}}'
+    exit 2
+  fi
+fi
+
+
 TOOL=""; CMD=""; FPATH=""; URL=""; NS=""
 if [ -n "${RAW:-}" ] && command -v python3 >/dev/null 2>&1; then
   TOOL="$(printf '%s' "$RAW" | python3 -c 'import json,sys

@@ -1,4 +1,4 @@
-# lsp-autofix.ps1 - LSP 기반 자동수정 (PostToolUse: Edit/Write)
+﻿# lsp-autofix.ps1 - LSP 기반 자동수정 (PostToolUse: Edit/Write)
 #
 # MoAI-ADK Ralph Engine (`moai-workflow-loop` 스킬) 부분 모방:
 #   - 정식 Ralph Engine: LSP diagnostics + AST-grep 결합, Level 1~4 자동 분류, 최대 100회 반복
@@ -15,6 +15,16 @@
 
 param()
 
+$harnessRaw = ""
+$harnessEvent = $null
+try {
+    $harnessReader = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8)
+    $harnessRaw = $harnessReader.ReadToEnd()
+    $harnessReader.Close()
+    if ($harnessRaw) { $harnessEvent = $harnessRaw | ConvertFrom-Json -ErrorAction Stop }
+} catch {}
+
+
 $ErrorActionPreference = "Continue"
 $logFile = Join-Path $PSScriptRoot "lsp-autofix.log"
 function Write-LspLog($msg) {
@@ -25,8 +35,8 @@ function Write-LspLog($msg) {
 # stdin
 $inputJson = $null
 try {
-    $stdinStream = [System.IO.StreamReader]::new([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8)
-    $raw = $stdinStream.ReadToEnd()
+    $stdinStream = [System.IO.StringReader]::new($harnessRaw)
+    $raw = $harnessRaw
     $stdinStream.Close()
     if ($raw) { $inputJson = $raw | ConvertFrom-Json }
 } catch {
@@ -57,7 +67,7 @@ $filePath = $filePath -replace '/', '\'
 if ($filePath -notmatch '\\src\\') { exit 0 }
 if ($filePath -match '\\(node_modules|\.git|step_archive|\.claude)\\') { exit 0 }
 
-$projectRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+$projectRoot = if ($env:CLAUDE_PROJECT_DIR) { $env:CLAUDE_PROJECT_DIR } elseif ($harnessEvent.cwd) { [string]$harnessEvent.cwd } else { (Get-Location).Path }
 
 # Biome 자동수정 (JS/TS)
 if ($jsExts -contains $ext) {
